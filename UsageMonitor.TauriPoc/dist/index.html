@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Usage Monitor</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="popover" role="application" aria-label="Usage Monitor">
+    <header class="chrome">
+      <div class="title-row">
+        <button id="metric-menu" class="title-button" aria-label="Choose spend metric"><span id="metric-title">Cost</span><svg class="chevron" viewBox="0 0 12 7" aria-hidden="true"><path d="M1 1.25 6 5.75 11 1.25"></path></svg></button>
+        <button id="info-button" class="icon-button" aria-label="Spend information"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.2"></circle><path d="M10 8.6v5.1M10 5.8h.01"></path></svg></button>
+        <div class="header-actions">
+          <button id="share-button" class="icon-button" aria-label="Copy spend summary"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6.2" y="5.6" width="8.3" height="10.2" rx="1.4"></rect><path d="M4.2 13.6V4.9c0-.8.6-1.4 1.4-1.4h6.6"></path></svg></button>
+          <button id="refresh-button" class="icon-button" aria-label="Refresh now"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8.4A6 6 0 1 0 16.1 13"></path><path d="M16 4.6v4h-4"></path></svg></button>
+        </div>
+      </div>
+      <div id="info-popover" class="hint" hidden>Cost shows billable history. Tokens also includes Antigravity CLI usage.</div>
+      <div id="metric-popover" class="metric-menu" hidden>
+        <button data-metric="cost" class="selected"><span class="menu-check" aria-hidden="true">✓</span><span>Cost</span></button>
+        <button data-metric="cost-mtok"><span class="menu-check" aria-hidden="true"></span><span>Cost/MTok</span></button>
+        <button data-metric="tokens"><span class="menu-check" aria-hidden="true"></span><span>Tokens</span></button>
+      </div>
+    </header>
+
+    <section class="scroll-content" id="content">
+      <section class="spend-card" id="spend-card">
+        <div class="periods" role="tablist" aria-label="Spend period">
+          <button data-period="today">Today</button>
+          <button data-period="yesterday">Yesterday</button>
+          <button data-period="30" class="selected">30 Days</button>
+        </div>
+        <div class="spend-body">
+          <canvas id="spend-ring" width="200" height="200" aria-label="Total local spend"></canvas>
+          <div><div id="spend-legend" class="legend"></div></div>
+        </div>
+      </section>
+
+      <div id="status" class="status" aria-live="polite">Connecting to the local provider service...</div>
+      <section id="providers" class="providers"></section>
+    </section>
+
+    <footer class="footer">
+      <div><strong>Usage Monitor</strong><span id="updated">Waiting for data</span></div>
+      <!-- Two direct buttons instead of an "Options" dropdown: a floating popover here was
+           silently swallowing mouse clicks on its items (keyboard activation worked every time,
+           real mouse clicks - mine and the user's - never did, across several different overlap
+           fixes). Buttons in normal document flow don't have that failure mode. -->
+      <div class="footer-actions">
+        <button data-options="settings" class="footer-icon-button" aria-label="Settings" title="Settings"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.1 2.8h3.8l.5 1.7 1.4.8 1.7-.5 1.9 3.3-1.2 1.3v1.6l1.2 1.3-1.9 3.3-1.7-.5-1.4.8-.5 1.7H8.1l-.5-1.7-1.4-.8-1.7.5-1.9-3.3 1.2-1.3V9.4L2.6 8.1l1.9-3.3 1.7.5 1.4-.8.5-1.7Z"></path><circle cx="10" cy="10" r="2.2"></circle></svg></button>
+        <button data-options="customize" class="footer-icon-button" aria-label="Customize"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h8M14 6h2M4 14h2M8 14h8"></path><circle cx="11" cy="6" r="1.8"></circle><circle cx="6" cy="14" r="1.8"></circle></svg></button>
+      </div>
+    </footer>
+
+    <div class="page-view" id="settings-view">
+      <header class="chrome page-chrome">
+        <button class="icon-button page-back" data-page-back aria-label="Back"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 6.5 10l6 5.5"></path></svg></button>
+        <span class="page-title">Settings</span>
+      </header>
+      <section class="scroll-content">
+        <div class="field-group">
+          <div class="field-label">General</div>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="startAtLogin"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Launch Usage Monitor when I sign in</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="notificationsEnabled"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Enable quota notifications</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="compactDensity"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Use compact dashboard density</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="showTotalSpend"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Show total spend ring</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="useTauriPopup"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Use compact popup</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="taskbarPositionLocked"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Lock taskbar position</span></label>
+          <div class="field-note">Unlock this only when you need to drag the taskbar strip.</div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Usage Display</div>
+          <label class="field-row"><span>Show usage as</span><select data-field="usageDisplay"><option>Used</option><option>Remaining</option></select></label>
+          <label class="field-row"><span>Reset times</span><select data-field="resetTimeDisplay"><option>Countdown</option><option>Exact time</option></select></label>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Notifications</div>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="almostOutAlerts"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Almost out</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="cuttingItCloseAlerts"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Cutting it close</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="willRunOutAlerts"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Will run out</span></label>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Privacy</div>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="hideFromScreenShare"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Hide usage values from screen sharing</span></label>
+          <div class="field-note">Usage values stay local. No anonymous usage or crash uploads are enabled in this build.</div>
+        </div>
+      </section>
+    </div>
+
+    <div class="page-view" id="customize-view">
+      <header class="chrome page-chrome">
+        <button class="icon-button page-back" data-page-back aria-label="Back"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 6.5 10l6 5.5"></path></svg></button>
+        <span class="page-title">Customize</span>
+      </header>
+      <section class="scroll-content">
+        <div class="field-group">
+          <div class="field-label">Providers</div>
+          <div id="customize-providers"></div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Metrics</div>
+          <div class="field-note">Choose which provider metrics appear in the compact summary, taskbar strip, and tray details. Full provider cards keep every available metric.</div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

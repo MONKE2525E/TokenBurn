@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+.idea/
+TestResults/
+*.user
+*.suo
+*.pdb
+*.nupkg
+artifacts/
+publish/
+UsageMonitor.Desktop/app.manifest
+*.local.json
+.build/
+node_modules/
+UsageMonitor.TauriPoc/src-tauri/target/
+upstream-openusage/

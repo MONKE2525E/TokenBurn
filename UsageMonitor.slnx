@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="UsageMonitor.Cli/UsageMonitor.Cli.csproj" />
+  <Project Path="UsageMonitor.Core/UsageMonitor.Core.csproj" />
+  <Project Path="UsageMonitor.Desktop/UsageMonitor.Desktop.csproj" />
+  <Project Path="UsageMonitor.LocalApi/UsageMonitor.LocalApi.csproj" />
+  <Project Path="UsageMonitor.Tests/UsageMonitor.Tests.csproj" />
+</Solution>

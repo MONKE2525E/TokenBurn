@@ -1,0 +1,84 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\UsageMonitor.Core\UsageMonitor.Core.csproj" />
+    <ProjectReference Include="..\UsageMonitor.LocalApi\UsageMonitor.LocalApi.csproj" />
+  </ItemGroup>
+
+  <!-- These are the upstream provider marks, shared with the Tauri popup. The native taskbar
+       strip uses them as monochrome template glyphs, just like OpenUsage's status item. -->
+  <ItemGroup>
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\codex.svg"
+             Link="Assets\ProviderIcons\codex.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\claude.svg"
+             Link="Assets\ProviderIcons\claude.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\antigravity.svg"
+             Link="Assets\ProviderIcons\antigravity.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\cursor.svg"
+             Link="Assets\ProviderIcons\cursor.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\copilot.svg"
+             Link="Assets\ProviderIcons\copilot.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\devin.svg"
+             Link="Assets\ProviderIcons\devin.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\grok.svg"
+             Link="Assets\ProviderIcons\grok.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\opencode.svg"
+             Link="Assets\ProviderIcons\opencode.svg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>UsageMonitor</AssemblyName>
+    <RootNamespace>UsageMonitor.Desktop</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <!-- Keep the hosted Tauri popup beside the WPF shell when a local Tauri build exists. The
+       native taskbar adapter still ships independently and remains the fallback if this file is
+       absent, so an installer can roll the popup forward without losing shell reliability. -->
+  <Target Name="CopyTauriPopup" AfterTargets="Publish">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\usage-monitor-tauri-poc.exe"
+          DestinationFiles="$(PublishDir)UsageMonitor.TauriPoc.exe"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\usage-monitor-tauri-poc.exe')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\usage-monitor-tauri-poc.exe"
+          DestinationFiles="$(PublishDir)UsageMonitor.TauriPoc.exe"
+          SkipUnchangedFiles="true"
+          Condition="!Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\usage-monitor-tauri-poc.exe') And Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\usage-monitor-tauri-poc.exe')" />
+  </Target>
+
+  <!-- Single-file publish does not reliably carry linked Content items into the publish folder.
+       The taskbar renderer loads these SVGs from AppContext.BaseDirectory, so copy them explicitly
+       after publish instead of silently falling back to generic dots. -->
+  <Target Name="CopyProviderIconsToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <ProviderIconFiles Include="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\dist\assets\providers\*.svg" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ProviderIconFiles)"
+          DestinationFolder="$(PublishDir)Assets\ProviderIcons"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

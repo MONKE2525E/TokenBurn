@@ -1,0 +1,187 @@
+<UserControl x:Class="UsageMonitor.Desktop.SpendRingCard"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:UsageMonitor.Desktop"
+             MinHeight="178" MinWidth="320">
+    <UserControl.Resources>
+        <Style x:Key="PillCombo" TargetType="ComboBox">
+            <Setter Property="Background" Value="#2C2C2F"/>
+            <Setter Property="Foreground" Value="#F1F1F3"/>
+            <Setter Property="BorderBrush" Value="#3B3B3F"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="Toggle" Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                          Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="0"
+                                          Padding="{TemplateBinding Padding}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                                        </Border>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                                <Grid>
+                                    <ContentPresenter Content="{TemplateBinding SelectionBoxItem}"
+                                                      ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                      ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                                      Margin="0,0,16,0" VerticalAlignment="Center"
+                                                      TextElement.Foreground="{TemplateBinding Foreground}"/>
+                                    <Path Data="M 0,0 L 4,4 L 8,0" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.4"
+                                          HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                                </Grid>
+                            </ToggleButton>
+                            <Popup x:Name="Popup" AllowsTransparency="True" Focusable="False" Placement="Bottom"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}" PopupAnimation="Fade">
+                                <Border Background="#242426" BorderBrush="#3B3B3F" BorderThickness="1" CornerRadius="10"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                                    <ScrollViewer MaxHeight="220" CanContentScroll="True">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                <Trigger SourceName="Toggle" Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Toggle" Property="Background" Value="#38383C"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Toggle" Property="Opacity" Value="0.55"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="PillComboItem" TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#242426"/>
+            <Setter Property="Foreground" Value="#F1F1F3"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#38383C"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#454549"/>
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="PeriodSegmentButton" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Segment" Background="{TemplateBinding Background}" CornerRadius="16" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Segment" Property="Background" Value="#38383C"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Segment" Property="Background" Value="#323236"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <DataTemplate x:Key="LegendTemplate">
+            <Grid Margin="0,5,0,5">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="12"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Ellipse Width="9" Height="9" Fill="{Binding Color}" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="14" FontWeight="SemiBold" Margin="8,0,12,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Grid.Column="2" Text="{Binding ValueLabel}" FontSize="14" Foreground="{StaticResource TextSecondaryBrush}" HorizontalAlignment="Right"/>
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+    <Border Background="{StaticResource PanelBrush}"
+            BorderBrush="{StaticResource PanelStrokeBrush}"
+            BorderThickness="1" CornerRadius="16" Padding="14,12">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <!-- The SwiftUI card keeps its metric title and share affordance in the dashboard
+                 header. WPF renders those in MainWindow too, so do not duplicate a second
+                 "Spend / local history" title inside this nested card. The hidden selectors remain
+                 in place because SpendRingCard still owns the period/metric model. -->
+            <Grid Grid.Row="0" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="Spend" FontSize="13" FontWeight="SemiBold"/>
+                    <TextBlock Text=" / local history" FontSize="12" Foreground="{StaticResource TextMutedBrush}"/>
+                    <Border x:Name="EstimateNotice" Visibility="Collapsed" Background="#3A301B" CornerRadius="6" Padding="6,2" Margin="9,0,0,0">
+                        <TextBlock Text="ESTIMATED · NOT A BILL" FontSize="8" FontWeight="SemiBold" Foreground="#F4BE59"/>
+                    </Border>
+                    <TextBlock x:Name="MetricLabel" Text="Cost" FontSize="1" Visibility="Collapsed"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="ShareButton" ToolTip="Copy spend screenshot" Width="28" Height="28" Padding="0" Margin="0,0,7,0" Click="ShareButton_OnClick" Background="Transparent" BorderBrush="Transparent" Foreground="{StaticResource TextSecondaryBrush}" AutomationProperties.Name="Copy spend screenshot">
+                        <!-- Two overlapping sheets keep this copy affordance legible at 100% and 200% DPI. -->
+                        <Path Data="M 6,4 H 14 V 14 H 6 Z M 10,8 H 18 V 18 H 10 Z" Width="16" Height="16" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" StrokeThickness="1.45" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Fill="Transparent"/>
+                    </Button>
+                    <ComboBox x:Name="PeriodPicker" Visibility="Collapsed" Style="{StaticResource PillCombo}" ItemContainerStyle="{StaticResource PillComboItem}" Width="118" Margin="0,0,0,0" SelectionChanged="PeriodPicker_OnSelectionChanged">
+                        <ComboBoxItem Content="Today"/>
+                        <ComboBoxItem Content="Yesterday"/>
+                        <ComboBoxItem Content="30 days"/>
+                    </ComboBox>
+                    <ComboBox x:Name="MetricPicker" Visibility="Collapsed" Width="1" SelectionChanged="MetricPicker_OnSelectionChanged">
+                        <ComboBoxItem Content="Cost"/>
+                        <ComboBoxItem Content="Cost/MTok"/>
+                        <ComboBoxItem Content="Tokens"/>
+                    </ComboBox>
+                </StackPanel>
+            </Grid>
+            <Grid Grid.Row="1" Margin="0,0,0,2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                     <ColumnDefinition Width="142"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Row="0" Grid.ColumnSpan="2" Background="#2C2C2F" CornerRadius="18" Padding="3" Margin="0,0,0,10">
+                    <UniformGrid Columns="3">
+                        <ToggleButton x:Name="TodaySegment" Content="Today" Style="{StaticResource PeriodSegmentButton}" Click="TodaySegment_OnClick"/>
+                        <ToggleButton x:Name="YesterdaySegment" Content="Yesterday" Style="{StaticResource PeriodSegmentButton}" Click="YesterdaySegment_OnClick"/>
+                        <ToggleButton x:Name="ThirtyDaysSegment" Content="30 Days" Style="{StaticResource PeriodSegmentButton}" Click="ThirtyDaysSegment_OnClick"/>
+                    </UniformGrid>
+                </Border>
+                <Grid x:Name="SpendContent" Grid.Row="1" Grid.ColumnSpan="2" RenderTransformOrigin="0.5,0.5">
+                    <Grid.RenderTransform>
+                        <ScaleTransform x:Name="SpendContentScale" ScaleX="1" ScaleY="1"/>
+                    </Grid.RenderTransform>
+                    <Grid.ColumnDefinitions>
+                         <ColumnDefinition Width="142"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <local:SpendRingCanvas x:Name="Ring" Grid.Column="0" Width="132" Height="132" HorizontalAlignment="Center" VerticalAlignment="Center" RingThickness="17"/>
+                    <ItemsControl x:Name="Legend" Grid.Column="1" ItemsSource="{Binding LegendItems}" ItemTemplate="{StaticResource LegendTemplate}" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                </Grid>
+            </Grid>
+            <TextBlock x:Name="EmptyText" Grid.Row="2" Text="No local provider history yet" FontSize="10" Foreground="{StaticResource TextMutedBrush}" Visibility="Collapsed"/>
+        </Grid>
+    </Border>
+</UserControl>

@@ -1,0 +1,6 @@
+{
+  "code": 200,
+  "msg": "Operation successful",
+  "data": [ { "productName": "GLM Coding Pro", "status": "VALID", "billingCycle": "monthly" } ],
+  "success": true
+}
