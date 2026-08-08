@@ -315,9 +315,14 @@ public sealed class TrayIconService : IDisposable
 
         return metric.Provider?.ToLowerInvariant() switch
         {
-            "codex" => Color.FromArgb(16, 163, 127),
-            "claude" or "claude code" => Color.FromArgb(222, 115, 86),
+            "codex" => Color.FromArgb(61, 130, 246),
+            "claude" or "claude code" => Color.FromArgb(218, 119, 86),
             "antigravity" => Color.FromArgb(52, 168, 83),
+            "opencode" => Color.FromArgb(45, 212, 191),
+            "cursor" => Color.FromArgb(108, 123, 255),
+            "copilot" => Color.FromArgb(137, 87, 229),
+            "devin" => Color.FromArgb(255, 180, 84),
+            "grok" => Color.FromArgb(201, 206, 214),
             _ => Color.FromArgb(83, 210, 195)
         };
     }

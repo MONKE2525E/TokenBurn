@@ -1029,14 +1029,14 @@ internal static class DashboardData
 {
     public static IReadOnlyList<DashboardProvider> Providers { get; } =
     [
-        new(ProviderIds.ClaudeCode, "Claude Code", "#DE7356", "✳", "./assets/providers/claude.svg"),
-        new(ProviderIds.Codex, "Codex", "#10A37F", "◎", "./assets/providers/codex.svg"),
+        new(ProviderIds.ClaudeCode, "Claude Code", "#DA7756", "✳", "./assets/providers/claude.svg"),
+        new(ProviderIds.Codex, "Codex", "#3D82F6", "◎", "./assets/providers/codex.svg"),
         new(ProviderIds.Antigravity, "Antigravity", "#34A853", "A", "./assets/providers/antigravity.svg"),
-        new(ProviderIds.Cursor, "Cursor", "#8B8B8F", "C", "./assets/providers/cursor.svg"),
-        new(ProviderIds.Copilot, "Copilot", "#9A77FF", "◉", "./assets/providers/copilot.svg"),
-        new(ProviderIds.Devin, "Devin", "#8B8B8F", "D", "./assets/providers/devin.svg"),
-        new(ProviderIds.Grok, "Grok", "#8B8B8F", "G", "./assets/providers/grok.svg"),
-        new(ProviderIds.OpenCode, "OpenCode", "#8B8B8F", "O", "./assets/providers/opencode.svg")
+        new(ProviderIds.Cursor, "Cursor", "#6C7BFF", "C", "./assets/providers/cursor.svg"),
+        new(ProviderIds.Copilot, "Copilot", "#8957E5", "◉", "./assets/providers/copilot.svg"),
+        new(ProviderIds.Devin, "Devin", "#FFB454", "D", "./assets/providers/devin.svg"),
+        new(ProviderIds.Grok, "Grok", "#C9CED6", "G", "./assets/providers/grok.svg"),
+        new(ProviderIds.OpenCode, "OpenCode", "#2DD4BF", "O", "./assets/providers/opencode.svg")
     ];
 
     public static IReadOnlyList<MetricDisplay> SampleMetrics { get; } =

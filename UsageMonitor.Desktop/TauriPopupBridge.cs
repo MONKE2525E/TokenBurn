@@ -349,18 +349,29 @@ public sealed class TauriPopupBridge : IDisposable
         var explicitPath = Environment.GetEnvironmentVariable("USAGE_MONITOR_TAURI_EXE");
         if (!string.IsNullOrWhiteSpace(explicitPath) && File.Exists(explicitPath)) return explicitPath;
 
-        var candidates = new List<string>
+        // A published build always uses its own bundled copy, placed alongside this host by the
+        // CopyTauriPopup publish target.
+        var bundled = new[]
         {
             Path.Combine(AppContext.BaseDirectory, "UsageMonitor.TauriPoc.exe"),
             Path.Combine(AppContext.BaseDirectory, "usage-monitor-tauri-poc.exe")
-        };
+        }.FirstOrDefault(File.Exists);
+        if (bundled is not null) return bundled;
+
+        // In a dev loop there is no bundled copy, so fall back to a local cargo build. The popup
+        // embeds its frontend assets at compile time, so a stale debug binary sitting next to a
+        // freshly rebuilt release one (or vice versa) would silently keep serving old UI/colors.
+        // Always pick whichever cargo profile was built most recently.
+        var devCandidates = new List<string>();
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         for (var depth = 0; current is not null && depth < 8; depth++, current = current.Parent)
         {
-            candidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "debug", "usage-monitor-tauri-poc.exe"));
-            candidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "release", "usage-monitor-tauri-poc.exe"));
+            devCandidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "debug", "usage-monitor-tauri-poc.exe"));
+            devCandidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "release", "usage-monitor-tauri-poc.exe"));
         }
-        return candidates.FirstOrDefault(File.Exists);
+        return devCandidates.Where(File.Exists)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
     }
 
     public void Dispose()

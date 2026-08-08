@@ -178,9 +178,14 @@ public static class TaskbarGlyphRenderer
 
         return metric.Provider?.Trim().ToLowerInvariant() switch
         {
-            "codex" => MediaColor.FromRgb(16, 163, 127),
-            "claude" or "claude code" => MediaColor.FromRgb(222, 115, 86),
+            "codex" => MediaColor.FromRgb(61, 130, 246),
+            "claude" or "claude code" => MediaColor.FromRgb(218, 119, 86),
             "antigravity" => MediaColor.FromRgb(52, 168, 83),
+            "opencode" => MediaColor.FromRgb(45, 212, 191),
+            "cursor" => MediaColor.FromRgb(108, 123, 255),
+            "copilot" => MediaColor.FromRgb(137, 87, 229),
+            "devin" => MediaColor.FromRgb(255, 180, 84),
+            "grok" => MediaColor.FromRgb(201, 206, 214),
             _ => MediaColor.FromRgb(83, 210, 195)
         };
     }

@@ -743,14 +743,14 @@ setInterval(async () => {
 // Compact OpenUsage-style presentation. Provider contracts stay untouched at this boundary.
 function spendProviderColor(id) {
   return {
-    'claude-code': '#e47657',
+    'claude-code': '#da7756',
     codex: '#3d82f6',
-    antigravity: '#a78bfa',
-    cursor: '#8d7dff',
-    copilot: '#f1f1f2',
+    antigravity: '#34a853',
+    opencode: '#2dd4bf',
+    cursor: '#6c7bff',
+    copilot: '#8957e5',
     devin: '#ffb454',
-    grok: '#6cd5c0',
-    opencode: '#6cd5c0',
+    grok: '#c9ced6',
   }[id] || '#8d7dff';
 }
 
