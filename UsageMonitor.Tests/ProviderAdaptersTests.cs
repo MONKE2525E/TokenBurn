@@ -146,11 +146,13 @@ public sealed class ProviderAdaptersTests
     [Fact]
     public void AntigravityAuthParserReadsGoKeyringAndGeminiCliShapes()
     {
-        var json = "{\"token\":{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expiry\":\"2030-01-01T12:00:00Z\"}}";
+        var json = "{\"token\":{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expiry\":\"2030-01-01T12:00:00Z\"},\"client_id\":\"fixture-client\",\"client_secret\":\"fixture-secret\"}";
         var wrapped = "go-keyring-base64:" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json));
         Assert.True(AntigravityAuthStore.TryParse(wrapped, "fixture", out var token));
         Assert.Equal("access", token.AccessToken);
         Assert.Equal("refresh", token.RefreshToken);
+        Assert.Equal("fixture-client", token.ClientId);
+        Assert.Equal("fixture-secret", token.ClientSecret);
         Assert.True(AntigravityAuthStore.TryParse("{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expiry_date\":1893499200000}", "fixture", out var fileToken));
         Assert.Equal("access", fileToken.AccessToken);
     }
@@ -161,7 +163,7 @@ public sealed class ProviderAdaptersTests
         var fs = new FixtureFileSystem(new Dictionary<string, string>
         {
             ["C:\\profile\\.gemini\\oauth_creds.json"] =
-                "{\"access_token\":\"expired-access\",\"refresh_token\":\"refresh-token\",\"expiry_date\":1}"
+                "{\"access_token\":\"expired-access\",\"refresh_token\":\"refresh-token\",\"expiry_date\":1,\"client_id\":\"fixture-client\",\"client_secret\":\"fixture-secret\"}"
         });
         var auth = new AntigravityAuthStore(fs, () => "C:\\profile", () => null);
         var summary = "{\"response\":{\"groups\":[{\"buckets\":[{\"bucketId\":\"gemini-5h\",\"remainingFraction\":0.8,\"resetTime\":\"2030-01-01T17:00:00Z\"}]}]}}";
