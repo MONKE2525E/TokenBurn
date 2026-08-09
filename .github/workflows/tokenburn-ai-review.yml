@@ -43,6 +43,14 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+      - name: Verify review gateway reachability
+        env:
+          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          CLIPROXY_URL: ${{ secrets.CLIPROXY_URL }}
+        run: |
+          code=$(curl -s -o /tmp/models.json -w '%{http_code}' -H "Authorization: Bearer ${CLIPROXY_API_KEY}" "${CLIPROXY_URL%/}/models" || true)
+          echo "gateway /models HTTP status: ${code}"
+          head -c 300 /tmp/models.json || true
       - name: Run TokenBurn AI review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
