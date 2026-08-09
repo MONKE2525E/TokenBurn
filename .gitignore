@@ -9,7 +9,6 @@ TestResults/
 *.nupkg
 artifacts/
 publish/
-UsageMonitor.Desktop/app.manifest
 *.local.json
 .build/
 node_modules/
