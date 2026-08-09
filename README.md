@@ -4,12 +4,16 @@ TokenBurn started as a personal Windows utility. I wanted a quick way to glance 
 
 It is a local-first Windows AI usage monitor for supported Codex, Claude Code, Antigravity, OpenCode, and related provider sources. It can surface quotas, reset times, token usage, estimated cost, caching information, and local usage history where the provider exposes enough data to calculate them honestly.
 
-TokenBurn is intentionally more Windows-native than a normal web dashboard. The WPF shell owns the taskbar, tray, settings, and Windows integration. The optional Tauri process provides a compact popup. The project has no TokenBurn cloud service, accounts, telemetry pipeline, or hosted backend.
+TokenBurn is intentionally more Windows-native than a normal web dashboard. The main dashboard,
+provider cards, detailed usage views, and in-popup settings are rendered by a Tauri/WebView window.
+The .NET/WPF host remains responsible for provider collection, local state, the loopback API, the
+notification-area tray, and the native taskbar status strip. The project has no TokenBurn cloud
+service, accounts, telemetry pipeline, or hosted backend.
 
 ## What works today
 
-- WPF dashboard, notification-area tray, and native Windows taskbar status surface.
-- Optional Tauri popup backed by the existing .NET provider and shell boundary.
+- Tauri/WebView dashboard with provider cards, usage history, cost analysis, and detailed breakdowns.
+- A .NET/WPF Windows host with a notification-area tray and native taskbar status surface.
 - Local/provider integrations for Codex, Claude Code, Antigravity, and OpenCode.
 - Honest unavailable and unsupported states instead of fabricated zero usage.
 - Local 30-day history aggregation and model-aware cost estimates where pricing is known.
@@ -24,31 +28,32 @@ Some refreshes contact the relevant provider using credentials already available
 | --- | --- |
 | `UsageMonitor.Core` | Provider-neutral models, cache, pricing, secrets, paths, and diagnostics |
 | `UsageMonitor.LocalApi` | Shared snapshot service and loopback HTTP contract |
-| `UsageMonitor.Desktop` | WPF dashboard, tray, taskbar, Windows shell integration, and settings |
+| `UsageMonitor.Desktop` | .NET host, provider refresh orchestration, tray, taskbar, settings bridge, and Windows shell integration |
 | `UsageMonitor.Cli` | One-shot JSON and diagnostic output for scripts and agents |
 | `UsageMonitor.Tests` | Unit, fixture, contract, pricing, cache, and Windows shell tests |
-| `UsageMonitor.TauriPoc` | Tauri popup presentation host and its Rust control boundary |
+| `UsageMonitor.TauriPoc` | Tauri/WebView dashboard, in-popup settings, and Rust window/control boundary |
 | `scripts` and `packaging` | Publish and Inno Setup installer workflows |
 
 The detailed architecture is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Build and run
 
-Prerequisites: Windows 10 or 11, the .NET 10 SDK, Node.js, Rust and Cargo, and WebView2 for the Tauri popup.
+Prerequisites: Windows 10 or 11, the .NET 10 SDK, Node.js, Rust and Cargo, and WebView2 for the
+Tauri dashboard and popup window.
 
 ```powershell
 dotnet restore UsageMonitor.slnx
-dotnet build UsageMonitor.slnx --configuration Release
-dotnet test UsageMonitor.slnx --configuration Release
-dotnet run --project UsageMonitor.Desktop
 ```
 
-To validate and build the Tauri presentation host:
+To validate and build the Tauri dashboard host:
 
 ```powershell
 npm --prefix UsageMonitor.TauriPoc ci
 npm --prefix UsageMonitor.TauriPoc run build
 node UsageMonitor.TauriPoc\selfcheck.mjs
+dotnet build UsageMonitor.slnx --configuration Release
+dotnet test UsageMonitor.slnx --configuration Release
+dotnet run --project UsageMonitor.Desktop
 ```
 
 To create a self-contained Windows publish and per-user installer:

@@ -19,8 +19,8 @@ public sealed class UserSettings
 {
     // The compact strip is the primary Windows status surface, with the tray retained as a fallback.
     public StatusSurfaceMode StatusSurface { get; set; } = StatusSurfaceMode.TaskbarWidget;
-    // The Tauri popup is the compact presentation layer. If its hosted shell is missing,
-    // the existing WPF dashboard remains the safe fallback.
+    // The Tauri popup is the normal compact presentation layer. The WPF dashboard fields remain
+    // for compatibility, but the hosted runtime does not reveal that legacy window as a fallback.
     public bool UseTauriPopup { get; set; } = true;
     public string SelectedMonitor { get; set; } = MonitorPlacementService.PrimaryMonitorId;
     // Moving the shell surface is an intentional maintenance action. Keep it locked during

@@ -25,7 +25,8 @@ git push origin TokenBurn-v0.1.39
 - `scripts/publish.ps1` publishes the desktop and CLI binaries for `win-x64` or `win-arm64`.
 - `scripts/package.ps1` invokes Inno Setup and writes to `artifacts\installer`.
 - The installer can register the Windows App Runtime notification package and can add the CLI directory to the current user's PATH when selected.
-- A Tauri popup binary is copied when the Tauri build exists; the WPF taskbar and tray fallback remains the supported shell boundary.
+- The Tauri dashboard binary is copied when the Tauri build exists. The .NET/WPF taskbar and tray
+  host remains the supported native shell boundary, but it is not a replacement dashboard.
 - Release signing and automatic in-app updating are not enabled. Do not describe an artifact as signed or auto-updating until that is implemented and verified.
 
 Never put credentials, personal test data, raw logs, or private provider histories in release assets.

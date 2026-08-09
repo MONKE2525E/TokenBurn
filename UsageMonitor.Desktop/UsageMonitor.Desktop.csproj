@@ -66,9 +66,9 @@
     <WindowsAppSdkMsixArchitecture Condition="'$(RuntimeIdentifier)' == 'win-arm64'">win10-arm64</WindowsAppSdkMsixArchitecture>
   </PropertyGroup>
 
-  <!-- Keep the hosted Tauri popup beside the WPF shell when a local Tauri build exists. The
-       native taskbar adapter still ships independently and remains the fallback if this file is
-       absent, so an installer can roll the popup forward without losing shell reliability. -->
+  <!-- Keep the hosted Tauri dashboard beside the .NET/WPF shell when a local Tauri build exists.
+       The native taskbar adapter and tray still ship independently, so shell status remains
+       available if the companion needs to be repaired. -->
   <Target Name="CopyTauriPopup" AfterTargets="Publish">
     <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\tokenburn-desktop.exe" DestinationFiles="$(PublishDir)tokenburn-desktop.exe" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\tokenburn-desktop.exe')" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\tokenburn-desktop.exe" DestinationFiles="$(PublishDir)tokenburn-desktop.exe" SkipUnchangedFiles="true" Condition="!Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\tokenburn-desktop.exe') And Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\tokenburn-desktop.exe')" />
