@@ -11,7 +11,7 @@ provider, cache, credential, API, and Explorer integration owner.
   while the supported taskbar button and tray stay in .NET so Explorer restarts cannot take down the
   usage surface.
 - The popup is deliberately compact: 320 logical pixels wide by 800 logical pixels high, matching
-  the dimensions used by the upstream SwiftUI panel. It is a popup surface, not a normal desktop
+  the OpenUsage-inspired compact panel proportions. It is a popup surface, not a normal desktop
   window, and is clamped to the monitor work area at the selected DPI.
 - The tray glyph is drawn as a small three-bar usage mark instead of reusing the earlier ring asset,
   which stayed muddy at notification-area sizes.

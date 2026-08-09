@@ -38,13 +38,10 @@ public sealed class CodexLogUsageScanner
             DateTimeOffset? replayCreatedAt = null;
             // Session logs are append-only JSONL and can grow very large. Read one record at a
             // time so local spend refreshes remain bounded by the current record, not file size.
-            foreach (var raw in _files.ReadLines(path))
+            foreach (var raw in _files.ReadLinesContaining(path,
+                         "token_count", "session_meta", "task_started", "turn_context"))
             {
                 if (string.IsNullOrWhiteSpace(raw)) continue;
-                if (!raw.Contains("token_count", StringComparison.OrdinalIgnoreCase) &&
-                    !raw.Contains("session_meta", StringComparison.OrdinalIgnoreCase) &&
-                    !raw.Contains("task_started", StringComparison.OrdinalIgnoreCase) &&
-                    !raw.Contains("turn_context", StringComparison.OrdinalIgnoreCase)) continue;
                 using var doc = ProviderJson.Parse(raw.Trim());
                 if (doc is null) continue;
                 var root = doc.RootElement;

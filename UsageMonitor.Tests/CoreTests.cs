@@ -3,6 +3,7 @@ using System.Globalization;
 using Microsoft.Data.Sqlite;
 using UsageMonitor.Cli;
 using UsageMonitor.Core;
+using UsageMonitor.Core.Providers;
 using UsageMonitor.Core.Providers.OpenCode;
 using UsageMonitor.Desktop;
 using UsageMonitor.LocalApi;
@@ -11,6 +12,34 @@ namespace UsageMonitor.Tests;
 
 public sealed class CoreTests
 {
+    [Fact]
+    public void LocalFileSystemDecodesOnlyMatchingJsonlRecords()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N") + ".jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            // Put the marker across the 64 KiB scan-buffer boundary and make the first record
+            // large enough to prove it is skipped without changing the result.
+            File.WriteAllText(path,
+                new string('x', 65_535) + "\n" +
+                new string('y', 65_530) + "ToKeN_CoUnT" + new string('z', 40) + "\r\n" +
+                "{\"usage\":true}\n");
+
+            var lines = new LocalProviderFileSystem()
+                .ReadLinesContaining(path, "token_count", "\"usage\"")
+                .ToArray();
+
+            Assert.Equal(2, lines.Length);
+            Assert.Contains("ToKeN_CoUnT", lines[0], StringComparison.Ordinal);
+            Assert.Equal("{\"usage\":true}", lines[1]);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
     [Fact]
     public void MetricLineProgressCalculatesStateAndRoundTrips()
     {
