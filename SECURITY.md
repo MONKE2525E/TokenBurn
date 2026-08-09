@@ -24,6 +24,7 @@ Do not include real API keys, tokens, prompts, transcripts, emails, account IDs,
 - The loopback API must remain bound to loopback unless a reviewed authentication and threat model are added.
 - Provider calls must have cancellation, bounded work, and explicit retry behavior. A refresh must not become an unbounded paid API loop.
 - GitHub Actions use read-only permissions by default. Release publishing is limited to the release job.
+- Dependabot is configured for GitHub Actions, NuGet, npm, and Cargo updates. Review dependency PRs for runtime, packaging, and privacy impact before merging.
 - AI review runs from `pull_request_target` only because it needs to post review comments. It never checks out or executes PR code, uses exact commit SHAs, quarantines the review worktree, overwrites review rules from the trusted base commit, and treats PR text and diffs as data.
 
 See [Privacy and local data](docs/PRIVACY.md) for the user-facing data map.
