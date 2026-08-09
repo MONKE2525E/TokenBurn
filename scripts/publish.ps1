@@ -27,9 +27,6 @@ dotnet publish (Join-Path $root 'UsageMonitor.Desktop\UsageMonitor.Desktop.cspro
     --runtime $Runtime `
     --self-contained true `
     --output $desktopOutput `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true `
     -p:Version=$Version
 
 dotnet publish (Join-Path $root 'UsageMonitor.Cli\UsageMonitor.Cli.csproj') `
@@ -42,11 +39,11 @@ dotnet publish (Join-Path $root 'UsageMonitor.Cli\UsageMonitor.Cli.csproj') `
     -p:EnableCompressionInSingleFile=true `
     -p:Version=$Version
 
-if (-not (Test-Path -LiteralPath (Join-Path $desktopOutput 'UsageMonitor.exe'))) {
-    throw 'Desktop publish did not produce UsageMonitor.exe.'
+if (-not (Test-Path -LiteralPath (Join-Path $desktopOutput 'TokenBurn.exe'))) {
+    throw 'Desktop publish did not produce TokenBurn.exe.'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $cliOutput 'usage-monitor.exe'))) {
     throw 'CLI publish did not produce usage-monitor.exe.'
 }
 
-Write-Host "Published Usage Monitor $Version for $Runtime to $publishRoot"
+Write-Host "Published TokenBurn $Version for $Runtime to $publishRoot"

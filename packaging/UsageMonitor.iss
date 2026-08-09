@@ -7,21 +7,21 @@
 
 [Setup]
 AppId={{A6B3E0F2-1C54-4C99-9CF5-3E8D4B5E0E2A}
-AppName=Usage Monitor
+AppName=TokenBurn
 AppVersion={#MyAppVersion}
-AppPublisher=Usage Monitor contributors
-DefaultDirName={localappdata}\Programs\Usage Monitor
-DefaultGroupName=Usage Monitor
+AppPublisher=TokenBurn contributors
+DefaultDirName={localappdata}\Programs\TokenBurn
+DefaultGroupName=TokenBurn
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-OutputBaseFilename=UsageMonitor-{#MyAppVersion}-{#MyRuntime}-Setup
+OutputBaseFilename=TokenBurn-{#MyAppVersion}-{#MyRuntime}-Setup
 OutputDir=.
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayName=Usage Monitor
+UninstallDisplayName=TokenBurn
 SetupLogging=yes
 
 [Tasks]
@@ -32,11 +32,12 @@ Source: "..\artifacts\publish\desktop\*"; DestDir: "{app}"; Excludes: "*.pdb"; F
 Source: "..\artifacts\publish\cli\*"; DestDir: "{app}\cli"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Usage Monitor"; Filename: "{app}\UsageMonitor.exe"; WorkingDir: "{app}"
-Name: "{group}\Usage Monitor CLI"; Filename: "{app}\cli\usage-monitor.exe"; WorkingDir: "{app}\cli"
+Name: "{group}\TokenBurn"; Filename: "{app}\TokenBurn.exe"; WorkingDir: "{app}"
+Name: "{group}\TokenBurn CLI"; Filename: "{app}\cli\usage-monitor.exe"; WorkingDir: "{app}\cli"
 
 [Run]
-Filename: "{app}\UsageMonitor.exe"; Description: "Launch Usage Monitor"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""$existing = Get-AppxPackage -Name MicrosoftCorporationII.WinAppRuntime.Singleton -ErrorAction SilentlyContinue; if ($null -eq $existing -or [version]$existing.Version -lt [version]'8002.3.0.0') { Add-AppxPackage -Path '{app}\WindowsAppRuntime\Microsoft.WindowsAppRuntime.Singleton.2.msix' -ErrorAction Stop }"""; Description: "Install TokenBurn notification support"; Flags: runhidden waituntilterminated
+Filename: "{app}\TokenBurn.exe"; Description: "Launch TokenBurn"; Flags: nowait postinstall skipifsilent
 
 [Registry]
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{code:UpdatedUserPath}"; Tasks: addtopath

@@ -3,10 +3,10 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:UsageMonitor.Desktop"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-        Title="Usage Monitor" Width="500" Height="680" MinWidth="440" MinHeight="520" MaxWidth="600" MaxHeight="820"
+        Title="TokenBurn" Width="500" Height="680" MinWidth="440" MinHeight="520" MaxWidth="600" MaxHeight="820"
         Background="{StaticResource CanvasBrush}" Foreground="{StaticResource TextPrimaryBrush}"
         WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResize"
-        WindowStartupLocation="CenterScreen" ShowInTaskbar="False" Icon="{StaticResource UsageMonitorIcon}" Closing="Window_OnClosing" PreviewKeyDown="Window_OnPreviewKeyDown">
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="False" Closing="Window_OnClosing" PreviewKeyDown="Window_OnPreviewKeyDown">
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="42" CornerRadius="20" ResizeBorderThickness="6" GlassFrameThickness="0" UseAeroCaptionButtons="False"/>
     </shell:WindowChrome.WindowChrome>
@@ -96,7 +96,7 @@
             <Setter Property="StrokeStartLineCap" Value="Round"/>
             <Setter Property="StrokeEndLineCap" Value="Round"/>
         </Style>
-        <!-- WPF's default ToolTip is a bright, unbounded system popup.  OpenUsage uses the same
+            <!-- WPF's default ToolTip is a bright, unbounded system popup.  Use the same
              charcoal surface as the popover, so keep hover/help affordances readable and compact
              instead of allowing a giant white rectangle to cover the dashboard. -->
         <Style TargetType="ToolTip">
@@ -513,7 +513,7 @@
                         </Grid>
                     </Button>
                     <Border x:Name="SpendEstimateBadge" Visibility="Collapsed" Background="#3A301B" CornerRadius="6" Padding="6,3" Margin="6,0,0,0" ToolTip="Local spend is estimated from session history, not a bill.">
-                        <TextBlock Text="ESTIMATED" FontSize="8" FontWeight="SemiBold" Foreground="#F4BE59"/>
+                        <TextBlock x:Name="SpendEstimateText" Text="ESTIMATED" FontSize="8" FontWeight="SemiBold" Foreground="#F4BE59"/>
                     </Border>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -549,7 +549,7 @@
                 <local:SpendRingCard x:Name="SpendCard" Grid.Row="1"/>
             </Grid>
 
-            <!-- Keep wheel and keyboard scrolling, but hide the permanent rail. OpenUsage only
+            <!-- Keep wheel and keyboard scrolling, but hide the permanent rail. The compact view only
                  reveals an indicator while scrolling, which leaves the compact popover clean. -->
             <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled" Padding="0,0,2,0">
                 <ScrollViewer.Resources>
@@ -576,7 +576,7 @@
                             </Border>
                             <StackPanel>
                                 <TextBlock Text="Connect a provider to see live limits" FontWeight="SemiBold" FontSize="12"/>
-                                <TextBlock Text="Usage Monitor never invents zeroes. Add a provider in Settings and the cards fill in when a safe credential is found." FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <TextBlock Text="TokenBurn never invents zeroes. Add a provider in Settings and the cards fill in when a safe credential is found." FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
                             </StackPanel>
                         </DockPanel>
                     </Border>

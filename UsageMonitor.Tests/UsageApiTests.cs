@@ -46,6 +46,24 @@ public sealed class UsageApiTests
     }
 
     [Fact]
+    public async Task UsageRoutePreservesRedactedProviderFailureDetails()
+    {
+        var source = new FakeSource(new UsageSnapshotData("claude-code", "Claude Code", "Pro", [], DateTimeOffset.UtcNow)
+        {
+            Error = "Authentication failed for user@example.com",
+            Warning = "Run `claude auth login`"
+        });
+
+        var response = await new UsageApiService(source).HandleAsync("GET", "/v1/usage/claude-code");
+
+        using var doc = JsonDocument.Parse(response.Body);
+        var provider = doc.RootElement[0];
+        Assert.Equal("Authentication failed for [redacted-email]", provider.GetProperty("error").GetString());
+        Assert.Equal("Run `claude auth login`", provider.GetProperty("warning").GetString());
+        Assert.DoesNotContain("user@example.com", response.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UsageHistoryIsSerializedWithoutLocalPaths()
     {
         var snapshot = new UsageSnapshotData("codex", "Codex", "Pro", [], DateTimeOffset.UtcNow)

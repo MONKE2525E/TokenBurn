@@ -1,5 +1,3 @@
-using System.Text;
-
 namespace UsageMonitor.Core.Providers;
 
 /// <summary>File boundary used by credential readers and JSONL scanners for deterministic tests.</summary>
@@ -20,8 +18,6 @@ public interface IProviderFileSystem
         return string.IsNullOrEmpty(text) ? Array.Empty<string>() : text.Split('\n');
     }
 
-    /// <summary>Best-effort atomic write used only for provider-owned rotated credentials.</summary>
-    bool TryWriteAllText(string path, string contents) => false;
 }
 
 public sealed class LocalProviderFileSystem : IProviderFileSystem
@@ -51,26 +47,4 @@ public sealed class LocalProviderFileSystem : IProviderFileSystem
         catch (UnauthorizedAccessException) { return Array.Empty<string>(); }
     }
 
-    public bool TryWriteAllText(string path, string contents)
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(path);
-            if (string.IsNullOrWhiteSpace(directory)) return false;
-            Directory.CreateDirectory(directory);
-            var temporaryPath = path + ".tmp." + Guid.NewGuid().ToString("N");
-            try
-            {
-                File.WriteAllText(temporaryPath, contents, Encoding.UTF8);
-                File.Move(temporaryPath, path, true);
-                return true;
-            }
-            finally
-            {
-                try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); } catch { }
-            }
-        }
-        catch (IOException) { return false; }
-        catch (UnauthorizedAccessException) { return false; }
-    }
 }

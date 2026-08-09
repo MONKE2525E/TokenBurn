@@ -305,29 +305,27 @@ public sealed class ProviderAdaptersTests
     }
 
     [Fact]
-    public async Task ClaudeProviderBuildsRefreshRequestWithoutTreatingJsonBracesAsFormatTokens()
+    public async Task ClaudeProviderDoesNotRefreshOrWriteClaudeCredentials()
     {
+        const string credentials = "{\"claudeAiOauth\":{\"accessToken\":\"current\",\"refreshToken\":\"refresh\",\"expiresAt\":0,\"subscriptionType\":\"pro\",\"scopes\":[\"user:profile\"]}}";
         var fs = new FixtureFileSystem(new Dictionary<string, string>
         {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"expired\",\"refreshToken\":\"refresh-{token}\\\"quoted\",\"expiresAt\":0,\"subscriptionType\":\"pro\",\"scopes\":[\"user:profile\"]}}"
+            ["C:\\claude\\.credentials.json"] = credentials
         });
         var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
         var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(200, new Dictionary<string, string>(), "{\"access_token\":\"refreshed\"}")),
             ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(200, new Dictionary<string, string>(), File.ReadAllText(Fixture("claude_usage.json")))));
 
         var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
 
         Assert.Null(snapshot.ErrorCategory);
-        var refreshBody = http.Bodies.First(body => body is not null)!;
-        using var refreshJson = System.Text.Json.JsonDocument.Parse(refreshBody);
-        Assert.Equal("refresh_token", refreshJson.RootElement.GetProperty("grant_type").GetString());
-        Assert.Equal("refresh-{token}\"quoted", refreshJson.RootElement.GetProperty("refresh_token").GetString());
-        Assert.Equal("Bearer refreshed", http.Authorizations.Last());
+        Assert.Equal("Bearer current", http.Authorizations.Single());
+        Assert.Null(http.Bodies.Single());
+        Assert.Equal(credentials, fs.ReadAllText("C:\\claude\\.credentials.json"));
     }
 
     [Fact]
-    public async Task ClaudeProviderSurfacesRefreshRateLimitInsteadOfCallingItExpired()
+    public async Task ClaudeProviderReportsExpiredAccessTokenWithoutTryingRefresh()
     {
         var fs = new FixtureFileSystem(new Dictionary<string, string>
         {
@@ -335,29 +333,15 @@ public sealed class ProviderAdaptersTests
         });
         var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
         var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(429, new Dictionary<string, string>(), "{}")));
+            ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(401, new Dictionary<string, string>(), "{}")));
 
         var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
 
-        Assert.Equal(ProviderErrorCategory.RateLimited, snapshot.ErrorCategory);
-        Assert.Contains("429", snapshot.GetLine("Error")!.Text, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task ClaudeProviderDoesNotLetRefreshExpiryMetadataMaskRateLimit()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"expired\",\"refreshToken\":\"refresh\",\"expiresAt\":0,\"refreshTokenExpiresAt\":1,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(429, new Dictionary<string, string>(), "{}")));
-
-        var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
-
-        Assert.Equal(ProviderErrorCategory.RateLimited, snapshot.ErrorCategory);
-        Assert.DoesNotContain("login expired", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(ProviderErrorCategory.Authentication, snapshot.ErrorCategory);
+        Assert.Contains("auth login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(http.Authorizations);
+        Assert.Equal("Bearer expired", http.Authorizations.Single());
+        Assert.Null(http.Bodies.Single());
     }
 
     [Fact]
@@ -369,92 +353,6 @@ public sealed class ProviderAdaptersTests
         var httpDate = Now.AddMinutes(3).ToString("R");
         var fromDate = ClaudeUsageMapper.ParseRetryAfterSeconds(httpDate, Now);
         Assert.InRange(fromDate ?? -1, 179, 181);
-    }
-
-    [Fact]
-    public async Task ClaudeProviderDoesNotHammerRefreshEndpointDuringRetryAfterCooldown()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"expired\",\"refreshToken\":\"refresh\",\"expiresAt\":0,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(429,
-                new Dictionary<string, string> { ["Retry-After"] = "1800" }, "{}")));
-        var provider = new ClaudeProvider(auth, http, fs);
-
-        var first = await provider.RefreshAsync(new ProviderContext { Now = Now });
-        var second = await provider.RefreshAsync(new ProviderContext { Now = Now.AddMinutes(5) });
-
-        Assert.Equal(ProviderErrorCategory.RateLimited, first.ErrorCategory);
-        Assert.Equal(ProviderErrorCategory.RateLimited, second.ErrorCategory);
-        Assert.Equal(2, http.Authorizations.Count);
-        Assert.Single(http.Bodies, body => !string.IsNullOrWhiteSpace(body));
-    }
-
-    [Fact]
-    public async Task ClaudeProviderExplainsAnInvalidRefreshGrant()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"expired\",\"refreshToken\":\"revoked\",\"expiresAt\":0,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(400,
-                new Dictionary<string, string>(), "{\"error\":\"invalid_grant\"}")),
-            ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(401,
-                new Dictionary<string, string>(), "{}")));
-
-        var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
-
-        Assert.Equal(ProviderErrorCategory.Authentication, snapshot.ErrorCategory);
-        Assert.Contains("auth login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("expired", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task ClaudeProviderProbesTheCurrentTokenAfterRefreshIsRejected()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"current\",\"refreshToken\":\"revoked\",\"expiresAt\":0,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(400,
-                new Dictionary<string, string>(), "{\"error\":\"invalid_grant\"}")),
-            ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(200,
-                new Dictionary<string, string>(), File.ReadAllText(Fixture("claude_usage.json")))));
-
-        var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
-
-        Assert.Null(snapshot.ErrorCategory);
-        Assert.Contains("refresh was rejected", snapshot.Warning, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal("Bearer current", http.Authorizations.Last());
-    }
-
-    [Fact]
-    public async Task ClaudeProviderDoesNotTurnAUsageRateLimitIntoEmptyLiveData()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"current\",\"refreshToken\":\"revoked\",\"expiresAt\":0,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(400,
-                new Dictionary<string, string>(), "{\"error\":\"invalid_grant\"}")),
-            ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(429,
-                new Dictionary<string, string>(), "{\"error\":{\"type\":\"rate_limit_error\"}}")));
-
-        var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
-
-        Assert.Equal(ProviderErrorCategory.RateLimited, snapshot.ErrorCategory);
-        Assert.DoesNotContain(snapshot.Lines, line => line.Type == MetricLineType.Progress);
-        Assert.Contains("rate", snapshot.Warning, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal("Bearer current", http.Authorizations.Last());
     }
 
     [Fact]
@@ -482,64 +380,6 @@ public sealed class ProviderAdaptersTests
         Assert.Null(second.ErrorCategory);
         Assert.Equal(21, second.GetLine("Session")!.Used);
         Assert.Contains("rate limited", second.Warning, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task ClaudeProviderUsesCurrentAccessTokenWhenRefreshIsRateLimited()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"current\",\"refreshToken\":\"refresh\",\"expiresAt\":0,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(429, new Dictionary<string, string>(), "{}")),
-            ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(200, new Dictionary<string, string>(), File.ReadAllText(Fixture("claude_usage.json")))));
-
-        var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
-
-        Assert.Null(snapshot.ErrorCategory);
-        Assert.Equal(21, snapshot.GetLine("Session")!.Used);
-        Assert.Contains("rate limited", snapshot.Warning, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal("Bearer current", http.Authorizations.Last());
-    }
-
-    [Fact]
-    public async Task ClaudeProviderDoesNotCallRefreshRateLimitAnExpiredLogin()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"claudeAiOauth\":{\"accessToken\":\"expired\",\"refreshToken\":\"refresh\",\"expiresAt\":0,\"refreshTokenExpiresAt\":4102444800000,\"scopes\":[\"user:profile\"]}}"
-        });
-        var auth = new ClaudeAuthStore(fs, key => key == "CLAUDE_CONFIG_DIR" ? "C:\\claude" : null, () => "C:\\profile");
-        var http = new SequenceHttpClient(
-            ("https://platform.claude.com/v1/oauth/token", new ProviderHttpResponse(429,
-                new Dictionary<string, string> { ["Retry-After"] = "1800" }, "{}")),
-            ("https://api.anthropic.com/api/oauth/usage", new ProviderHttpResponse(401,
-                new Dictionary<string, string>(), "{}")));
-
-        var snapshot = await new ClaudeProvider(auth, http, fs).RefreshAsync(new ProviderContext { Now = Now });
-
-        Assert.Equal(ProviderErrorCategory.RateLimited, snapshot.ErrorCategory);
-        Assert.DoesNotContain("login expired", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("rate limiting OAuth", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void ClaudeAuthStorePersistsRotatedTokensWithoutReplacingTheEnvelope()
-    {
-        var fs = new FixtureFileSystem(new Dictionary<string, string>
-        {
-            ["C:\\claude\\.credentials.json"] = "{\"other\":true,\"claudeAiOauth\":{\"accessToken\":\"old\",\"refreshToken\":\"old-refresh\"}}"
-        });
-        var auth = new ClaudeAuthStore(fs);
-
-        Assert.True(auth.TryPersistTokens("C:\\claude\\.credentials.json", "new", "new-refresh", Now.AddHours(1)));
-        var loaded = auth.TryLoad("C:\\claude\\.credentials.json");
-
-        Assert.Equal("new", loaded?.OAuth.AccessToken);
-        Assert.Equal("new-refresh", loaded?.OAuth.RefreshToken);
-        Assert.Contains("\"other\": true", fs.ReadAllText("C:\\claude\\.credentials.json"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -694,6 +534,22 @@ public sealed class ProviderAdaptersTests
         Assert.Equal("C:\\claude\\.credentials.json", claude.LoadCandidates().Single().Path);
     }
 
+    [Fact]
+    public async Task ClaudeProviderReportsWhenTheWindowsAccountIsSignedOut()
+    {
+        var auth = new ClaudeAuthStore(
+            new FixtureFileSystem(new Dictionary<string, string>()),
+            _ => null,
+            () => "C:\\profile");
+
+        var snapshot = await new ClaudeProvider(auth, files: new FixtureFileSystem(new Dictionary<string, string>()))
+            .RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.NotConfigured, snapshot.ErrorCategory);
+        Assert.Contains("signed out", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("auth login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string Fixture(string name)
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
@@ -718,7 +574,6 @@ public sealed class ProviderAdaptersTests
         public bool FileExists(string path) => _files.ContainsKey(path);
         public string? ReadAllText(string path) => _files.TryGetValue(path, out var value) ? value : null;
         public IEnumerable<string> EnumerateFiles(string root, string pattern, SearchOption searchOption) => _files.Keys.Where(x => x.StartsWith(root, StringComparison.OrdinalIgnoreCase));
-        public bool TryWriteAllText(string path, string contents) { _files[path] = contents; return true; }
     }
 
     private sealed class FakeHttpClient(ProviderHttpResponse response) : IProviderHttpClient

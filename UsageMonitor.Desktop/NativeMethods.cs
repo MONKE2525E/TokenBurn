@@ -4,6 +4,9 @@ namespace UsageMonitor.Desktop;
 
 internal static class NativeMethods
 {
+    private const int GwlExStyle = -20;
+    private const int WsExNoActivate = 0x08000000;
+    private const int WsExToolWindow = 0x00000080;
     internal const string ActivationHostMarker = "UsageMonitor.ActivationHost";
     internal const string LegacyTaskbarOverlayMarker = "UsageMonitor.TaskbarOverlay";
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -54,6 +57,12 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    internal static void SetWindowNoActivate(IntPtr hWnd)
+    {
+        var style = GetWindowLong(hWnd, GwlExStyle);
+        SetWindowLong(hWnd, GwlExStyle, style | WsExNoActivate | WsExToolWindow);
+    }
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

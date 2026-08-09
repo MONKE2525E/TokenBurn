@@ -3,34 +3,39 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Usage Monitor</title>
+  <title>TokenBurn</title>
+  <meta name="theme-color" content="#0F1115" />
+  <link rel="icon" type="image/svg+xml" href="./assets/brand/tokenburn-app-icon.svg" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <main class="popover" role="application" aria-label="Usage Monitor">
+  <main class="popover" role="application" aria-label="TokenBurn">
     <header class="chrome">
       <div class="title-row">
-        <button id="metric-menu" class="title-button" aria-label="Choose spend metric"><span id="metric-title">Cost</span><svg class="chevron" viewBox="0 0 12 7" aria-hidden="true"><path d="M1 1.25 6 5.75 11 1.25"></path></svg></button>
+        <button id="metric-menu" class="title-button" aria-haspopup="menu" aria-expanded="false" aria-label="Choose spend metric"><span id="metric-title">Cost</span><svg class="chevron" viewBox="0 0 12 7" aria-hidden="true"><path d="M1 1.25 6 5.75 11 1.25"></path></svg></button>
+        <button id="breakdown-back" class="chrome-back" data-breakdown-back aria-label="Back to overview" hidden><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 6.5 10l6 5.5"></path></svg><span>Back</span></button>
         <button id="info-button" class="icon-button" aria-label="Spend information"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.2"></circle><path d="M10 8.6v5.1M10 5.8h.01"></path></svg></button>
         <div class="header-actions">
           <button id="share-button" class="icon-button" aria-label="Copy spend summary"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6.2" y="5.6" width="8.3" height="10.2" rx="1.4"></rect><path d="M4.2 13.6V4.9c0-.8.6-1.4 1.4-1.4h6.6"></path></svg></button>
           <button id="refresh-button" class="icon-button" aria-label="Refresh now"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8.4A6 6 0 1 0 16.1 13"></path><path d="M16 4.6v4h-4"></path></svg></button>
         </div>
       </div>
-      <div id="info-popover" class="hint" hidden>Cost shows billable history. Tokens also includes Antigravity CLI usage.</div>
-      <div id="metric-popover" class="metric-menu" hidden>
-        <button data-metric="cost" class="selected"><span class="menu-check" aria-hidden="true">✓</span><span>Cost</span></button>
-        <button data-metric="cost-mtok"><span class="menu-check" aria-hidden="true"></span><span>Cost/MTok</span></button>
-        <button data-metric="tokens"><span class="menu-check" aria-hidden="true"></span><span>Tokens</span></button>
+      <div id="info-popover" class="hint overlay-surface">Cost shows billable history. Tokens also includes Antigravity CLI usage.</div>
+      <div id="metric-popover" class="metric-menu overlay-surface" role="menu">
+        <button data-metric="cost" role="menuitemradio" aria-checked="true" class="selected"><span class="menu-indicator is-on" aria-hidden="true"></span><span>Cost</span></button>
+        <button data-metric="cost-mtok" role="menuitemradio" aria-checked="false"><span class="menu-indicator" aria-hidden="true"></span><span>Cost/MTok</span></button>
+        <button data-metric="tokens" role="menuitemradio" aria-checked="false"><span class="menu-indicator" aria-hidden="true"></span><span>Tokens</span></button>
+        <button data-metric="breakdown" role="menuitem"><span class="menu-indicator menu-action-indicator" aria-hidden="true"></span><span>Full breakdown</span></button>
       </div>
     </header>
 
     <section class="scroll-content" id="content">
       <section class="spend-card" id="spend-card">
-        <div class="periods" role="tablist" aria-label="Spend period">
-          <button data-period="today">Today</button>
-          <button data-period="yesterday">Yesterday</button>
-          <button data-period="30" class="selected">30 Days</button>
+        <div class="periods" role="tablist" aria-label="Spend period" style="--period-index: 2">
+          <span class="period-thumb" aria-hidden="true"></span>
+          <button data-period="today" role="tab" aria-selected="false">Today</button>
+          <button data-period="yesterday" role="tab" aria-selected="false">Yesterday</button>
+          <button data-period="30" role="tab" aria-selected="true" class="selected">30 Days</button>
         </div>
         <div class="spend-body">
           <canvas id="spend-ring" width="200" height="200" aria-label="Total local spend"></canvas>
@@ -38,19 +43,20 @@
         </div>
       </section>
 
-      <div id="status" class="status" aria-live="polite">Connecting to the local provider service...</div>
+      <div id="status" class="status" aria-live="polite"></div>
       <section id="providers" class="providers"></section>
+      <section id="breakdown" class="breakdown" hidden aria-labelledby="breakdown-title" tabindex="-1"></section>
     </section>
 
     <footer class="footer">
-      <div><strong>Usage Monitor</strong><span id="updated">Waiting for data</span></div>
+      <div class="brand-lockup"><img src="./assets/brand/tokenburn-mark-white.svg" alt="" aria-hidden="true"><span><strong>TokenBurn</strong><small id="updated">Waiting for data</small></span></div>
       <!-- Two direct buttons instead of an "Options" dropdown: a floating popover here was
            silently swallowing mouse clicks on its items (keyboard activation worked every time,
            real mouse clicks - mine and the user's - never did, across several different overlap
            fixes). Buttons in normal document flow don't have that failure mode. -->
       <div class="footer-actions">
         <button data-options="settings" class="footer-icon-button" aria-label="Settings" title="Settings"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.1 2.8h3.8l.5 1.7 1.4.8 1.7-.5 1.9 3.3-1.2 1.3v1.6l1.2 1.3-1.9 3.3-1.7-.5-1.4.8-.5 1.7H8.1l-.5-1.7-1.4-.8-1.7.5-1.9-3.3 1.2-1.3V9.4L2.6 8.1l1.9-3.3 1.7.5 1.4-.8.5-1.7Z"></path><circle cx="10" cy="10" r="2.2"></circle></svg></button>
-        <button data-options="customize" class="footer-icon-button" aria-label="Customize"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h8M14 6h2M4 14h2M8 14h8"></path><circle cx="11" cy="6" r="1.8"></circle><circle cx="6" cy="14" r="1.8"></circle></svg></button>
+        <button data-options="customize" class="footer-icon-button" aria-label="Customize" title="Customize"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h8M14 6h2M4 14h2M8 14h8"></path><circle cx="11" cy="6" r="1.8"></circle><circle cx="6" cy="14" r="1.8"></circle></svg></button>
       </div>
     </footer>
 
@@ -62,13 +68,10 @@
       <section class="scroll-content">
         <div class="field-group">
           <div class="field-label">General</div>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="startAtLogin"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Launch Usage Monitor when I sign in</span></label>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="notificationsEnabled"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Enable quota notifications</span></label>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="compactDensity"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Use compact dashboard density</span></label>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="showTotalSpend"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Show total spend ring</span></label>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="useTauriPopup"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Use compact popup</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="startAtLogin"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Launch TokenBurn when I sign in</span></label>
           <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="taskbarPositionLocked"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Lock taskbar position</span></label>
           <div class="field-note">Unlock this only when you need to drag the taskbar strip.</div>
+          <label class="field-row"><span>Motion</span><select data-field="motionPreference" aria-label="Animation preference"><option value="system">Follow Windows</option><option value="full">Full motion</option><option value="reduced">Reduced motion</option></select></label>
         </div>
         <div class="field-group">
           <div class="field-label">Usage Display</div>
@@ -77,9 +80,9 @@
         </div>
         <div class="field-group">
           <div class="field-label">Notifications</div>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="almostOutAlerts"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Almost out</span></label>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="cuttingItCloseAlerts"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Cutting it close</span></label>
-          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="willRunOutAlerts"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Will run out</span></label>
+          <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="notificationsEnabled"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Notify when quotas reset</span></label>
+          <label class="field-row notification-providers"><span><strong>Providers</strong><small>Choose which providers can notify you.</small></span><span class="provider-multi-select" id="notification-provider-picker"><button type="button" class="select-trigger" id="notification-provider-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="notification-provider-menu" aria-label="Notification providers"><span id="notification-provider-summary">Checking providers</span><svg viewBox="0 0 12 7" aria-hidden="true"><path d="m1 1.25 5 4.5 5-4.5"></path></svg></button><div class="select-menu overlay-surface notification-provider-menu" id="notification-provider-menu" role="listbox" aria-multiselectable="true" aria-label="Notification providers"></div></span></label>
+          <div class="field-note">The app watches each selected reset timer locally, so notifications are not held for the next five-minute refresh.</div>
         </div>
         <div class="field-group">
           <div class="field-label">Privacy</div>
@@ -105,7 +108,16 @@
         </div>
       </section>
     </div>
+    <div id="trend-tooltip" class="trend-tooltip overlay-surface" role="tooltip"></div>
+    <div id="provider-status-tooltip" class="provider-status-tooltip overlay-surface" role="tooltip"></div>
   </main>
+  <div id="spend-other-tooltip" class="spend-other-tooltip overlay-surface" role="tooltip" aria-hidden="true">
+    <div class="spend-other-tooltip-heading"><div><span>Other providers</span><strong id="spend-other-total">$0.00</strong></div><span class="spend-other-tooltip-hint">Provider detail</span></div>
+    <div class="spend-other-tooltip-body">
+      <canvas id="spend-other-ring" width="82" height="82" aria-hidden="true"></canvas>
+      <div id="spend-other-list" class="spend-other-list"></div>
+    </div>
+  </div>
   <script src="./app.js"></script>
 </body>
 </html>

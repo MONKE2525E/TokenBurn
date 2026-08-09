@@ -121,7 +121,11 @@ public sealed class UsageApiService
         snapshot.Lines.Select(metric => metric is BadgeMetricData badge &&
                 string.Equals(badge.Label, "Error", StringComparison.OrdinalIgnoreCase)
             ? badge with { Text = RedactError(badge.Text) }
-            : metric).Select(ToLegacyLine).ToArray(), snapshot.FetchedAt, snapshot.UsageHistory);
+            : metric).Select(ToLegacyLine).ToArray(),
+        snapshot.FetchedAt,
+        snapshot.UsageHistory,
+        snapshot.Error is null ? null : RedactError(snapshot.Error),
+        snapshot.Warning is null ? null : RedactError(snapshot.Warning));
 
     private static LegacyLine ToLegacyLine(UsageMetricData metric) => metric switch
     {
@@ -152,7 +156,8 @@ public sealed class UsageApiService
 
     private sealed record LegacySnapshot(
         [property: JsonPropertyName("providerId")] string ProviderId, string DisplayName, string? Plan,
-        IReadOnlyList<LegacyLine> Lines, DateTimeOffset FetchedAt, UsageHistoryData? UsageHistory);
+        IReadOnlyList<LegacyLine> Lines, DateTimeOffset FetchedAt, UsageHistoryData? UsageHistory,
+        string? Error = null, string? Warning = null);
 
     private sealed record LegacyFormat([property: JsonPropertyName("kind")] string Kind);
 

@@ -11,7 +11,7 @@ namespace UsageMonitor.Desktop;
 /// <summary>
 /// Renders the compact status glyph used by the supported WPF taskbar button.
 ///
-/// OpenUsage's menu-bar renderer deliberately uses a small, bounded set of bars rather than
+    /// The menu-bar renderer deliberately uses a small, bounded set of bars rather than
 /// trying to squeeze long values into a 16-24 pixel shell surface. Windows has the same constraint
 /// on a taskbar button. This renderer follows that rule, but keeps a small provider colour marker at
 /// the leading edge so a stack of bars still has a recognizable identity at a glance.
@@ -19,7 +19,7 @@ namespace UsageMonitor.Desktop;
 public static class TaskbarGlyphRenderer
 {
     /// <summary>
-    /// OpenUsage leaves a visible tail on near-full bars. Without this quantization, 96-99% reads as
+    /// The renderer leaves a visible tail on near-full bars. Without this quantization, 96-99% reads as
     /// a solid bar at taskbar scale and the user can miss that the quota is nearly exhausted.
     /// </summary>
     public static double VisualFraction(double fraction)
@@ -54,22 +54,22 @@ public static class TaskbarGlyphRenderer
     public static string BuildTooltip(IReadOnlyList<MetricDisplay>? metrics, string? resetTimeDisplay = "Countdown")
     {
         var items = (metrics ?? Array.Empty<MetricDisplay>()).Where(HasRenderableData).ToArray();
-        if (items.Length == 0) return "Usage Monitor | no provider data yet";
+        if (items.Length == 0) return "TokenBurn | no provider data yet";
 
         var lines = items.Select(metric =>
         {
             var reset = metric.ResetAt is { } resetAt
-                ? $" ({ResetTimeFormatter.Format(resetAt, resetTimeDisplay)})"
+                ? $" ({ResetTimeFormatter.FormatSurface(resetAt, resetTimeDisplay)})"
                 : string.Empty;
             var provider = string.IsNullOrWhiteSpace(metric.Provider) ? string.Empty : $"{metric.Provider} ";
             return $"{provider}{metric.Label}: {metric.Value}{reset}";
         });
 
-        var tooltip = "Usage Monitor | " + string.Join("  |  ", lines);
+        var tooltip = "TokenBurn | " + string.Join("  |  ", lines);
         return tooltip.Length <= 240 ? tooltip : tooltip[..237] + "...";
     }
 
-    /// <summary>Renders a transparent, DPI-independent image for Window.Icon.</summary>
+    /// <summary>Renders a provider-only, DPI-independent image for the taskbar strip.</summary>
     public static ImageSource Render(IReadOnlyList<MetricDisplay>? metrics)
     {
         var items = (metrics ?? Array.Empty<MetricDisplay>())
@@ -78,19 +78,20 @@ public static class TaskbarGlyphRenderer
             .ToArray();
 
         const int pixels = 48;
-        var visual = new DrawingVisual();
-        using (var drawing = visual.RenderOpen())
-        {
-            if (items.Length == 0)
-            {
-                DrawFallbackMark(drawing, pixels);
-            }
-            else
-            {
-                DrawBars(drawing, items, pixels);
-            }
-        }
+        if (items.Length == 0) return CreateTransparentBitmap(pixels);
 
+        var visual = new DrawingVisual();
+        using (var drawing = visual.RenderOpen()) DrawBars(drawing, items, pixels);
+
+        var bitmap = new RenderTargetBitmap(pixels, pixels, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
+    private static BitmapSource CreateTransparentBitmap(int pixels)
+    {
+        var visual = new DrawingVisual();
         var bitmap = new RenderTargetBitmap(pixels, pixels, 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(visual);
         bitmap.Freeze();
@@ -146,29 +147,6 @@ public static class TaskbarGlyphRenderer
         }
     }
 
-    private static void DrawFallbackMark(DrawingContext drawing, int pixels)
-    {
-        // Keep the pre-refresh mark simple at shell scale. The old gauge-and-needle looked like a
-        // broken status badge on Windows taskbars. Three compact bars match the live glyph and read
-        // as a usage monitor even before the first provider response arrives.
-        var accent = new SolidColorBrush(MediaColor.FromRgb(83, 210, 195));
-        var track = new SolidColorBrush(MediaColor.FromArgb(90, 165, 175, 186));
-        accent.Freeze();
-        track.Freeze();
-        const double width = 5;
-        const double gap = 3;
-        var x = (pixels - (width * 3 + gap * 2)) / 2.0;
-        var baseline = pixels - 11;
-        var heights = new[] { 10.0, 16.0, 22.0 };
-        foreach (var height in heights)
-        {
-            var y = baseline - height;
-            drawing.DrawRoundedRectangle(track, null, new WpfRect(x, baseline - 22, width, 22), 2, 2);
-            drawing.DrawRoundedRectangle(accent, null, new WpfRect(x, y, width, height), 2, 2);
-            x += width + gap;
-        }
-    }
-
     private static MediaColor AccentFor(MetricDisplay metric)
     {
         var state = metric.State?.Trim().ToLowerInvariant();
@@ -181,7 +159,7 @@ public static class TaskbarGlyphRenderer
             "codex" => MediaColor.FromRgb(61, 130, 246),
             "claude" or "claude code" => MediaColor.FromRgb(218, 119, 86),
             "antigravity" => MediaColor.FromRgb(52, 168, 83),
-            "opencode" => MediaColor.FromRgb(45, 212, 191),
+            "opencode" => MediaColor.FromRgb(255, 255, 255),
             "cursor" => MediaColor.FromRgb(108, 123, 255),
             "copilot" => MediaColor.FromRgb(137, 87, 229),
             "devin" => MediaColor.FromRgb(255, 180, 84),

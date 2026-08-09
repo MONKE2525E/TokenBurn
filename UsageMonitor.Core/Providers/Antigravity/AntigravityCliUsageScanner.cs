@@ -1,17 +1,19 @@
 using Microsoft.Data.Sqlite;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace UsageMonitor.Core.Providers.Antigravity;
 
 /// <summary>
 /// Reads Antigravity CLI response-token counts from its local conversation databases.
 /// Antigravity exposes subscription quota, not billable prices. The cost values here are therefore
-/// an API-equivalent estimate based on response tokens, not a Google AI Pro invoice.
+/// an API-equivalent estimate based on the per-generation model and response tokens, not a Google
+/// AI Pro invoice. Antigravity does not persist input or cache-token counts in this schema.
 /// </summary>
 public sealed class AntigravityCliUsageScanner
 {
-    // Google lists Gemini 3.5 Flash Standard output at $9 per million tokens. Antigravity's local
-    // records expose response-token counts but not the actual subscription accounting price.
-    private const double EstimatedOutputCostPerMillionTokens = 9d;
+    private static readonly Regex ModelPattern = new(@"(?i)(?:gemini|claude|gpt)-[a-z0-9._:-]+",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly Func<string?> _dataDirectoryOverride;
     private readonly Func<string> _userProfile;
 
@@ -21,7 +23,8 @@ public sealed class AntigravityCliUsageScanner
         _userProfile = userProfile ?? (() => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     }
 
-    public ProviderUsageHistory Scan(DateTimeOffset now, CancellationToken cancellationToken = default)
+    public ProviderUsageHistory Scan(DateTimeOffset now, IModelCatalog? catalog = null,
+        CancellationToken cancellationToken = default)
     {
         var databases = DiscoverDatabases();
         if (databases.Count == 0) return new ProviderUsageHistory(Array.Empty<UsageHistoryPoint>());
@@ -41,15 +44,19 @@ public sealed class AntigravityCliUsageScanner
                     Pooling = false
                 }.ToString());
                 connection.Open();
+                var generationModels = ReadGenerationModels(connection);
                 using var command = connection.CreateCommand();
-                command.CommandText = "SELECT step_payload FROM steps WHERE step_payload IS NOT NULL";
+                command.CommandText = "SELECT step_payload FROM steps WHERE step_payload IS NOT NULL ORDER BY idx";
                 using var reader = command.ExecuteReader();
+                var generationIndex = 0;
                 while (reader.Read())
                 {
                     if (reader.IsDBNull(0)) continue;
                     var payload = reader.GetFieldValue<byte[]>(0);
                     if (!TryReadUsage(payload, out var timestamp, out var tokens) || timestamp < cutoff || tokens <= 0) continue;
-                    rows.Add(new AntigravityCliUsageRow(timestamp, tokens));
+                    var modelId = generationIndex < generationModels.Count ? generationModels[generationIndex] : null;
+                    generationIndex++;
+                    rows.Add(new AntigravityCliUsageRow(timestamp, tokens, modelId));
                 }
             }
             catch (SqliteException) { }
@@ -57,17 +64,52 @@ public sealed class AntigravityCliUsageScanner
             catch (UnauthorizedAccessException) { }
         }
 
-        var points = rows
-            .GroupBy(row => DateOnly.FromDateTime(row.Timestamp.UtcDateTime))
+        var priced = rows.Select(row => Price(row, catalog)).ToArray();
+        var points = priced
+            .GroupBy(row => DateOnly.FromDateTime(row.Row.Timestamp.UtcDateTime))
             .OrderBy(group => group.Key)
             .Select(group =>
             {
-                var tokens = group.Sum(row => row.Tokens);
-                return new UsageHistoryPoint(group.Key, tokens,
-                    tokens / 1_000_000d * EstimatedOutputCostPerMillionTokens, true);
+                var tokens = group.Sum(row => row.Row.Tokens);
+                return new UsageHistoryPoint(group.Key, tokens, group.Sum(row => row.CostUsd), true);
             })
             .ToArray();
-        return new ProviderUsageHistory(points);
+        var breakdown = priced
+            .GroupBy(row => new { Date = DateOnly.FromDateTime(row.Row.Timestamp.UtcDateTime), row.Row.ModelId, row.CostBasis })
+            .OrderBy(group => group.Key.Date)
+            .ThenBy(group => group.Key.ModelId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new UsageBreakdownPoint(group.Key.Date, ProviderIds.Antigravity, group.Key.ModelId,
+                0, 0, 0, group.Sum(row => row.Row.Tokens), 0, group.Sum(row => row.CostUsd),
+                group.Key.CostBasis, group.First().PricingBasis, true))
+            .ToArray();
+        var unknownModels = priced.Where(row => row.CostBasis == UsageCostBasis.Unpriced && row.Row.ModelId is not null)
+            .Select(row => row.Row.ModelId!).Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(model => model, StringComparer.OrdinalIgnoreCase).ToArray();
+        return new ProviderUsageHistory(points) { Breakdown = breakdown, UnknownModels = unknownModels };
+    }
+
+    private static IReadOnlyList<string?> ReadGenerationModels(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT data FROM gen_metadata ORDER BY idx";
+        using var reader = command.ExecuteReader();
+        var models = new List<string?>();
+        while (reader.Read())
+        {
+            var data = reader.IsDBNull(0) ? Array.Empty<byte>() : reader.GetFieldValue<byte[]>(0);
+            models.Add(ModelPattern.Match(Encoding.UTF8.GetString(data)).Value is { Length: > 0 } model ? model : null);
+        }
+        return models;
+    }
+
+    private static AntigravityPricedUsage Price(AntigravityCliUsageRow row, IModelCatalog? catalog)
+    {
+        var pricing = row.ModelId is null ? null : catalog?.ResolvePrice(ProviderIds.Antigravity, row.ModelId) ??
+            ModelPricingCatalog.TryResolve(ProviderIds.Antigravity, row.ModelId);
+        return pricing is null
+            ? new AntigravityPricedUsage(row, 0, UsageCostBasis.Unpriced, PricingBasis.Unknown)
+            : new AntigravityPricedUsage(row, pricing.Estimate(0, 0, row.Tokens),
+                UsageCostBasis.CatalogEstimated, PricingBasis.PublicCatalog);
     }
 
     public static bool TryReadUsage(byte[] payload, out DateTimeOffset timestamp, out long tokens)
@@ -160,4 +202,7 @@ public sealed class AntigravityCliUsageScanner
     }
 }
 
-public sealed record AntigravityCliUsageRow(DateTimeOffset Timestamp, long Tokens);
+public sealed record AntigravityCliUsageRow(DateTimeOffset Timestamp, long Tokens, string? ModelId = null);
+
+internal sealed record AntigravityPricedUsage(AntigravityCliUsageRow Row, double CostUsd,
+    UsageCostBasis CostBasis, PricingBasis PricingBasis);

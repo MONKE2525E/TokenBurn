@@ -102,7 +102,7 @@ public sealed class TaskbarOverlayController : IDisposable
             {
                 _monitorFallbackNotified = true;
                 StateChanged?.Invoke(this, new TaskbarStateChangedEventArgs(false,
-                    "The selected display is unavailable. Usage Monitor switched the widget to the primary display."));
+                    "The selected display is unavailable. TokenBurn switched the widget to the primary display."));
             }
         }
         else
@@ -117,7 +117,7 @@ public sealed class TaskbarOverlayController : IDisposable
         _taskbarHandle = _placement.GetTaskbarHandle(screen);
         if (_taskbarHandle == IntPtr.Zero)
         {
-            SetFallback("Windows taskbar is unavailable. Usage Monitor will keep running in the tray.");
+            SetFallback("Windows taskbar is unavailable. TokenBurn will keep running in the tray.");
             _retryPending = true;
             return false;
         }
@@ -299,7 +299,7 @@ public sealed class TaskbarOverlayController : IDisposable
         if (!placement.IsSane(bounds))
         {
             LogState($"{reason}.invariant-failed", "reconcile-rejected", placement.Bounds, false, false, dpi, _edgeOffsetDip);
-            SetFallback("The taskbar geometry was invalid. Usage Monitor will retry shortly.");
+            SetFallback("The taskbar geometry was invalid. TokenBurn will retry shortly.");
             _retryPending = true;
             return;
         }
@@ -574,7 +574,7 @@ public sealed class TaskbarStateChangedEventArgs(bool attached, string message) 
 
 internal sealed class NativeTaskbarOverlay : IDisposable
 {
-    internal const string WindowTitle = "Usage Monitor status strip";
+    internal const string WindowTitle = "TokenBurn status strip";
     internal const string OverlayMarker = "UsageMonitor.TaskbarOverlay.Native";
     private const int WsPopup = unchecked((int)0x80000000);
     private const int WsExToolWindow = 0x00000080;
@@ -603,7 +603,6 @@ internal sealed class NativeTaskbarOverlay : IDisposable
     private const byte AcSrcOver = 0;
     private const byte AcSrcAlpha = 1;
     private const int BmiRgb = 0;
-    private const int GwlExStyle = -20;
     private const int DragThreshold = 4;
     private static readonly IntPtr HwndTopmost = new(-1);
     private static readonly IntPtr HwndTop = IntPtr.Zero;
@@ -737,10 +736,14 @@ internal sealed class NativeTaskbarOverlay : IDisposable
     public bool SetPosition(System.Drawing.Rectangle bounds, bool promote, bool repaint)
     {
         if (Handle == IntPtr.Zero) return false;
-        var x = bounds.Left;
+        // The composited window must never be narrower/shorter than the bitmap actually painted
+        // into it (SetBitmap already grows the DIB to fit its source content). Sizing the window to
+        // a stale/undershot placement while blitting from (0,0) silently crops the trailing content
+        // (e.g. the last provider's value) instead of showing it.
+        var width = Math.Max(bounds.Width, _bitmapWidth);
+        var height = Math.Max(bounds.Height, _bitmapHeight);
+        var x = bounds.Right - width;
         var y = bounds.Top;
-        var width = bounds.Width;
-        var height = bounds.Height;
         var presented = false;
         if (repaint && _bitmapWidth > 0 && _bitmapHeight > 0)
         {
@@ -935,6 +938,8 @@ internal sealed class NativeTaskbarOverlay : IDisposable
         public int ClassExtra;
         public int WindowExtra;
         public IntPtr Instance;
+        // Keep the WNDCLASSEX layout intact, but leave both icon handles zero. The quota strip
+        // is a tool window and must not create a second TokenBurn shell identity.
         public IntPtr Icon;
         public IntPtr Cursor;
         public IntPtr Background;

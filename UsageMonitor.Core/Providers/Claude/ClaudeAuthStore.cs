@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace UsageMonitor.Core.Providers.Claude;
@@ -102,36 +101,6 @@ public sealed class ClaudeAuthStore
         catch (JsonException) { return null; }
     }
 
-    /// <summary>
-    /// Persists a rotated OAuth token without replacing provider-owned fields in the credentials file.
-    /// Claude Code rotates refresh tokens, so keeping the returned pair is required for the next
-    /// five-minute refresh cycle. The file-system seam makes this a no-op in read-only fixtures.
-    /// </summary>
-    public bool TryPersistTokens(string path, string accessToken, string? refreshToken, DateTimeOffset? expiresAt)
-    {
-        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(accessToken)) return false;
-        var text = _files.ReadAllText(path);
-        if (string.IsNullOrWhiteSpace(text)) return false;
-        try
-        {
-            if (JsonNode.Parse(text) is not JsonObject root) return false;
-            var oauthProperty = root.FirstOrDefault(pair =>
-                pair.Key.Equals("claudeAiOauth", StringComparison.OrdinalIgnoreCase) ||
-                pair.Key.Equals("claude_ai_oauth", StringComparison.OrdinalIgnoreCase) ||
-                pair.Key.Equals("oauth", StringComparison.OrdinalIgnoreCase));
-            if (oauthProperty.Value is not JsonObject oauth) return false;
-
-            oauth["accessToken"] = accessToken.Trim();
-            if (!string.IsNullOrWhiteSpace(refreshToken)) oauth["refreshToken"] = refreshToken.Trim();
-            if (expiresAt is { } expiry) oauth["expiresAt"] = expiry.ToUnixTimeMilliseconds();
-
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            return _files.TryWriteAllText(path, root.ToJsonString(options));
-        }
-        catch (JsonException) { return false; }
-        catch (InvalidOperationException) { return false; }
-    }
-
     private static string ExpandPath(string raw, string profile)
     {
         var value = raw.Trim().Trim('"');
@@ -144,24 +113,4 @@ public sealed class ClaudeAuthStore
         catch (ArgumentException) { return value; }
     }
 
-    public static DateTimeOffset? ExpiresAt(ClaudeOAuth oauth)
-    {
-        if (oauth.ExpiresAt is not { } raw) return null;
-        return FromUnixTimestamp(raw);
-    }
-
-    public static DateTimeOffset? RefreshTokenExpiresAt(ClaudeOAuth oauth)
-    {
-        if (oauth.RefreshTokenExpiresAt is not { } raw) return null;
-        return FromUnixTimestamp(raw);
-    }
-
-    private static DateTimeOffset? FromUnixTimestamp(double raw)
-    {
-        var milliseconds = Math.Abs(raw) > 100_000_000_000 ? raw : raw * 1000;
-        try { return DateTimeOffset.FromUnixTimeMilliseconds((long)milliseconds); }
-        catch (ArgumentOutOfRangeException) { return null; }
-    }
-
-    public static bool NeedsRefresh(ClaudeOAuth oauth, DateTimeOffset now) => ExpiresAt(oauth) is { } expires && expires <= now.AddMinutes(5);
 }

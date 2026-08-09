@@ -131,10 +131,43 @@ public sealed record MetricLine
 
 public sealed record UsageHistoryPoint(DateOnly Date, double Tokens = 0, double CostUsd = 0, bool Estimated = false);
 
+/// <summary>How a local history row obtained its cost. This deliberately excludes any account or request data.</summary>
+public enum UsageCostBasis
+{
+    ProviderReported,
+    CatalogEstimated,
+    CoarseEstimate,
+    Unpriced
+}
+
+/// <summary>
+/// A privacy-safe, locally aggregated usage row. Rows are grouped by day/model before crossing
+/// the provider boundary, so raw prompts, paths, session IDs, and request IDs never reach UI.
+/// </summary>
+public sealed record UsageBreakdownPoint(
+    DateOnly Date,
+    string ProviderId,
+    string? ModelId,
+    double UncachedInputTokens,
+    double CachedInputTokens,
+    double CacheCreationTokens,
+    double OutputTokens,
+    double ReasoningTokens,
+    double CostUsd,
+    UsageCostBasis CostBasis,
+    PricingBasis PricingBasis,
+    bool Estimated,
+    double CacheSavingsUsd = 0)
+{
+    public double ProcessedTokens => UncachedInputTokens + CachedInputTokens + CacheCreationTokens + OutputTokens + ReasoningTokens;
+}
+
 public sealed record ProviderUsageHistory(IReadOnlyList<UsageHistoryPoint> Points)
 {
     public double TotalCostUsd => Points.Sum(p => p.CostUsd);
     public double TotalTokens => Points.Sum(p => p.Tokens);
+    public IReadOnlyList<string> UnknownModels { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<UsageBreakdownPoint> Breakdown { get; init; } = Array.Empty<UsageBreakdownPoint>();
 }
 
 public sealed record ProviderDescriptor(

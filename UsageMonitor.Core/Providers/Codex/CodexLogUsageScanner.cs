@@ -1,18 +1,33 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using Microsoft.Data.Sqlite;
 
 namespace UsageMonitor.Core.Providers.Codex;
 
 public sealed class CodexLogUsageScanner
 {
+    private static readonly Regex DiagnosticsUsagePattern = new(
+        @"\btotal_usage_tokens=(?<tokens>\d+)\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex DiagnosticsModelPattern = new(
+        @"\bmodel=(?<model>[^\s}]+)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly IProviderFileSystem _files;
-    public CodexLogUsageScanner(IProviderFileSystem? files = null) => _files = files ?? new LocalProviderFileSystem();
+    private readonly IModelCatalog _catalog;
+    public CodexLogUsageScanner(IProviderFileSystem? files = null, IModelCatalog? catalog = null)
+    {
+        _files = files ?? new LocalProviderFileSystem();
+        _catalog = catalog ?? new CachedModelCatalog();
+    }
 
     public static ProviderUsageHistory ScanDirectory(string codexHome, DateTimeOffset since) => new CodexLogUsageScanner().Scan(codexHome, since);
 
     public ProviderUsageHistory Scan(string codexHome, DateTimeOffset since)
     {
         var totals = new Dictionary<DateOnly, (double Tokens, double Cost)>();
+        var breakdown = new Dictionary<(DateOnly Date, string Model, UsageCostBasis Basis), UsageBreakdownPoint>();
+        var unknownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var path in DiscoverSessionFiles(codexHome))
         {
@@ -28,7 +43,8 @@ public sealed class CodexLogUsageScanner
                 if (string.IsNullOrWhiteSpace(raw)) continue;
                 if (!raw.Contains("token_count", StringComparison.OrdinalIgnoreCase) &&
                     !raw.Contains("session_meta", StringComparison.OrdinalIgnoreCase) &&
-                    !raw.Contains("task_started", StringComparison.OrdinalIgnoreCase)) continue;
+                    !raw.Contains("task_started", StringComparison.OrdinalIgnoreCase) &&
+                    !raw.Contains("turn_context", StringComparison.OrdinalIgnoreCase)) continue;
                 using var doc = ProviderJson.Parse(raw.Trim());
                 if (doc is null) continue;
                 var root = doc.RootElement;
@@ -106,18 +122,128 @@ public sealed class CodexLogUsageScanner
                 var eventModel = ProviderJson.String(ProviderJson.Property(payload, "model", "model_name")) ?? model ?? "gpt-5";
                 var key = $"{timestamp:O}|{eventModel}|{input}|{cached}|{output}|{reasoning}|{tokens}";
                 if (!seen.Add(key)) continue;
-                var day = DateOnly.FromDateTime(timestamp.Value.UtcDateTime);
-                var cost = EstimateCost(eventModel, Math.Max(0, input - cached), cached, output + reasoning);
-                if (totals.TryGetValue(day, out var prior)) totals[day] = (prior.Tokens + tokens, prior.Cost + cost);
-                else totals[day] = (tokens, cost);
+                // The spend ring is selected by the user's local calendar day. Codex emits UTC
+                // timestamps, so grouping by UTC makes evening usage appear under tomorrow on
+                // west-of-UTC machines and makes Today/Yesterday look empty.
+                var day = DateOnly.FromDateTime(timestamp.Value.LocalDateTime);
+                var pricing = _catalog.ResolvePrice(ProviderIds.Codex, eventModel);
+                var cost = pricing?.Estimate(Math.Max(0, input - cached), cached, output + reasoning);
+                var cacheSavings = pricing is null ? 0 : cached / 1_000_000d * Math.Max(0, pricing.InputPerMillion - pricing.CachedInputPerMillion);
+                if (cost is null) unknownModels.Add(eventModel);
+                var knownCost = cost ?? 0;
+                if (totals.TryGetValue(day, out var prior)) totals[day] = (prior.Tokens + tokens, prior.Cost + knownCost);
+                else totals[day] = (tokens, knownCost);
+                var basis = cost is null ? UsageCostBasis.Unpriced : UsageCostBasis.CatalogEstimated;
+                var breakdownKey = (day, eventModel, basis);
+                if (breakdown.TryGetValue(breakdownKey, out var existing))
+                {
+                    breakdown[breakdownKey] = existing with
+                    {
+                        UncachedInputTokens = existing.UncachedInputTokens + Math.Max(0, input - cached),
+                        CachedInputTokens = existing.CachedInputTokens + cached,
+                        OutputTokens = existing.OutputTokens + output,
+                        ReasoningTokens = existing.ReasoningTokens + reasoning,
+                        CostUsd = existing.CostUsd + knownCost,
+                        CacheSavingsUsd = existing.CacheSavingsUsd + cacheSavings
+                    };
+                }
+                else
+                {
+                    breakdown[breakdownKey] = new UsageBreakdownPoint(day, ProviderIds.Codex, eventModel,
+                        Math.Max(0, input - cached), cached, 0, output, reasoning, knownCost, basis,
+                        basis == UsageCostBasis.CatalogEstimated ? PricingBasis.LocalEstimate : PricingBasis.Unknown, true, cacheSavings);
+                }
             }
         }
-        return new ProviderUsageHistory(totals.OrderBy(p => p.Key).Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToArray());
+        ScanDiagnosticsDatabase(codexHome, since, totals, breakdown, unknownModels);
+        return new ProviderUsageHistory(totals.OrderBy(p => p.Key).Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToArray())
+        {
+            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
+            Breakdown = breakdown.Values.OrderBy(point => point.Date).ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase).ToArray()
+        };
+    }
+
+    private void ScanDiagnosticsDatabase(string codexHome, DateTimeOffset since,
+        IDictionary<DateOnly, (double Tokens, double Cost)> totals,
+        IDictionary<(DateOnly Date, string Model, UsageCostBasis Basis), UsageBreakdownPoint> breakdown,
+        ISet<string> unknownModels)
+    {
+        // Newer Codex builds stopped writing event_msg/token_count records to session JSONL.
+        // Their authoritative per-turn usage is now emitted to the local logs SQLite database.
+        // Keep this fallback local and read-only so older JSONL history remains supported.
+        if (string.IsNullOrWhiteSpace(codexHome) || !Directory.Exists(codexHome)) return;
+        string[] databases;
+        try
+        {
+            databases = Directory.EnumerateFiles(codexHome, "logs_*.sqlite", SearchOption.TopDirectoryOnly).ToArray();
+        }
+        catch (IOException) { return; }
+        catch (UnauthorizedAccessException) { return; }
+
+        var cutoff = since.ToUniversalTime().ToUnixTimeSeconds();
+        foreach (var database in databases)
+        {
+            try
+            {
+                using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+                {
+                    DataSource = database,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Cache = SqliteCacheMode.Private,
+                    Pooling = false
+                }.ToString());
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    SELECT ts, feedback_log_body
+                    FROM logs
+                    WHERE ts >= $cutoff
+                      AND target = 'codex_core::session::turn'
+                      AND feedback_log_body LIKE '%post sampling token usage%';
+                    """;
+                command.Parameters.AddWithValue("$cutoff", cutoff);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    if (reader.IsDBNull(0) || reader.IsDBNull(1)) continue;
+                    if (!long.TryParse(reader.GetValue(0).ToString(), NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out var timestamp)) continue;
+                    var match = DiagnosticsUsagePattern.Match(reader.GetString(1));
+                    if (!match.Success || !double.TryParse(match.Groups["tokens"].Value,
+                            NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) || tokens <= 0) continue;
+                    var modelMatch = DiagnosticsModelPattern.Match(reader.GetString(1));
+                    var model = modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5";
+                    var pricing = _catalog.ResolvePrice(ProviderIds.Codex, model);
+                    var cost = pricing is null
+                        ? 0
+                        : pricing.Estimate(0, 0, tokens);
+                    if (pricing is null) unknownModels.Add(model);
+                    var day = DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeSeconds(timestamp).LocalDateTime);
+                    totals.TryGetValue(day, out var prior);
+                    totals[day] = (prior.Tokens + tokens, prior.Cost + cost);
+                    var basis = pricing is null ? UsageCostBasis.Unpriced : UsageCostBasis.CoarseEstimate;
+                    var key = (day, model, basis);
+                    if (breakdown.TryGetValue(key, out var existing))
+                    {
+                        breakdown[key] = existing with { OutputTokens = existing.OutputTokens + tokens, CostUsd = existing.CostUsd + cost };
+                    }
+                    else
+                    {
+                        breakdown[key] = new UsageBreakdownPoint(day, ProviderIds.Codex, model,
+                            0, 0, 0, tokens, 0, cost, basis,
+                            pricing is null ? PricingBasis.Unknown : PricingBasis.LocalEstimate, true);
+                    }
+                }
+            }
+            catch (SqliteException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     private IEnumerable<string> DiscoverSessionFiles(string codexHome)
     {
-        // Match OpenUsage's native discovery: active sessions win over archived copies with the
+        // Match the native discovery order: active sessions win over archived copies with the
         // same relative path. A direct-root fallback keeps sanitized fixtures and older installs
         // working when neither canonical directory exists.
         var activeRoot = Path.Combine(codexHome, "sessions");
@@ -162,10 +288,10 @@ public sealed class CodexLogUsageScanner
 
     private static double Number(JsonElement element, params string[] names) => ProviderJson.Number(ProviderJson.Property(element, names)) ?? 0;
 
-    private static double EstimateCost(string model, double input, double cached, double output)
+    private double? EstimateCost(string model, double input, double cached, double output)
     {
-        var pricing = ModelPricingCatalog.Resolve(model);
-        return pricing.Estimate(input, cached, output);
+        var pricing = _catalog.ResolvePrice(ProviderIds.Codex, model);
+        return pricing?.Estimate(input, cached, output) ?? 0;
     }
 
     private sealed record RawUsage(double Input, double Cached, double Output, double Reasoning, double Total)

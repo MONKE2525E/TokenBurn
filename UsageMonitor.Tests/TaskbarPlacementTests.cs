@@ -113,15 +113,27 @@ public sealed class TaskbarPlacementTests
     }
 
     [Fact]
-    public void InvalidLegacyRightEdgeOffsetResetsToTheSafeDefault()
+    public void OutOfRangeOffsetClampsToTheNearestTaskbarEdge()
     {
         var taskbar = new Rectangle(0, 1040, 1920, 40);
         var result = TaskbarStripPlacement.Calculate(taskbar, 163, 1732, 1881.6, 96);
 
         Assert.True(result.ResetPersistedOffset);
-        Assert.Equal(180, result.EdgeOffsetDip);
+        Assert.Equal(1753, result.EdgeOffsetDip);
         Assert.True(result.IsSane(taskbar));
-        Assert.True(result.Bounds.Left > taskbar.Left);
+        Assert.Equal(taskbar.Left + 4, result.Bounds.Left);
+    }
+
+    [Fact]
+    public void LeftEdgePlacementSurvivesWidgetGrowingAfterRefresh()
+    {
+        var taskbar = new Rectangle(0, 1040, 1920, 40);
+
+        var result = TaskbarStripPlacement.Calculate(taskbar, 300, 1732, 1756, 96);
+
+        Assert.True(result.ResetPersistedOffset);
+        Assert.Equal(1616, result.EdgeOffsetDip);
+        Assert.Equal(taskbar.Left + 4, result.Bounds.Left);
     }
 
     [Fact]
@@ -241,6 +253,22 @@ public sealed class TaskbarPlacementTests
         Assert.Equal("cost", SettingsMigration.NormalizeSpendMetric("invalid"));
     }
 
+    [Theory]
+    [InlineData("full", "full")]
+    [InlineData("REDUCED", "reduced")]
+    [InlineData("unexpected", "system")]
+    [InlineData(null, "system")]
+    public void MotionPreferenceIsStoredAsAnExplicitThreeWayChoice(string? value, string expected)
+    {
+        var settings = new UserSettings { MotionPreference = value! };
+
+        SettingsMigration.Normalize(settings);
+
+        Assert.Equal(expected, settings.MotionPreference);
+        var restored = JsonSerializer.Deserialize<UserSettings>(JsonSerializer.Serialize(settings));
+        Assert.Equal(expected, restored!.MotionPreference);
+    }
+
     [Fact]
     public void TaskbarGlyphKeepsAVisibleTailForNearFullQuotas()
     {
@@ -269,7 +297,7 @@ public sealed class TaskbarPlacementTests
 
         var tooltip = TaskbarGlyphRenderer.BuildTooltip([metric]);
 
-        Assert.StartsWith("Usage Monitor | Codex Weekly: 41% (resets in ", tooltip, StringComparison.Ordinal);
+        Assert.StartsWith("TokenBurn | Codex Weekly: 41% (resets in ", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("No data", tooltip, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -285,6 +313,17 @@ public sealed class TaskbarPlacementTests
         Assert.Equal(48, image.PixelWidth);
         Assert.Equal(48, image.PixelHeight);
         Assert.Contains(pixels, alpha => alpha > 0);
+    }
+
+    [Fact]
+    public void EmptyTaskbarGlyphIsTransparentInsteadOfUsingTheAppIcon()
+    {
+        var image = Assert.IsAssignableFrom<BitmapSource>(TaskbarGlyphRenderer.Render([]));
+        var pixels = new byte[image.PixelHeight * image.PixelWidth * 4];
+
+        image.CopyPixels(pixels, image.PixelWidth * 4, 0);
+
+        Assert.DoesNotContain(pixels.Where((_, index) => index % 4 == 3), alpha => alpha > 0);
     }
 
     [Fact]

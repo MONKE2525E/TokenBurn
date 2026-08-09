@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using UsageMonitor.Core;
 
 namespace UsageMonitor.Desktop;
 
@@ -66,14 +67,10 @@ public sealed class TauriPopupBridge : IDisposable
         EnsureStarted();
     }
 
-    public void StopHosted()
+    internal void StopHostedProcess()
     {
         lock (_gate)
         {
-            _desktopControlCancellation?.Cancel();
-            _desktopControlCancellation = null;
-            try { _desktopControlListener?.Stop(); } catch { }
-            _desktopControlListener = null;
             if (!_ownsProcess || _process is null) return;
             try
             {
@@ -102,7 +99,7 @@ public sealed class TauriPopupBridge : IDisposable
             }
             catch (SocketException)
             {
-                // Another Usage Monitor process may still be closing its listener during an
+                // Another TokenBurn process may still be closing its listener during an
                 // update. The Tauri surface remains usable, and the tray still exposes settings.
             }
         }
@@ -307,6 +304,7 @@ public sealed class TauriPopupBridge : IDisposable
         lock (_gate)
         {
             if (_process is { HasExited: false }) return true;
+            EnsureDesktopControlServer();
             var executable = ResolveExecutable();
             if (executable is null) return false;
             try
@@ -320,12 +318,15 @@ public sealed class TauriPopupBridge : IDisposable
                     WorkingDirectory = Path.GetDirectoryName(executable) ?? AppContext.BaseDirectory
                 });
                 _ownsProcess = _process is not null;
+                if (_ownsProcess)
+                    new FileDiagnosticsLogger().Info("TokenBurn popup host started.");
                 return _process is not null;
             }
-            catch
+            catch (Exception exception)
             {
                 _process = null;
                 _ownsProcess = false;
+                new FileDiagnosticsLogger().Warning("TokenBurn popup host failed to start.", exception: exception);
                 return false;
             }
         }
@@ -349,27 +350,21 @@ public sealed class TauriPopupBridge : IDisposable
         var explicitPath = Environment.GetEnvironmentVariable("USAGE_MONITOR_TAURI_EXE");
         if (!string.IsNullOrWhiteSpace(explicitPath) && File.Exists(explicitPath)) return explicitPath;
 
-        // A published build always uses its own bundled copy, placed alongside this host by the
-        // CopyTauriPopup publish target.
-        var bundled = new[]
+        // The popup embeds its frontend assets at compile time. A stale bundled copy beside a
+        // freshly rebuilt cargo binary (or vice versa) would silently keep serving old UI/colors,
+        // so choose the newest available build instead of blindly preferring the sibling copy.
+        var candidates = new List<string>
         {
             Path.Combine(AppContext.BaseDirectory, "UsageMonitor.TauriPoc.exe"),
-            Path.Combine(AppContext.BaseDirectory, "usage-monitor-tauri-poc.exe")
-        }.FirstOrDefault(File.Exists);
-        if (bundled is not null) return bundled;
-
-        // In a dev loop there is no bundled copy, so fall back to a local cargo build. The popup
-        // embeds its frontend assets at compile time, so a stale debug binary sitting next to a
-        // freshly rebuilt release one (or vice versa) would silently keep serving old UI/colors.
-        // Always pick whichever cargo profile was built most recently.
-        var devCandidates = new List<string>();
+            Path.Combine(AppContext.BaseDirectory, "tokenburn-desktop.exe")
+        };
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         for (var depth = 0; current is not null && depth < 8; depth++, current = current.Parent)
         {
-            devCandidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "debug", "usage-monitor-tauri-poc.exe"));
-            devCandidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "release", "usage-monitor-tauri-poc.exe"));
+            candidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "debug", "tokenburn-desktop.exe"));
+            candidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "release", "tokenburn-desktop.exe"));
         }
-        return devCandidates.Where(File.Exists)
+        return candidates.Where(File.Exists)
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .FirstOrDefault();
     }
@@ -381,8 +376,12 @@ public sealed class TauriPopupBridge : IDisposable
         _disposed = true;
         lock (_gate)
         {
-            StopHosted();
+            _desktopControlCancellation?.Cancel();
+            _desktopControlCancellation = null;
+            try { _desktopControlListener?.Stop(); } catch { }
+            _desktopControlListener = null;
         }
+        StopHostedProcess();
         _http.Dispose();
     }
 }

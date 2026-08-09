@@ -8,7 +8,7 @@ public static class ClaudeUsageMapper
 
     public static ClaudeMappedUsage Map(ProviderHttpResponse response, ClaudeOAuth credentials, DateTimeOffset now)
     {
-        if (response.StatusCode is 401 or 403) throw new ClaudeAuthenticationException("Claude session expired. Run `claude` to log in again.");
+        if (response.StatusCode is 401 or 403) throw new ClaudeAuthenticationException("Claude session expired. Run `claude auth login`, then refresh.");
         if (response.StatusCode == 429) return RateLimited(credentials, ParseRetryAfterSeconds(response.Header("retry-after"), now));
         if (response.StatusCode < 200 || response.StatusCode >= 300)
             throw new ClaudeRequestException(response.StatusCode, ParseRetryAfterSeconds(response.Header("retry-after"), now));

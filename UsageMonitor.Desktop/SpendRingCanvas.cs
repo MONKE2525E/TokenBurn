@@ -75,9 +75,8 @@ public sealed class SpendRingCanvas : FrameworkElement
             angle += sweep;
         }
 
-        // Estimation is already called out in the card header. Keep the center unit short
-        // (`USD`, `MTok`, or `tokens`) like OpenUsage's SwiftUI ring so it cannot collide with
-        // the primary value in the hole.
+        // Estimation is already called out in the card header. Keep the center unit short when
+        // one is useful, so it cannot collide with the primary value in the hole.
         DrawCenter(drawingContext, center, radius, summary.TotalLabel, summary.UnitLabel);
     }
 
@@ -105,8 +104,9 @@ public sealed class SpendRingCanvas : FrameworkElement
 
     private void DrawCenter(DrawingContext drawingContext, WpfPoint center, double radius, string total, string unit)
     {
-        // Use a two-line center label only when the selected metric needs a unit. Cost already
-        // includes "$" in the primary value, so a second "dollars" label would be redundant.
+        // Use a two-line center label only when the selected metric has a useful unit. Cost
+        // includes "$", and the metric picker identifies the per-token rate, so both render as
+        // a single value in the ring.
         var primarySize = 12d;
         var secondarySize = 8d;
         // Bound the label by the ring's actual hole, not just a canvas-relative guess. A fixed

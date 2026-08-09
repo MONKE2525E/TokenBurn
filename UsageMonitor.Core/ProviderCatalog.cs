@@ -2,6 +2,10 @@ namespace UsageMonitor.Core;
 
 using UsageMonitor.Core.Providers.Antigravity;
 using UsageMonitor.Core.Providers.OpenCode;
+using UsageMonitor.Core.Providers.Cursor;
+using UsageMonitor.Core.Providers.Copilot;
+using UsageMonitor.Core.Providers.Devin;
+using UsageMonitor.Core.Providers.Grok;
 
 public static class ProviderIds
 {
@@ -93,6 +97,14 @@ public static partial class ProviderCatalog
                 return new AntigravityProvider();
             if (descriptor.Id.Equals(ProviderIds.OpenCode, StringComparison.OrdinalIgnoreCase))
                 return new OpenCodeProvider();
+            if (descriptor.Id.Equals(ProviderIds.Cursor, StringComparison.OrdinalIgnoreCase))
+                return new CursorProvider();
+            if (descriptor.Id.Equals(ProviderIds.Copilot, StringComparison.OrdinalIgnoreCase))
+                return new CopilotProvider();
+            if (descriptor.Id.Equals(ProviderIds.Devin, StringComparison.OrdinalIgnoreCase))
+                return new DevinProvider();
+            if (descriptor.Id.Equals(ProviderIds.Grok, StringComparison.OrdinalIgnoreCase))
+                return new GrokProvider();
             if (descriptor.Id.Equals(ProviderIds.ClaudeCode, StringComparison.OrdinalIgnoreCase) &&
                 byId.TryGetValue("claude", out implementation))
                 return new ProviderIdAdapter(implementation, descriptor);

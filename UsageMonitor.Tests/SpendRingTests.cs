@@ -41,10 +41,36 @@ public sealed class SpendRingTests
         Assert.Equal("1M", todaySummary.TotalLabel);
         Assert.Equal(0.30d, yesterdaySummary.Total, 3);
         Assert.Equal("$0.30", yesterdaySummary.TotalLabel);
-        Assert.Equal("per MTok", yesterdaySummary.UnitLabel);
+        Assert.Empty(yesterdaySummary.UnitLabel);
         Assert.Equal(2_000_000d, yesterdaySummary.Segments[0].Tokens, 3);
 
         Assert.Equal("tokens", todaySummary.UnitLabel);
+    }
+
+    [Fact]
+    public void CostPerMillionTokensWeightsSlicesByTokensNotRates()
+    {
+        var today = new DateOnly(2026, 8, 5);
+        var snapshots = new[]
+        {
+            // Realistic 30-day shape: Antigravity's $9/MTok rate is 14x the others, but its
+            // usage is a rounding error. Sizing slices by rate let it swallow the ring.
+            Snapshot("antigravity", "Antigravity", (today, 180_000d, 1.62d)),
+            Snapshot("claude", "Claude", (today, 2_800_000_000d, 1_650d)),
+            Snapshot("codex", "Codex", (today, 2_200_000_000d, 1_440d))
+        };
+
+        var summary = SpendRingModel.Build(snapshots, SpendRingPeriod.Today, SpendRingMetric.CostPerMillionTokens, today);
+
+        var antigravity = Assert.Single(summary.Segments, segment => segment.ProviderId == "antigravity");
+        var ringTotal = summary.Segments.Sum(segment => segment.Value);
+        Assert.Equal(180_000d, antigravity.Value, 3);
+        Assert.True(antigravity.Value / ringTotal < 0.001,
+            $"Antigravity should be a sliver of the ring, not {antigravity.Value / ringTotal:P1}");
+        // The headline number is the blended rate (total cost / total tokens), not the sum of rates.
+        Assert.Equal(3_091.62d / 5_000_180_000d * 1_000_000d, summary.Total, 3);
+        Assert.Equal("$0.62", summary.TotalLabel);
+        Assert.Empty(summary.UnitLabel);
     }
 
     [Fact]
@@ -58,6 +84,31 @@ public sealed class SpendRingTests
         Assert.False(summary.HasData);
         Assert.Empty(summary.Segments);
         Assert.Equal("$0.00", summary.TotalLabel);
+    }
+
+    [Fact]
+    public void TinyTailIsGroupedIntoOthersAndCanBeExpanded()
+    {
+        var today = new DateOnly(2026, 8, 5);
+        var snapshots = new[]
+        {
+            Snapshot("claude", "Claude Code", (today, 99_000d, 99d)),
+            Snapshot("codex", "Codex", (today, 1_100d, 1.1d)),
+            Snapshot("cursor", "Cursor", (today, 50d, .05d)),
+            Snapshot("copilot", "Copilot", (today, 30d, .03d)),
+            Snapshot("devin", "Devin", (today, 20d, .02d))
+        };
+
+        var root = SpendRingModel.Build(snapshots, SpendRingPeriod.Today, SpendRingMetric.Cost, today);
+        var others = Assert.Single(root.Segments, x => x.DisplayName == "Others");
+        Assert.Equal(3, others.Children!.Count);
+        Assert.Equal(.1d, others.Value, 6);
+
+        var expanded = SpendRingModel.Expand(root, others);
+        Assert.True(expanded.IsDrillDown);
+        Assert.Equal(3, expanded.Segments.Count);
+        Assert.Equal(.1d, expanded.Total, 6);
+        Assert.Equal(others.Value, expanded.Total, 6);
     }
 
     [Fact]

@@ -17,8 +17,13 @@ public sealed class OpenCodeProvider : IUsageProvider
         [new ProviderLink("Dashboard", "https://opencode.ai/auth")]);
 
     private readonly OpenCodeUsageScanner _scanner;
+    private readonly IModelCatalog? _catalog;
 
-    public OpenCodeProvider(OpenCodeUsageScanner? scanner = null) => _scanner = scanner ?? new OpenCodeUsageScanner();
+    public OpenCodeProvider(OpenCodeUsageScanner? scanner = null, IModelCatalog? catalog = null)
+    {
+        _scanner = scanner ?? new OpenCodeUsageScanner();
+        _catalog = catalog;
+    }
 
     public ProviderDescriptor Descriptor => Provider;
 
@@ -35,7 +40,7 @@ public sealed class OpenCodeProvider : IUsageProvider
                     ProviderErrorCategory.NotConfigured));
             }
 
-            var history = BuildHistory(scan.Rows, context.Now);
+            var history = BuildHistory(scan.Rows, context.Now, context.ModelCatalog ?? _catalog);
             var lines = new List<MetricLine>();
             var goRows = scan.Rows.Where(row => row.ProviderId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase)).ToArray();
             if (scan.HasGoCredential || goRows.Length > 0)
@@ -43,7 +48,7 @@ public sealed class OpenCodeProvider : IUsageProvider
 
             if (history.Points.Count > 0)
             {
-                lines.Add(MetricLine.ValuesLine("Last 30 days",
+                lines.Add(MetricLine.ValuesLine("Last 90 days",
                 [
                     new MetricValue(history.TotalCostUsd, MetricKind.Dollars, "local history"),
                     new MetricValue(history.TotalTokens, MetricKind.Count, "tokens")
@@ -73,17 +78,93 @@ public sealed class OpenCodeProvider : IUsageProvider
         }
     }
 
-    private static ProviderUsageHistory BuildHistory(IReadOnlyList<OpenCodeUsageRow> rows, DateTimeOffset now)
+    private ProviderUsageHistory BuildHistory(IReadOnlyList<OpenCodeUsageRow> rows, DateTimeOffset now,
+        IModelCatalog? catalog)
     {
-        var since = now.UtcDateTime.Date.AddDays(-29);
-        var totals = rows
-            .Where(row => row.Timestamp.UtcDateTime.Date >= since)
-            .GroupBy(row => DateOnly.FromDateTime(row.Timestamp.UtcDateTime))
+        var today = _scanner.LocalDate(now);
+        var since = today.AddDays(-(_scanner.HistoryDays - 1));
+        var included = rows
+            .Select(row => (Usage: Price(row, catalog), Date: _scanner.LocalDate(row.Timestamp)))
+            .Where(item => item.Date >= since && item.Date <= today)
+            .ToArray();
+
+        var totals = included
+            .GroupBy(item => item.Date)
             .OrderBy(group => group.Key)
             .Select(group => new UsageHistoryPoint(group.Key,
-                group.Sum(row => row.Tokens), group.Sum(row => row.CostUsd), false))
+                group.Sum(item => item.Usage.Row.Tokens), group.Sum(item => item.Usage.CostUsd),
+                group.Any(item => item.Usage.Estimated)))
             .ToArray();
-        return new ProviderUsageHistory(totals);
+
+        var breakdown = included
+            .GroupBy(item => new
+            {
+                item.Date,
+                ProviderId = DisplayProvider(item.Usage.Row.ProviderId),
+                item.Usage.Row.ModelId,
+                item.Usage.CostBasis
+            })
+            .OrderBy(group => group.Key.Date)
+            .ThenBy(group => group.Key.ProviderId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(group => group.Key.ModelId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new UsageBreakdownPoint(
+                group.Key.Date,
+                group.Key.ProviderId,
+                group.Key.ModelId,
+                group.Sum(item => item.Usage.Row.InputTokens),
+                group.Sum(item => item.Usage.Row.CacheReadTokens),
+                group.Sum(item => item.Usage.Row.CacheWriteTokens),
+                group.Sum(item => item.Usage.Row.OutputTokens),
+                group.Sum(item => item.Usage.Row.ReasoningTokens),
+                group.Sum(item => item.Usage.CostUsd),
+                group.Key.CostBasis,
+                group.First().Usage.PricingBasis,
+                group.Any(item => item.Usage.Estimated),
+                group.Sum(item => item.Usage.CacheSavingsUsd)))
+            .ToArray();
+
+        var unknownModels = included
+            .Where(item => item.Usage.CostBasis == UsageCostBasis.Unpriced)
+            .Select(item => FormatModel(item.Usage.Row.ProviderId, item.Usage.Row.ModelId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new ProviderUsageHistory(totals)
+        {
+            UnknownModels = unknownModels,
+            Breakdown = breakdown
+        };
+    }
+
+    private static string DisplayProvider(string providerId) =>
+        string.IsNullOrWhiteSpace(providerId) ? "unknown" : providerId;
+
+    private static string FormatModel(string providerId, string? modelId)
+    {
+        var provider = DisplayProvider(providerId);
+        return string.IsNullOrWhiteSpace(modelId) ? provider : $"{provider}/{modelId}";
+    }
+
+    private static OpenCodePricedUsage Price(OpenCodeUsageRow row, IModelCatalog? catalog)
+    {
+        if (row.CostUsd > 0)
+            return new OpenCodePricedUsage(row, row.CostUsd, UsageCostBasis.ProviderReported,
+                PricingBasis.ProviderCredits, false, 0);
+
+        var pricing = row.ModelId is null
+            ? null
+            : catalog?.ResolvePrice(row.ProviderId, row.ModelId) ??
+              ModelPricingCatalog.TryResolve(row.ProviderId, row.ModelId);
+        if (pricing is null)
+            return new OpenCodePricedUsage(row, 0, UsageCostBasis.Unpriced, PricingBasis.Unknown, true, 0);
+
+        var estimatedCost = pricing.Estimate(row.InputTokens, row.CacheReadTokens,
+            row.OutputTokens + row.ReasoningTokens, row.CacheWriteTokens);
+        var cacheSavings = row.CacheReadTokens / 1_000_000d *
+            Math.Max(0, pricing.InputPerMillion - pricing.CachedInputPerMillion);
+        return new OpenCodePricedUsage(row, estimatedCost, UsageCostBasis.CatalogEstimated,
+            PricingBasis.LocalEstimate, true, cacheSavings);
     }
 
     private static void AddGoMeters(ICollection<MetricLine> lines, IReadOnlyList<OpenCodeUsageRow> goRows,
@@ -131,10 +212,38 @@ public sealed class OpenCodeProvider : IUsageProvider
     }
 }
 
-public sealed record OpenCodeUsageRow(DateTimeOffset Timestamp, double CostUsd, double Tokens, string ProviderId);
+public enum OpenCodeCostStatus
+{
+    ProviderReported,
+    Unpriced
+}
+
+public sealed record OpenCodeUsageRow(
+    DateTimeOffset Timestamp,
+    double CostUsd,
+    double Tokens,
+    string ProviderId,
+    string? ModelId = null,
+    double InputTokens = 0,
+    double CacheReadTokens = 0,
+    double CacheWriteTokens = 0,
+    double OutputTokens = 0,
+    double ReasoningTokens = 0,
+    OpenCodeCostStatus CostStatus = OpenCodeCostStatus.ProviderReported);
 
 public sealed record OpenCodeUsageScan(bool HasDatabase, bool HasGoCredential,
-    DateTimeOffset? FirstGoUsageAt, IReadOnlyList<OpenCodeUsageRow> Rows);
+    DateTimeOffset? FirstGoUsageAt, IReadOnlyList<OpenCodeUsageRow> Rows)
+{
+    public IReadOnlyList<string> DatabasePaths { get; init; } = Array.Empty<string>();
+}
+
+internal sealed record OpenCodePricedUsage(
+    OpenCodeUsageRow Row,
+    double CostUsd,
+    UsageCostBasis CostBasis,
+    PricingBasis PricingBasis,
+    bool Estimated,
+    double CacheSavingsUsd);
 
 public sealed class OpenCodeUsageScanner
 {
@@ -142,27 +251,52 @@ public sealed class OpenCodeUsageScanner
     private readonly Func<string?> _dataDirectoryOverride;
     private readonly Func<string?> _xdgDataHome;
     private readonly Func<string> _userProfile;
+    private readonly IOpenCodeDatabaseLocator _databaseLocator;
+    private readonly TimeZoneInfo _localTimeZone;
 
-    public OpenCodeUsageScanner(Func<string?>? dataDirectoryOverride = null, Func<string?>? xdgDataHome = null,
-        Func<string>? userProfile = null)
+    public OpenCodeUsageScanner(
+        Func<string?>? dataDirectoryOverride = null,
+        Func<string?>? xdgDataHome = null,
+        Func<string>? userProfile = null,
+        Func<string?>? localAppData = null,
+        IOpenCodeDatabaseLocator? databaseLocator = null,
+        TimeZoneInfo? localTimeZone = null,
+        int historyDays = 90)
     {
+        if (historyDays <= 0) throw new ArgumentOutOfRangeException(nameof(historyDays));
         _dataDirectoryOverride = dataDirectoryOverride ?? (() => Environment.GetEnvironmentVariable("OPENCODE_DATA_DIR"));
         _xdgDataHome = xdgDataHome ?? (() => Environment.GetEnvironmentVariable("XDG_DATA_HOME"));
         _userProfile = userProfile ?? (() => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        var explicitDirectory = Trim(_dataDirectoryOverride());
+        _databaseLocator = databaseLocator ?? new OpenCodeDatabaseLocator(
+            () => explicitDirectory,
+            _xdgDataHome,
+            _userProfile,
+            localAppData,
+            includeDefaultLocations: true);
+        _localTimeZone = localTimeZone ?? TimeZoneInfo.Local;
+        HistoryDays = historyDays;
     }
+
+    public int HistoryDays { get; }
+    public TimeZoneInfo LocalTimeZone => _localTimeZone;
+
+    public DateOnly LocalDate(DateTimeOffset timestamp) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(timestamp, _localTimeZone).Date);
 
     public OpenCodeUsageScan Scan(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
-        var directory = ResolveDataDirectory();
-        var auth = ReadGoCredential(Path.Combine(directory, "auth.json"));
-        var databases = DiscoverDatabases(directory);
-        if (databases.Count == 0) return new OpenCodeUsageScan(false, auth, null, Array.Empty<OpenCodeUsageRow>());
+        var discovery = _databaseLocator.Discover();
+        var auth = discovery.AuthPaths.Any(ReadGoCredential);
+        if (discovery.DatabasePaths.Count == 0)
+            return new OpenCodeUsageScan(false, auth, null, Array.Empty<OpenCodeUsageRow>());
 
-        var cutoff = now.ToUniversalTime().AddDays(-30).ToUnixTimeMilliseconds();
+        var cutoff = now.ToUniversalTime().AddDays(-HistoryDays).ToUnixTimeMilliseconds();
         var rows = new List<OpenCodeUsageRow>();
         DateTimeOffset? firstGoUsageAt = null;
         var successfulReads = 0;
-        foreach (var path in databases)
+        var unsupportedSchemas = 0;
+        foreach (var path in discovery.DatabasePaths.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
@@ -172,16 +306,18 @@ public sealed class OpenCodeUsageScanner
                     DataSource = path,
                     Mode = SqliteOpenMode.ReadOnly,
                     Cache = SqliteCacheMode.Private,
-                    // The scanner opens an OpenCode-owned database for a single refresh only.
-                    // Returning that handle to a pool can keep the .db locked on Windows after
-                    // the refresh has completed, disrupting OpenCode and cleanup on test hosts.
                     Pooling = false
                 }.ToString());
                 connection.Open();
-                rows.AddRange(ReadRows(connection, cutoff));
-                var candidate = ReadFirstGoUsage(connection);
+                var table = DiscoverMessageTable(connection);
+                rows.AddRange(ReadRows(connection, table, cutoff));
+                var candidate = ReadFirstGoUsage(connection, table);
                 if (candidate is not null && (firstGoUsageAt is null || candidate < firstGoUsageAt)) firstGoUsageAt = candidate;
                 successfulReads++;
+            }
+            catch (OpenCodeDatabaseException)
+            {
+                unsupportedSchemas++;
             }
             catch (SqliteException)
             {
@@ -191,29 +327,53 @@ public sealed class OpenCodeUsageScanner
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
-        if (successfulReads == 0) throw new OpenCodeDatabaseException();
-        return new OpenCodeUsageScan(true, auth, firstGoUsageAt, rows);
-    }
 
-    private string ResolveDataDirectory()
-    {
-        var explicitPath = Trim(_dataDirectoryOverride());
-        if (explicitPath is not null) return Environment.ExpandEnvironmentVariables(explicitPath);
-        var xdg = Trim(_xdgDataHome());
-        if (xdg is not null) return Path.Combine(Environment.ExpandEnvironmentVariables(xdg), "opencode");
-        return Path.Combine(_userProfile(), ".local", "share", "opencode");
-    }
-
-    private static IReadOnlyList<string> DiscoverDatabases(string directory)
-    {
-        if (!Directory.Exists(directory)) return Array.Empty<string>();
-        try
+        if (successfulReads == 0)
         {
-            return Directory.EnumerateFiles(directory, "opencode*.db", SearchOption.TopDirectoryOnly)
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+            var message = unsupportedSchemas > 0
+                ? "OpenCode databases do not expose a supported message schema."
+                : "OpenCode databases could not be read.";
+            throw new OpenCodeDatabaseException(message);
         }
-        catch (IOException) { throw new OpenCodeDatabaseException(); }
-        catch (UnauthorizedAccessException) { throw new OpenCodeDatabaseException(); }
+
+        return new OpenCodeUsageScan(true, auth, firstGoUsageAt, rows)
+        {
+            DatabasePaths = discovery.DatabasePaths
+        };
+    }
+
+    private static MessageTableDescriptor DiscoverMessageTable(SqliteConnection connection)
+    {
+        var tables = ReadTables(connection);
+        foreach (var tableName in new[] { "message", "session_message" })
+        {
+            if (!tables.Contains(tableName)) continue;
+            var columns = ReadColumns(connection, tableName);
+            if (columns.Contains("time_created") && columns.Contains("data"))
+                return new MessageTableDescriptor(tableName);
+        }
+
+        throw new OpenCodeDatabaseException("OpenCode message table schema is unsupported.");
+    }
+
+    private static HashSet<string> ReadTables(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table';";
+        using var reader = command.ExecuteReader();
+        var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read() && !reader.IsDBNull(0)) tables.Add(reader.GetString(0));
+        return tables;
+    }
+
+    private static HashSet<string> ReadColumns(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info(\"{tableName.Replace("\"", "\"\"", StringComparison.Ordinal)}\");";
+        using var reader = command.ExecuteReader();
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read() && !reader.IsDBNull(1)) columns.Add(reader.GetString(1));
+        return columns;
     }
 
     private static bool ReadGoCredential(string path)
@@ -234,48 +394,109 @@ public sealed class OpenCodeUsageScanner
         catch (JsonException) { throw new OpenCodeAuthException(); }
     }
 
-    private static IEnumerable<OpenCodeUsageRow> ReadRows(SqliteConnection connection, long cutoff)
+    private static IEnumerable<OpenCodeUsageRow> ReadRows(
+        SqliteConnection connection, MessageTableDescriptor table, long cutoff)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT time_created, json_extract(data, '$.cost'),
-                   COALESCE(json_extract(data, '$.tokens.total'), 0), json_extract(data, '$.providerID')
-            FROM message
+        command.CommandText = $"""
+            SELECT time_created,
+                   json_extract(data, '$.cost'),
+                   json_extract(data, '$.tokens.total'),
+                   json_extract(data, '$.tokens.input'),
+                   json_extract(data, '$.tokens.cache.read'),
+                   json_extract(data, '$.tokens.cache.write'),
+                   json_extract(data, '$.tokens.output'),
+                   json_extract(data, '$.tokens.reasoning'),
+                   json_extract(data, '$.providerID'),
+                   json_extract(data, '$.modelID')
+            FROM {QuoteIdentifier(table.Name)}
             WHERE time_created >= $cutoff
               AND json_valid(data)
-              AND json_extract(data, '$.role') = 'assistant'
-              AND json_extract(data, '$.providerID') IN ('opencode-go', 'opencode')
-              AND json_type(data, '$.cost') IN ('integer', 'real');
+              AND json_extract(data, '$.role') = 'assistant';
             """;
         command.Parameters.AddWithValue("$cutoff", cutoff);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            if (!TryNumber(reader.GetValue(0), out var timestamp) || !TryNumber(reader.GetValue(1), out var cost) ||
-                !TryNumber(reader.GetValue(2), out var tokens) || reader.IsDBNull(3)) continue;
-            if (!double.IsFinite(timestamp) || !double.IsFinite(cost) || cost < 0 || !double.IsFinite(tokens) || tokens < 0) continue;
-            var providerId = reader.GetString(3);
-            if (string.IsNullOrWhiteSpace(providerId)) continue;
-            yield return new OpenCodeUsageRow(DateTimeOffset.FromUnixTimeMilliseconds((long)timestamp), cost, tokens, providerId);
+            if (!TryNumber(reader.GetValue(0), out var timestamp) || !double.IsFinite(timestamp)) continue;
+            if (!TryTimestamp(timestamp, out var createdAt)) continue;
+
+            var hasCost = TryNumber(reader.GetValue(1), out var cost);
+            var hasTotal = TryNumber(reader.GetValue(2), out var total);
+            var hasInput = TryNumber(reader.GetValue(3), out var input);
+            var hasCacheRead = TryNumber(reader.GetValue(4), out var cacheRead);
+            var hasCacheWrite = TryNumber(reader.GetValue(5), out var cacheWrite);
+            var hasOutput = TryNumber(reader.GetValue(6), out var output);
+            var hasReasoning = TryNumber(reader.GetValue(7), out var reasoning);
+            if (!AreNonNegative(input, cacheRead, cacheWrite, output, reasoning)) continue;
+
+            var componentTotal = input + cacheRead + cacheWrite + output + reasoning;
+            if (!hasTotal) total = componentTotal;
+            if (!double.IsFinite(total) || total < 0) continue;
+            if (!hasCost) cost = 0;
+            if (!double.IsFinite(cost) || cost < 0) continue;
+            if (!hasCost && total <= 0) continue;
+            if (hasCost && cost <= 0 && total <= 0) continue;
+
+            var providerId = ReadText(reader.GetValue(8)) ?? string.Empty;
+            var modelId = ReadText(reader.GetValue(9));
+            yield return new OpenCodeUsageRow(
+                createdAt,
+                cost,
+                total,
+                providerId,
+                modelId,
+                input,
+                cacheRead,
+                cacheWrite,
+                output,
+                reasoning,
+                hasCost ? OpenCodeCostStatus.ProviderReported : OpenCodeCostStatus.Unpriced);
         }
     }
 
-    private static DateTimeOffset? ReadFirstGoUsage(SqliteConnection connection)
+    private static DateTimeOffset? ReadFirstGoUsage(SqliteConnection connection, MessageTableDescriptor table)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT MIN(time_created)
-            FROM message
+            FROM {QuoteIdentifier(table.Name)}
             WHERE json_valid(data)
               AND json_extract(data, '$.role') = 'assistant'
-              AND json_extract(data, '$.providerID') = 'opencode-go'
-              AND json_type(data, '$.cost') IN ('integer', 'real');
+              AND json_extract(data, '$.providerID') = 'opencode-go';
             """;
         var value = command.ExecuteScalar();
-        return TryNumber(value, out var timestamp) && double.IsFinite(timestamp)
-            ? DateTimeOffset.FromUnixTimeMilliseconds((long)timestamp)
+        return TryNumber(value, out var timestamp) && TryTimestamp(timestamp, out var createdAt)
+            ? createdAt
             : null;
     }
+
+    private static bool TryTimestamp(double value, out DateTimeOffset timestamp)
+    {
+        try
+        {
+            timestamp = DateTimeOffset.FromUnixTimeMilliseconds(checked((long)value));
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            timestamp = default;
+            return false;
+        }
+        catch (OverflowException)
+        {
+            timestamp = default;
+            return false;
+        }
+    }
+
+    private static bool AreNonNegative(params double[] values) =>
+        values.All(value => double.IsFinite(value) && value >= 0);
+
+    private static string? ReadText(object? value) =>
+        value is null or DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     private static bool TryNumber(object? value, out double number)
     {
@@ -304,7 +525,14 @@ public sealed class OpenCodeUsageScanner
         var trimmed = value?.Trim();
         return string.IsNullOrEmpty(trimmed) ? null : trimmed;
     }
+
+    private sealed record MessageTableDescriptor(string Name);
 }
 
-public sealed class OpenCodeDatabaseException : Exception;
+public sealed class OpenCodeDatabaseException : Exception
+{
+    public OpenCodeDatabaseException() { }
+    public OpenCodeDatabaseException(string message) : base(message) { }
+}
+
 public sealed class OpenCodeAuthException : Exception;

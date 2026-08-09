@@ -7,9 +7,15 @@ public sealed record ProviderContext
     public Uri? Proxy { get; init; }
     public ISecretStore? Secrets { get; init; }
     public IDiagnosticsLogger? Logger { get; init; }
+    public IModelCatalog? ModelCatalog { get; init; }
     public string? ConfigDirectory { get; init; }
     public bool ForceRefresh { get; init; }
 }
+
+public sealed record ModelCatalogRequest(
+    string? ETag = null,
+    string? LastModified = null,
+    ModelPricingSnapshot? CachedSnapshot = null);
 
 public interface IUsageProvider
 {

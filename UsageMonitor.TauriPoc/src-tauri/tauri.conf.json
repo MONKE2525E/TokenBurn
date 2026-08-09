@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Usage Monitor",
+  "productName": "TokenBurn",
   "version": "0.1.0",
-  "identifier": "com.usagemonitor.tauri-poc",
+  "identifier": "com.tokenburn.desktop",
   "build": {
     "frontendDist": "../dist"
   },
@@ -11,12 +11,12 @@
     "windows": [
       {
         "label": "main",
-        "title": "Usage Monitor",
+        "title": "TokenBurn",
         "width": 320,
         "height": 800,
         "minWidth": 320,
         "minHeight": 600,
-        "maxWidth": 400,
+        "maxWidth": 960,
         "maxHeight": 820,
         "decorations": false,
         "transparent": true,
@@ -33,6 +33,9 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "icon": [
+      "icons/icon.ico"
+    ]
   }
 }

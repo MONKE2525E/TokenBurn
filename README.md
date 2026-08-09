@@ -1,6 +1,6 @@
-# Usage Monitor
+# TokenBurn
 
-Usage Monitor is a Windows-native usage dashboard for AI coding subscriptions. It is an independent Windows derivative inspired by the behavior of [OpenUsage](https://github.com/robinebers/openusage). It is not an official OpenUsage product and does not use OpenUsage branding or logo assets.
+TokenBurn is a Windows-native usage dashboard for AI coding subscriptions. It is an independent Windows derivative inspired by the behavior of [OpenUsage](https://github.com/robinebers/openusage). It is not an official OpenUsage product and does not use OpenUsage branding or logo assets.
 
 ## Current status
 
@@ -19,7 +19,7 @@ The dashboard also surfaces redacted local 30-day spend totals when Codex or Cla
 Large Codex and Claude JSONL histories are streamed during refresh instead of loaded as one
 giant string. This keeps local spend collection bounded on real Windows workstations. If Claude's
 OAuth session expires, the Claude card keeps its local history and offers an explicit `claude auth
-login` action; Usage Monitor never handles the browser OAuth response itself.
+login` action; TokenBurn never handles the browser OAuth response itself.
 
 The first-run surface is the compact OpenUsage-style taskbar status strip plus the notification-area tray. Because Windows has no public embedded-widget API, the strip is isolated and can fall back to the supported native taskbar button and tray. The taskbar icon carries up to four selected metrics, the tooltip contains exact values and reset times, and a normal taskbar click restores the dashboard.
 
@@ -36,7 +36,7 @@ a loopback-only control channel. The native taskbar strip remains in the .NET pr
 Explorer attachment is the reliable Windows-specific part of the shell. This is a deliberate hybrid
 boundary, not a blind rewrite of provider or shell code.
 
-OpenUsage parity is intentionally staged. The macOS-only AppKit, Liquid Glass, iCloud, Keychain, and Sparkle pieces are not ported. WSL probing is deferred. Copilot, Cursor, Devin, Grok, and OpenCode provider packs are deferred. The Windows build now has provider/metric customization, spend ring periods, compact trend bars, reset countdowns, light/dark/system theme choices, screen-share exclusion, and opt-in quota alerts. Model-detail hover cards, drag reorder, global shortcut recording, signed updater feed, and cloud sync remain follow-up work rather than pretending to be complete.
+OpenUsage parity is intentionally staged. The macOS-only AppKit, Liquid Glass, iCloud, Keychain, and Sparkle pieces are not ported. WSL probing is deferred. Cursor, Copilot, Devin, and Grok are registered with honest capability detection; Grok has a live xAI model probe, while the others remain unsupported until a stable non-scraping usage source is available. The Windows build now has provider/metric customization, spend ring periods, compact trend bars, reset countdowns, cached model pricing, screen-share exclusion, and opt-in quota alerts. Model-detail hover cards, drag reorder, global shortcut recording, signed updater feed, and cloud sync remain follow-up work rather than pretending to be complete.
 
 ## Build
 
@@ -54,9 +54,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version 0.1.39
 
 The installer is written to `artifacts\installer`. It creates Start menu entries, supports uninstall, and offers an opt-in per-user PATH entry for the bundled `usage-monitor` CLI. Release signing and an update feed are intentionally not enabled until a real Windows signing certificate and release endpoint are available.
 
-The first release targets Windows-native Codex, Claude Code, and Antigravity integrations. The monitor reads the credentials and local history those tools already maintain. It does not require an inference API key or a hosted model catalog.
+The first release targets Windows-native Codex, Claude Code, and Antigravity integrations. The monitor reads the credentials and local history those tools already maintain. A cached public model catalog can refresh pricing without sending provider credentials; local fallback rates remain available offline.
 
-Codex and Claude Code have live Windows-native readers and refresh paths. Claude also preserves local session spend when Anthropic rejects an expired OAuth refresh, instead of showing fabricated zeroes. Antigravity has a live Windows quota reader using the existing `gemini:antigravity` Credential Manager target and the Gemini CLI OAuth file fallback, with merged Gemini/non-Gemini five-hour and weekly pools. Hosted API billing adapters remain isolated for a future opt-in custom-model pack and are not part of the default catalog. Unsupported providers report unavailable, never fake zero usage.
+Codex and Claude Code have live Windows-native readers and refresh paths. Claude also preserves local session spend when Anthropic rejects an expired OAuth refresh, instead of showing fabricated zeroes. Antigravity has a live Windows quota reader using the existing `gemini:antigravity` Credential Manager target and the Gemini CLI OAuth file fallback, with merged Gemini/non-Gemini five-hour and weekly pools. Grok can probe xAI models with `XAI_API_KEY`; Cursor, Copilot, and Devin report unsupported rather than scraping private dashboards or inventing quotas. Unsupported providers report unavailable, never fake zero usage.
+
+Custom Claude Code model aliases can be priced explicitly in `%LOCALAPPDATA%\UsageMonitor\Pricing\model-overrides.json`. Unresolved models still show token usage, but their cost is left unknown instead of using a generic provider price.
 
 ## Privacy
 

@@ -138,7 +138,12 @@ internal static class TaskbarStripPlacement
         var edgeOffsetPixels = migratedLegacyLeadingClamp
             ? maxOffsetPixels
             : reset
-            ? Math.Clamp((int)Math.Round(DefaultEdgeOffsetDip * scale), trailingMarginPixels, maxOffsetPixels)
+            ? double.IsFinite(persistedEdgeOffsetDip)
+                // The widget width can change after a refresh. Preserve the user's chosen
+                // side instead of jumping to the default trailing-edge position when the old
+                // offset no longer fits the newly sized widget.
+                ? Math.Clamp(persistedPixels, trailingMarginPixels, maxOffsetPixels)
+                : Math.Clamp((int)Math.Round(DefaultEdgeOffsetDip * scale), trailingMarginPixels, maxOffsetPixels)
             : persistedPixels;
 
         var crossAxisSize = Math.Max(26, vertical ? taskbar.Width : taskbar.Height);

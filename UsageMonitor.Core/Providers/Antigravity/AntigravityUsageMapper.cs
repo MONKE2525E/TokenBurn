@@ -6,7 +6,7 @@ public sealed record AntigravityMappedUsage(string? Plan, IReadOnlyList<MetricLi
 
 public sealed record AntigravityModelConfig(string Label, string? ModelId, double RemainingFraction, DateTimeOffset? ResetAt);
 
-/// <summary>Pure response mapping ported from OpenUsage's Antigravity pool logic.</summary>
+/// <summary>Pure response mapping for Antigravity pool data.</summary>
 public static class AntigravityUsageMapper
 {
     private static readonly (string Id, string Label, TimeSpan Period)[] SummaryBuckets =

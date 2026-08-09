@@ -1,6 +1,3 @@
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using DrawingSize = System.Drawing.Size;
 using System.Windows;
 using System.Windows.Threading;
 using UsageMonitor.Core;
@@ -12,6 +9,7 @@ public sealed class TrayIconService : IDisposable
 {
     private readonly App _app;
     private readonly MainWindow _dashboard;
+    private readonly WindowsAppNotificationService _appNotifications;
     private readonly MonitorPlacementService _placement = new();
     private Forms.NotifyIcon? _notifyIcon;
     private TaskbarOverlayController? _taskbar;
@@ -24,10 +22,11 @@ public sealed class TrayIconService : IDisposable
     private Forms.ContextMenuStrip? _fallbackMenu;
     private long _menuGeneration;
 
-    public TrayIconService(App app, MainWindow dashboard)
+    internal TrayIconService(App app, MainWindow dashboard, WindowsAppNotificationService appNotifications)
     {
         _app = app;
         _dashboard = dashboard;
+        _appNotifications = appNotifications;
     }
 
     public void Initialize()
@@ -35,8 +34,8 @@ public sealed class TrayIconService : IDisposable
         if (_notifyIcon is not null) return;
         _notifyIcon = new Forms.NotifyIcon
         {
-            Text = "Usage Monitor | no provider data yet",
-            Icon = CreateIcon(Array.Empty<MetricDisplay>()),
+            Text = "TokenBurn | no provider data yet",
+            Icon = TokenBurnIconResources.LoadTrayIcon(),
             Visible = true
         };
         // MouseDown fires before Windows moves focus away from the popup. That lets the
@@ -75,32 +74,33 @@ public sealed class TrayIconService : IDisposable
         if (_notifyIcon is null) return;
         var values = _metrics.ToList();
         var tooltip = values.Count == 0
-            ? "Usage Monitor | no provider data yet"
-            : "Usage Monitor | " + string.Join(" | ", values.Select(v =>
+            ? "TokenBurn | no provider data yet"
+            : "TokenBurn | " + string.Join(" | ", values.Select(v =>
             {
                 var reset = v.ResetAt is { } resetAt
-                    ? $" ({ResetTimeFormatter.Format(resetAt, _app.Settings.ResetTimeDisplay)})"
+                    ? $" ({ResetTimeFormatter.FormatSurface(resetAt, _app.Settings.ResetTimeDisplay)})"
                     : string.Empty;
                 return $"{v.Provider} {v.Value}{reset}";
             }));
         if (tooltip.Length > 63) tooltip = tooltip[..60] + "...";
         _notifyIcon.Text = tooltip;
-        var old = _notifyIcon.Icon;
-        // The taskbar widget is the live quota surface when it is actually embedded. Showing the
-        // same progress glyph here too would put two quota counters on screen at once, so the tray
-        // icon falls back to a plain mark while the widget owns the display.
-        _notifyIcon.Icon = _widgetAttached ? PlainIcon() : CreateIcon(_metrics);
-        old?.Dispose();
     }
 
     public void ShowFallbackNotification(string message)
     {
-        _notifyIcon?.ShowBalloonTip(5000, "Usage Monitor", message, Forms.ToolTipIcon.Info);
+        // The old WinForms balloon was an unbranded second notification system. It could show
+        // after a failed popup launch or refresh and looked unrelated to TokenBurn. Preserve the
+        // diagnostic detail locally instead of surfacing a generic shell balloon.
+        new FileDiagnosticsLogger().Info("Shell fallback notification suppressed", new Dictionary<string, object?>
+        {
+            ["message"] = message
+        });
     }
 
     public void ShowQuotaNotification(string message)
     {
-        _notifyIcon?.ShowBalloonTip(6000, "Usage Monitor quota alert", message, Forms.ToolTipIcon.Warning);
+        if (_disposed) return;
+        _appNotifications.ShowQuotaAlert(message);
     }
 
     private void OnTaskbarStateChanged(object? sender, TaskbarStateChangedEventArgs e)
@@ -133,14 +133,14 @@ public sealed class TrayIconService : IDisposable
             var anchor = NativeMethods.GetCursorPos(out var cursor)
                 ? new System.Drawing.Point(cursor.X, cursor.Y)
                 : Forms.Cursor.Position;
-            if (_dashboard.TryToggleTauriPopup(anchor))
+            if (_dashboard.TryToggleTauriPopup(anchor, useWidgetAvoidRect: false))
             {
                 return;
             }
             if (_dashboard.IsVisible && _dashboard.WindowState == WindowState.Normal)
                 _dashboard.WindowState = WindowState.Minimized;
             else
-                _dashboard.ShowFromTray(anchor);
+                _dashboard.ShowFromTray(anchor, useWidgetAvoidRect: false);
         }));
     }
 
@@ -158,12 +158,11 @@ public sealed class TrayIconService : IDisposable
                     _menu?.CloseSafely();
                     var cursor = Forms.Cursor.Position;
                     var actions = new TrayMenuActions(
-                        OpenDashboard: ToggleDashboard,
+                        OpenDashboard: () => _dashboard.ShowFromTray(cursor, useWidgetAvoidRect: false),
                         Refresh: () => _dashboard.RefreshData(force: true),
-                        Settings: () => _dashboard.ShowSettingsPage(),
-                        Customize: () => _dashboard.ShowCustomizePage(),
+                        Settings: () => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false),
+                        Customize: () => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false),
                         CheckForUpdates: _dashboard.ShowUpdateStatus,
-                        About: _dashboard.ShowAbout,
                         Quit: _app.Shutdown,
                         Monitors: _placement.GetMonitors(),
                         SelectedMonitor: _app.Settings.SelectedMonitor,
@@ -214,10 +213,11 @@ public sealed class TrayIconService : IDisposable
                 _fallbackMenu = null;
                 menu.Dispose();
             };
-            menu.Items.Add("Open dashboard", null, (_, _) => ToggleDashboard());
+            menu.Items.Add("Open dashboard", null, (_, _) => _dashboard.ShowFromTray(cursor, useWidgetAvoidRect: false));
             menu.Items.Add("Refresh now", null, (_, _) => _dashboard.RefreshData(force: true));
-            menu.Items.Add("Settings", null, (_, _) => _dashboard.ShowSettingsPage());
-            menu.Items.Add("Customize", null, (_, _) => _dashboard.ShowCustomizePage());
+            menu.Items.Add("Settings", null, (_, _) => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false));
+            menu.Items.Add("Customize", null, (_, _) => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false));
+            menu.Items.Add("Check for updates", null, (_, _) => _dashboard.ShowUpdateStatus());
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("Quit", null, (_, _) => _app.Shutdown());
             menu.Show(cursor);
@@ -226,105 +226,6 @@ public sealed class TrayIconService : IDisposable
         {
             new FileDiagnosticsLogger().Warning("Tray fallback menu could not be opened", exception: fallbackException);
         }
-    }
-
-    private static Icon CreateIcon(IReadOnlyList<MetricDisplay> metrics)
-    {
-        using var bitmap = new Bitmap(32, 32);
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        graphics.Clear(Color.Transparent);
-        // Keep the tray glyph visually aligned with the native taskbar glyph. A tiny provider marker
-        // prevents the old anonymous blue line from looking like a broken badge, while the tooltip
-        // remains the exact-value surface for users who need labels and reset times.
-        var items = metrics.Where(TaskbarGlyphRenderer.HasRenderableData).Where(metric => metric.IsMeter).ToArray();
-        if (items.Length == 0)
-        {
-            DrawFallbackIcon(graphics);
-            return Icon.FromHandle(bitmap.GetHicon());
-        }
-
-        const int markerX = 3;
-        const int barLeft = 8;
-        const int width = 21;
-        const int height = 4;
-        const int gap = 2;
-        var top = (32 - (items.Length * height + (items.Length - 1) * gap)) / 2;
-        using var track = new SolidBrush(Color.FromArgb(115, 165, 175, 186));
-        for (var i = 0; i < items.Length; i++)
-        {
-            var item = items[i];
-            var y = top + i * (height + gap);
-            var color = AccentColor(item);
-            using var progressFill = new SolidBrush(color);
-            graphics.FillEllipse(progressFill, new Rectangle(markerX, y, height, height));
-            graphics.FillRoundedRectangle(track, new Rectangle(barLeft, y, width, height), new DrawingSize(2, 2));
-            var progress = Math.Clamp(item.Progress, 0, 1);
-            if (progress > 0)
-            {
-                var visible = TaskbarGlyphRenderer.VisualFraction(progress);
-                var fillWidth = Math.Max(2, Math.Min(width, (int)Math.Round(width * visible)));
-                graphics.FillRoundedRectangle(progressFill, new Rectangle(barLeft, y, fillWidth, height), new DrawingSize(2, 2));
-                if (visible < 1)
-                {
-                    using var remainder = new SolidBrush(Color.FromArgb(60, color));
-                    graphics.FillRoundedRectangle(remainder,
-                        new Rectangle(barLeft + fillWidth, y, Math.Max(1, width - fillWidth), height), new DrawingSize(1, 2));
-                }
-            }
-        }
-        return Icon.FromHandle(bitmap.GetHicon());
-    }
-
-    private static Icon PlainIcon()
-    {
-        using var bitmap = new Bitmap(32, 32);
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        graphics.Clear(Color.Transparent);
-        DrawFallbackIcon(graphics);
-        return Icon.FromHandle(bitmap.GetHicon());
-    }
-
-    private static void DrawFallbackIcon(Graphics graphics)
-    {
-        // Use the same compact bar mark as the taskbar fallback. A gauge-and-needle reads like a
-        // warning badge at 16px, while bars remain legible and consistent with the live icon.
-        using var accent = new SolidBrush(Color.FromArgb(83, 210, 195));
-        using var track = new SolidBrush(Color.FromArgb(120, 165, 175, 186));
-        const int width = 5;
-        const int gap = 3;
-        var x = (32 - (width * 3 + gap * 2)) / 2;
-        const int baseline = 24;
-        foreach (var height in new[] { 10, 16, 22 })
-        {
-            graphics.FillRoundedRectangle(track, new Rectangle(x, baseline - 22, width, 22), new DrawingSize(2, 2));
-            graphics.FillRoundedRectangle(accent, new Rectangle(x, baseline - height, width, height), new DrawingSize(2, 2));
-            x += width + gap;
-        }
-    }
-
-    private static Color AccentColor(MetricDisplay metric)
-    {
-        switch (metric.State?.ToLowerInvariant())
-        {
-            case "warn": return Color.FromArgb(255, 179, 64);
-            case "danger": return Color.FromArgb(242, 121, 135);
-            case "neutral": return Color.FromArgb(154, 160, 171);
-        }
-
-        return metric.Provider?.ToLowerInvariant() switch
-        {
-            "codex" => Color.FromArgb(61, 130, 246),
-            "claude" or "claude code" => Color.FromArgb(218, 119, 86),
-            "antigravity" => Color.FromArgb(52, 168, 83),
-            "opencode" => Color.FromArgb(45, 212, 191),
-            "cursor" => Color.FromArgb(108, 123, 255),
-            "copilot" => Color.FromArgb(137, 87, 229),
-            "devin" => Color.FromArgb(255, 180, 84),
-            "grok" => Color.FromArgb(201, 206, 214),
-            _ => Color.FromArgb(83, 210, 195)
-        };
     }
 
     public void Dispose()

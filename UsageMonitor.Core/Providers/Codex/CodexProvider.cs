@@ -12,12 +12,14 @@ public sealed class CodexProvider : IUsageProvider
     private readonly CodexAuthStore _auth;
     private readonly IProviderHttpClient _http;
     private readonly IProviderFileSystem _files;
+    private readonly IModelCatalog? _catalog;
 
-    public CodexProvider(CodexAuthStore? auth = null, IProviderHttpClient? http = null, IProviderFileSystem? files = null)
+    public CodexProvider(CodexAuthStore? auth = null, IProviderHttpClient? http = null, IProviderFileSystem? files = null, IModelCatalog? catalog = null)
     {
         _files = files ?? new LocalProviderFileSystem();
         _auth = auth ?? new CodexAuthStore(_files);
         _http = http ?? new ProviderHttpClient();
+        _catalog = catalog;
     }
 
     public async Task<ProviderSnapshot> RefreshAsync(ProviderContext context, CancellationToken cancellationToken = default)
@@ -40,7 +42,7 @@ public sealed class CodexProvider : IUsageProvider
             var mapped = CodexUsageMapper.Map(response, context.Now);
             var lines = mapped.Lines.ToList();
             var home = Path.GetDirectoryName(state.Path) ?? string.Empty;
-            var history = new CodexLogUsageScanner(_files).Scan(home, context.Now.AddDays(-30));
+            var history = new CodexLogUsageScanner(_files, context.ModelCatalog ?? _catalog).Scan(home, context.Now.AddDays(-90));
             return ProviderSnapshot.Success(Provider, lines, mapped.Plan, context.Now, history);
         }
         catch (CodexAuthenticationException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Authentication, state.Path, context.Now); }
@@ -55,7 +57,7 @@ public sealed class CodexProvider : IUsageProvider
         var home = Path.GetDirectoryName(path) ?? string.Empty;
         return ProviderSnapshot.Error(Provider, message, category) with
         {
-            UsageHistory = new CodexLogUsageScanner(_files).Scan(home, now.AddDays(-30))
+            UsageHistory = new CodexLogUsageScanner(_files, _catalog).Scan(home, now.AddDays(-90))
         };
     }
 

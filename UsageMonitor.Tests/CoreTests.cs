@@ -5,6 +5,7 @@ using UsageMonitor.Cli;
 using UsageMonitor.Core;
 using UsageMonitor.Core.Providers.OpenCode;
 using UsageMonitor.Desktop;
+using UsageMonitor.LocalApi;
 
 namespace UsageMonitor.Tests;
 
@@ -89,14 +90,46 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task ForcedRefreshKeepsCachedLimitsButPreservesAuthenticationFailure()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N"));
+        using var cache = new JsonFileUsageCache(root);
+        var descriptor = new ProviderDescriptor(ProviderIds.ClaudeCode, "Claude Code");
+        var lastGood = ProviderSnapshot.Success(descriptor,
+            [MetricLine.Progress("Session", 78, 100, MetricKind.Percent, DateTimeOffset.UtcNow.AddHours(1))],
+            "Pro", DateTimeOffset.UtcNow.AddMinutes(-1));
+        await cache.WriteAsync("provider:claude-code", lastGood, lastGood.RefreshedAt);
+        var cachedRoundTrip = await cache.ReadAsync<ProviderSnapshot>("provider:claude-code");
+        Assert.NotNull(cachedRoundTrip);
+        Assert.Contains(cachedRoundTrip!.Lines, line => line.Type == MetricLineType.Progress);
+
+        var failure = ProviderSnapshot.Error(descriptor,
+            "Claude Code is signed out on this Windows account. Run `claude auth login`, then refresh.",
+            ProviderErrorCategory.NotConfigured);
+        Assert.Equal(ProviderErrorCategory.NotConfigured, failure.ErrorCategory);
+        var source = new CoreUsageSnapshotSource(
+            new UsageProviderCatalog([new FixedProvider(descriptor, failure)]),
+            cache);
+
+        var snapshot = Assert.Single(await source.GetSnapshotsAsync(ProviderIds.ClaudeCode, force: true));
+
+        Assert.Equal(ProviderIds.ClaudeCode, snapshot.ProviderId);
+        Assert.NotEmpty(snapshot.Lines);
+        Assert.Contains("signed out", snapshot.Warning, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("signed out", snapshot.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("auth login", snapshot.Warning, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(78, snapshot.Lines.OfType<ProgressMetricData>().Single().Used);
+    }
+
+    [Fact]
     public void RedactorRemovesSecretsAndEmailAddresses()
     {
-        var text = SensitiveDataRedactor.Redact("email noah@example.com token=abc123 account_id=acct_123 Authorization: Bearer xyz C:\\Users\\noah\\.codex");
-        Assert.DoesNotContain("noah@example.com", text);
+        var text = SensitiveDataRedactor.Redact("email developer@example.invalid token=abc123 account_id=acct_123 Authorization: Bearer xyz C:\\Users\\developer\\.codex");
+        Assert.DoesNotContain("developer@example.invalid", text);
         Assert.DoesNotContain("abc123", text);
         Assert.DoesNotContain("xyz", text);
         Assert.DoesNotContain("acct_123", text);
-        Assert.DoesNotContain("C:\\Users\\noah", text);
+        Assert.DoesNotContain("C:\\Users\\developer", text);
     }
 
     [Fact]
@@ -195,10 +228,17 @@ public sealed class CoreTests
                 await create.ExecuteNonQueryAsync();
                 await AddOpenCodeMessage(connection, now.AddHours(-1), "opencode-go", 1.25, 1_000);
                 await AddOpenCodeMessage(connection, now.AddDays(-2), "opencode", 0.50, 500);
-                await AddOpenCodeMessage(connection, now.AddDays(-32), "opencode-go", 99, 99);
+                await AddOpenCodeMessage(connection, now.AddDays(-92), "opencode", 99, 99);
             }
 
-            var provider = new OpenCodeProvider(new OpenCodeUsageScanner(() => root));
+            var locator = new OpenCodeDatabaseLocator(
+                dataDirectoryOverride: () => root,
+                xdgDataHome: () => null,
+                userProfile: () => root,
+                localAppData: () => null,
+                activeDatabasePath: () => null,
+                includeDefaultLocations: false);
+            var provider = new OpenCodeProvider(new OpenCodeUsageScanner(databaseLocator: locator));
             var snapshot = await provider.RefreshAsync(new ProviderContext { Now = now });
 
             Assert.Null(snapshot.ErrorCategory);
@@ -229,5 +269,13 @@ public sealed class CoreTests
             tokens = new { total = tokens }
         }));
         await insert.ExecuteNonQueryAsync();
+    }
+
+    private sealed class FixedProvider(ProviderDescriptor descriptor, ProviderSnapshot snapshot) : IUsageProvider
+    {
+        public ProviderDescriptor Descriptor => descriptor;
+
+        public Task<ProviderSnapshot> RefreshAsync(ProviderContext context,
+            CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
     }
 }

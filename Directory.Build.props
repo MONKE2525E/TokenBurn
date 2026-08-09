@@ -1,0 +1,6 @@
+<Project>
+  <!-- Local verification output lives under .build and must never be compiled as source. -->
+  <PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/.build/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

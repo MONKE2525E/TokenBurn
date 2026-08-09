@@ -19,7 +19,7 @@ public sealed class UserSettings
 {
     // The compact strip is the primary Windows status surface, with the tray retained as a fallback.
     public StatusSurfaceMode StatusSurface { get; set; } = StatusSurfaceMode.TaskbarWidget;
-    // The Tauri popup is the OpenUsage-like presentation layer. If its hosted shell is missing,
+    // The Tauri popup is the compact presentation layer. If its hosted shell is missing,
     // the existing WPF dashboard remains the safe fallback.
     public bool UseTauriPopup { get; set; } = true;
     public string SelectedMonitor { get; set; } = MonitorPlacementService.PrimaryMonitorId;
@@ -27,8 +27,14 @@ public sealed class UserSettings
     // normal use so a click cannot accidentally turn into a drag.
     public bool TaskbarPositionLocked { get; set; } = true;
     public bool StartAtLogin { get; set; } = true;
-    public bool NotificationsEnabled { get; set; }
-    public bool CompactDensity { get; set; }
+    public bool NotificationsEnabled { get; set; } = true;
+    // Reset notifications are independent from dashboard provider visibility. Keep the full
+    // catalog selected by default so a newly connected provider participates automatically.
+    public List<string> NotificationProviderIds { get; set; } =
+        [.. ProviderCatalog.DefaultDescriptors.Select(provider => provider.Id)];
+    // Legacy fields are retained for settings-file compatibility. The popup is always compact
+    // and the spend ring is always shown, so they are no longer user-facing preferences.
+    public bool CompactDensity { get; set; } = true;
     public bool ShowTotalSpend { get; set; } = true;
     // Stored values are canonical provider IDs. SettingsStore migrates the display names used by
     // older releases before the settings reach the dashboard or popup.
@@ -39,13 +45,18 @@ public sealed class UserSettings
     public bool ProviderSelectionInitialized { get; set; } = true;
     public string UsageDisplay { get; set; } = "Used";
     public string ResetTimeDisplay { get; set; } = "Countdown";
+    // "system" follows Windows accessibility, while "full" and "reduced" are explicit
+    // per-app overrides. This lets someone keep global desktop effects disabled while still
+    // opting into TokenBurn's short popup and dashboard transitions.
+    public string MotionPreference { get; set; } = "system";
     // Compact spend-chart metric selected in the Tauri popup or native dashboard.
     public string SpendMetric { get; set; } = "cost";
-    // Mirrors the reference app's first warning toggle. The global notification switch
-    // remains off by default, so this is inert until the user opts into alerts.
+    // Legacy threshold fields remain for settings-file compatibility. Reset notifications use
+    // NotificationsEnabled and NotificationProviderIds instead.
     public bool AlmostOutAlerts { get; set; } = true;
     public bool CuttingItCloseAlerts { get; set; }
     public bool WillRunOutAlerts { get; set; }
+    public string NotificationTrigger { get; set; } = "threshold5";
     public bool HideFromScreenShare { get; set; }
     public List<string> StarredMetrics { get; set; } =
         ["claude-code:session", "claude-code:weekly", "codex:weekly", "antigravity:session"];
@@ -67,16 +78,19 @@ public sealed class UserSettings
         TaskbarPositionLocked = TaskbarPositionLocked,
         StartAtLogin = StartAtLogin,
         NotificationsEnabled = NotificationsEnabled,
+        NotificationProviderIds = [.. (NotificationProviderIds ?? [])],
         CompactDensity = CompactDensity,
         ShowTotalSpend = ShowTotalSpend,
         DisabledProviders = [.. (DisabledProviders ?? [])],
         ProviderSelectionInitialized = ProviderSelectionInitialized,
         UsageDisplay = UsageDisplay,
         ResetTimeDisplay = ResetTimeDisplay,
+        MotionPreference = MotionPreference,
         SpendMetric = SpendMetric,
         AlmostOutAlerts = AlmostOutAlerts,
         CuttingItCloseAlerts = CuttingItCloseAlerts,
         WillRunOutAlerts = WillRunOutAlerts,
+        NotificationTrigger = NotificationTrigger,
         HideFromScreenShare = HideFromScreenShare,
         StarredMetrics = [.. (StarredMetrics ?? [])],
         WidgetPlacements = WidgetPlacements is null
@@ -135,6 +149,9 @@ public sealed record MetricChartDisplay(string Label, double Value, string? Valu
 
 public static class ResetTimeFormatter
 {
+    public static string FormatSurface(DateTimeOffset resetAt, string? displayMode)
+        => resetAt <= DateTimeOffset.UtcNow ? "Waiting for reset data" : Format(resetAt, displayMode);
+
     public static string Format(DateTimeOffset resetAt, string? displayMode)
     {
         if (string.Equals(displayMode, "Exact time", StringComparison.OrdinalIgnoreCase))

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -11,11 +12,14 @@ using System.Windows.Media.Imaging;
 using System.Globalization;
 using System.Diagnostics;
 using System.ComponentModel;
+using System.Net.Http;
 using Microsoft.Win32;
 using WpfComboBox = System.Windows.Controls.ComboBox;
 using WpfCheckBox = System.Windows.Controls.CheckBox;
 using WpfButton = System.Windows.Controls.Button;
 using WpfPasswordBox = System.Windows.Controls.PasswordBox;
+using WpfMenuItem = System.Windows.Controls.MenuItem;
+using WpfContextMenu = System.Windows.Controls.ContextMenu;
 using UsageMonitor.Core;
 using UsageMonitor.Core.Providers.Claude;
 using UsageMonitor.Core.Providers.Codex;
@@ -36,13 +40,17 @@ public partial class MainWindow : Window
     private CoreUsageSnapshotSource? _snapshotSource;
     private JsonFileUsageCache? _cache;
     private ISecretStore? _secretStore;
-    private readonly QuotaAlertService _quotaAlerts = new();
+    private CachedModelCatalog? _modelCatalog;
+    private readonly ResetNotificationScheduler _resetNotifications = new();
     private readonly System.Windows.Threading.DispatcherTimer _refreshTimer;
     private Task? _refreshTask;
     private bool _refreshInFlight;
+    private bool _refreshLoopStarted;
     // Keep the last successful provider envelope in memory so an auth or network failure cannot
     // erase a previously visible quota bar during the next five-minute refresh.
     private readonly Dictionary<string, UsageSnapshotData> _lastGoodSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ResetRecoveryState> _resetRecovery = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<UsageSnapshotData> _latestSnapshots = Array.Empty<UsageSnapshotData>();
     private DateTimeOffset _nextRefreshAt = DateTimeOffset.Now;
     internal IUsageProviderCatalog? SnapshotCatalog { get; private set; }
     internal IUsageCache? SnapshotCache => _cache;
@@ -54,6 +62,7 @@ public partial class MainWindow : Window
         // WPF freezes those resources for performance once the visual tree exists.
         _settings = SettingsStore.Load();
         InitializeComponent();
+        Icon = TokenBurnIconResources.LoadWpfAppIcon();
         TopMetricPicker.SelectedIndex = SpendMetricIndex(_settings.SpendMetric);
         ProviderCards = _providerCards;
         DataContext = this;
@@ -65,11 +74,6 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(1)
         };
         _refreshTimer.Tick += (_, _) => RefreshTimerTick();
-        Loaded += (_, _) =>
-        {
-            _refreshTimer.Start();
-            RefreshData();
-        };
         Closed += (_, _) => _refreshTimer.Stop();
         SpendCard.ShareRequested += (_, _) => ShareScreenshotButton_OnClick(SpendCard, new RoutedEventArgs());
         StateChanged += MainWindow_OnStateChanged;
@@ -89,9 +93,61 @@ public partial class MainWindow : Window
     private void RefreshTimerTick()
     {
         UpdateRefreshCountdown();
+        var dueResets = _resetNotifications.Tick(DateTimeOffset.UtcNow, notification =>
+            _tray?.ShowQuotaNotification($"{notification.DisplayName} {notification.MetricLabel} reset."));
+        if (dueResets > 0 && !_refreshInFlight)
+        {
+            RefreshData(force: true);
+            return;
+        }
+        if (!_refreshInFlight && ShouldRecoverExpiredReset())
+        {
+            RefreshData(force: true);
+            return;
+        }
         if (!_refreshInFlight && DateTimeOffset.Now >= _nextRefreshAt)
             RefreshData();
     }
+
+    private bool ShouldRecoverExpiredReset()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var due = new List<(string Key, DateTimeOffset ResetAt)>();
+        foreach (var snapshot in _latestSnapshots)
+        {
+            // A provider warning means these are cached limits, not a confirmed post-reset
+            // response. Retrying on every expired cached timestamp creates a refresh loop when
+            // the provider is rate-limited or its OAuth session is temporarily unavailable.
+            if (!string.IsNullOrWhiteSpace(snapshot.Warning) || !string.IsNullOrWhiteSpace(snapshot.Error))
+                continue;
+
+            foreach (var metric in snapshot.Lines.OfType<ProgressMetricData>())
+            {
+                if (metric.ResetsAt is not { } resetAt || resetAt > now || snapshot.FetchedAt < resetAt) continue;
+                due.Add(($"{snapshot.ProviderId}:{metric.Label}", resetAt));
+            }
+        }
+
+        var shouldRefresh = false;
+        foreach (var (key, resetAt) in due)
+        {
+            if (!_resetRecovery.TryGetValue(key, out var state) || state.ResetAt != resetAt)
+                state = new ResetRecoveryState(resetAt, now, 0);
+            if (now >= state.NextAttemptAt)
+            {
+                state = state with
+                {
+                    Attempts = state.Attempts + 1,
+                    NextAttemptAt = now.AddSeconds(Math.Min(60, 5 * Math.Pow(2, Math.Min(state.Attempts, 4))))
+                };
+                shouldRefresh = true;
+            }
+            _resetRecovery[key] = state;
+        }
+        return shouldRefresh;
+    }
+
+    private sealed record ResetRecoveryState(DateTimeOffset ResetAt, DateTimeOffset NextAttemptAt, int Attempts);
 
     private void UpdateRefreshCountdown()
     {
@@ -133,14 +189,30 @@ public partial class MainWindow : Window
             }
             UpdateTaskbarSurfaceStatus(state);
         };
-        var catalog = ProviderCatalog.CreateDefault([new CodexProvider(), new ClaudeProvider(), new AntigravityProvider(), new OpenCodeProvider()]);
+        _modelCatalog = new CachedModelCatalog(pricingDirectory: UsageMonitorPaths.Current.PricingDirectory);
+        _ = WarmModelCatalogAsync(_modelCatalog);
+        var catalog = ProviderCatalog.CreateDefault([
+            new CodexProvider(catalog: _modelCatalog),
+            new ClaudeProvider(catalog: _modelCatalog),
+            new AntigravityProvider(),
+            new OpenCodeProvider()
+        ]);
         SnapshotCatalog = catalog;
         var logger = new FileDiagnosticsLogger();
         _cache = new JsonFileUsageCache(logger: logger);
         _secretStore = new CredentialManagerSecretStore(logger: logger);
         _snapshotSource = new CoreUsageSnapshotSource(catalog, _cache,
-            new ProviderContext { Secrets = _secretStore, Logger = logger });
+            new ProviderContext { Secrets = _secretStore, Logger = logger, ModelCatalog = _modelCatalog });
         ApplySettings(_settings);
+        StartRefreshLoop();
+    }
+
+    private void StartRefreshLoop()
+    {
+        if (_refreshLoopStarted) return;
+        _refreshLoopStarted = true;
+        _refreshTimer.Start();
+        RefreshData();
     }
 
     private void UpdateTaskbarSurfaceStatus(TaskbarStateChangedEventArgs state)
@@ -155,17 +227,19 @@ public partial class MainWindow : Window
     {
         _settings = settings.Clone();
         _settings.StatusSurface = StatusSurfaceMode.TaskbarWidget;
+        _resetNotifications.Observe(_latestSnapshots, _settings.NotificationsEnabled,
+            _settings.NotificationProviderIds, DateTimeOffset.UtcNow);
         ApplyScreenSharePrivacy();
         _taskbar?.ApplyScreenSharePrivacy(_settings.HideFromScreenShare);
         _taskbar?.ApplyPositionLock(_settings.TaskbarPositionLocked);
-        ApplyDensity(_settings.CompactDensity);
+            ApplyDensity(true);
         SpendCard.SetMetric(ParseSpendMetric(_settings.SpendMetric));
         SurfaceFooterText.Text = "Taskbar status strip + tray";
         PrivacyFooter.Text = _settings.NotificationsEnabled ? "Local cache / loopback API only / alerts enabled" : "Local cache / loopback API only";
-        SpendCard.Visibility = _settings.ShowTotalSpend ? Visibility.Visible : Visibility.Collapsed;
+        SpendCard.Visibility = Visibility.Visible;
         // The taskbar button and tray own dismissal when the dashboard is linked to a
         // shell surface. Keeping duplicate Windows caption controls in that mode made the
-        // compact popover look unlike OpenUsage and encouraged accidental app termination.
+        // compact popover look unlike the dashboard and encouraged accidental app termination.
         MinimizeButton.Visibility = Visibility.Collapsed;
         CloseButton.Visibility = Visibility.Collapsed;
     }
@@ -185,10 +259,10 @@ public partial class MainWindow : Window
 
     public void ShowFromTray() => ShowFromTray(null);
 
-    public void ShowFromTray(DrawingPoint? requestedAnchor)
+    public void ShowFromTray(DrawingPoint? requestedAnchor, bool useWidgetAvoidRect = true)
     {
-        if (_settings.UseTauriPopup && _tauriPopup is not null &&
-            _tauriPopup.TryShow(requestedAnchor ?? ResolvePopupAnchor(), GetWidgetAvoidRect()))
+        if (_tauriPopup is not null &&
+            _tauriPopup.TryShow(requestedAnchor ?? ResolvePopupAnchor(), useWidgetAvoidRect ? GetWidgetAvoidRect() : null))
         {
             // The WPF dashboard remains loaded as a fallback and for settings, but it must not
             // compete with the Tauri popover or create a second taskbar button.
@@ -196,29 +270,22 @@ public partial class MainWindow : Window
                 WindowState = WindowState.Minimized;
             return;
         }
-        if (!IsVisible) Show();
-        // Restore through the shell as well as WPF. This makes a click from the
-        // tray, native taskbar button, or a duplicate Start-menu launch behave
-        // identically when the login instance is minimized on another desktop.
-        WindowState = WindowState.Normal;
-        PositionPopoverNearTaskbar();
-        var hwnd = new WindowInteropHelper(this).Handle;
-        if (hwnd != IntPtr.Zero)
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
-        Activate();
-        if (hwnd != IntPtr.Zero)
-            NativeMethods.SetForegroundWindow(hwnd);
-        Focus();
-        PlayEntranceAnimation();
+        // Do not reveal the legacy WPF dashboard. It is an integration host for the native
+        // taskbar strip and tray only; presenting it as a fallback made two wildly different
+        // dashboards compete for the same action.
+        _tray?.ShowFallbackNotification("The compact dashboard is starting. Try again in a moment.");
     }
 
-    internal bool TryToggleTauriPopup(DrawingPoint anchor)
-        => _settings.UseTauriPopup && _tauriPopup is not null && _tauriPopup.TryToggle(anchor, GetWidgetAvoidRect());
+    internal bool TryToggleTauriPopup(DrawingPoint anchor, bool useWidgetAvoidRect = true)
+        => _tauriPopup is not null && _tauriPopup.TryToggle(anchor, useWidgetAvoidRect ? GetWidgetAvoidRect() : null);
 
     internal void ToggleFromTaskbarIndicator(DrawingPoint anchor)
     {
-        if (TryToggleTauriPopup(anchor)) return;
-        ShowFromTray(anchor);
+        // Use the same native toggle as the tray. Focus loss can hide the popup just before this
+        // mouse-up reaches the overlay; the Rust-side suppression window treats that race as one
+        // dismissal instead of hiding and immediately showing the popup again.
+        if (!TryToggleTauriPopup(anchor))
+            ShowFromTray(anchor);
     }
 
     private DrawingPoint ResolvePopupAnchor()
@@ -324,7 +391,7 @@ public partial class MainWindow : Window
 
     private void InfoButton_OnClick(object sender, RoutedEventArgs e)
     {
-        // OpenUsage's small info affordance explains the spend scope; the full About dialog
+        // The small info affordance explains the spend scope; the full About dialog
         // remains in Options.  A transient ToolTip keeps this interaction non-modal and lets the
         // user continue changing the period or metric without losing the dashboard context.
         var tip = new System.Windows.Controls.ToolTip
@@ -470,11 +537,30 @@ public partial class MainWindow : Window
                     var warning = string.IsNullOrWhiteSpace(snapshot.Error)
                         ? "Refresh failed. Showing the last good limits."
                         : snapshot.Error;
-                    return lastGood with { Warning = warning, FetchedAt = snapshot.FetchedAt };
+                    return lastGood with
+                    {
+                        Error = snapshot.Error,
+                        ErrorCategory = snapshot.ErrorCategory,
+                        Warning = warning,
+                        FetchedAt = snapshot.FetchedAt
+                    };
                 }
 
                 return snapshot;
             }).ToArray();
+            _latestSnapshots = effectiveSnapshots;
+            _resetNotifications.Observe(effectiveSnapshots, _settings.NotificationsEnabled,
+                _settings.NotificationProviderIds, DateTimeOffset.UtcNow);
+            foreach (var key in _resetRecovery.Keys.ToArray())
+            {
+                var separator = key.IndexOf(':');
+                var provider = separator < 0 ? key : key[..separator];
+                var label = separator < 0 ? string.Empty : key[(separator + 1)..];
+                var fresh = effectiveSnapshots.FirstOrDefault(x => x.ProviderId.Equals(provider, StringComparison.OrdinalIgnoreCase))?.Lines
+                    .OfType<ProgressMetricData>().FirstOrDefault(x => x.Label.Equals(label, StringComparison.OrdinalIgnoreCase));
+                if (fresh?.ResetsAt is { } reset && reset > DateTimeOffset.UtcNow)
+                    _resetRecovery.Remove(key);
+            }
             var enabledProviders = DashboardData.ActiveProviders.Where(provider => IsProviderEnabled(provider.Id)).ToList();
             var refreshedCards = new List<ProviderCardDisplay>(enabledProviders.Count);
             foreach (var provider in enabledProviders)
@@ -491,18 +577,22 @@ public partial class MainWindow : Window
             SpendCard.SetSnapshots(
                 enabledSnapshots,
                 DashboardData.ActiveProviders.ToDictionary(provider => provider.DisplayName, provider => provider.Accent, StringComparer.OrdinalIgnoreCase));
-            _quotaAlerts.Observe(snapshots, _settings.NotificationsEnabled,
-                _settings.AlmostOutAlerts,
-                _settings.CuttingItCloseAlerts,
-                _settings.WillRunOutAlerts,
-                message => _tray?.ShowQuotaNotification(message));
             var connected = _providerCards.Count(card =>
                 !string.Equals(card.Status, "Not connected", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(card.Status, "Unavailable", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(card.Status, "Not configured", StringComparison.OrdinalIgnoreCase));
             ConnectedTextBlock.Text = $"{connected} of {enabledProviders.Count}";
             _nextRefreshAt = DateTimeOffset.Now.AddMinutes(5);
-            SpendEstimateBadge.Visibility = SpendCard.CurrentSummary.HasEstimatedValues
+            var hasUnknownPricing = enabledSnapshots.Any(snapshot => snapshot.UsageHistory?.UnknownModels.Count > 0);
+            SpendEstimateText.Text = hasUnknownPricing && SpendCard.CurrentSummary.HasEstimatedValues
+                ? "ESTIMATED • UNKNOWN PRICING"
+                : hasUnknownPricing
+                    ? "UNKNOWN PRICING"
+                    : "ESTIMATED";
+            SpendEstimateBadge.ToolTip = hasUnknownPricing
+                ? "Some local history uses models without a known price. Tokens are included, but those costs are not fabricated."
+                : "Local spend is estimated from session history, not a bill.";
+            SpendEstimateBadge.Visibility = SpendCard.CurrentSummary.HasEstimatedValues || hasUnknownPricing
                 ? Visibility.Visible
                 : Visibility.Collapsed;
             UpdateRefreshCountdown();
@@ -522,6 +612,18 @@ public partial class MainWindow : Window
         {
             _refreshInFlight = false;
             RefreshButton.IsEnabled = true;
+        }
+    }
+
+    private static async Task WarmModelCatalogAsync(CachedModelCatalog catalog)
+    {
+        try
+        {
+            await catalog.GetAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException or JsonException)
+        {
+            new FileDiagnosticsLogger().Warning("Model catalog refresh failed", exception: ex);
         }
     }
 
@@ -660,7 +762,10 @@ public partial class MainWindow : Window
             progress is null ? "" : $"of {FormatProgressValue(progress.Limit, progress.Unit)}",
             progress?.ResetsAt is { } reset ? FormatReset(reset) : "No reset time",
             progress is null ? 0 : Math.Clamp(progress.Limit <= 0 ? 0 : progress.Used / progress.Limit, 0, 1), provider.Accent, metrics);
-        var canRepairClaude = provider.DisplayName.Equals("Claude Code", StringComparison.OrdinalIgnoreCase) && hasError;
+        var canRepairClaude = provider.DisplayName.Equals("Claude Code", StringComparison.OrdinalIgnoreCase) &&
+            hasError &&
+            Regex.IsMatch(snapshot.Error ?? string.Empty, "auth|login|expired|signed out|not configured",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         return card with
         {
             ProviderId = provider.Id,
@@ -681,10 +786,10 @@ public partial class MainWindow : Window
 
         try
         {
-            // Let Claude Code own its browser/device flow. Usage Monitor never handles or copies
+            // Let Claude Code own its browser/device flow. TokenBurn never handles or copies
             // the OAuth response, and the separate console makes the action explicit on Windows.
             var loginProcess = Process.Start(ClaudeLoginCommand.CreateStartInfo());
-            LastUpdatedText.Text = "Claude sign-in opened. Finish it, then Usage Monitor will refresh.";
+            LastUpdatedText.Text = "Claude sign-in opened. Finish it, then TokenBurn will refresh.";
             if (loginProcess is not null)
             {
                 loginProcess.EnableRaisingEvents = true;
@@ -696,7 +801,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
-            System.Windows.MessageBox.Show("Claude Code could not be launched. Run `claude auth login` in a terminal, then refresh Usage Monitor.",
+            System.Windows.MessageBox.Show("Claude Code could not be launched. Run `claude auth login` in a terminal, then refresh TokenBurn.",
                 "Claude Code sign-in", MessageBoxButton.OK, MessageBoxImage.Information);
         }
     }
@@ -744,7 +849,8 @@ public partial class MainWindow : Window
             // unavailable cards. The taskbar is different: placeholder status is not useful
             // there and made the strip expand across the entire taskbar.
             if (snapshot is null || !TaskbarMetricFilter.IsConfigured(snapshot)) continue;
-            var candidates = snapshot.Lines.Select(line => ToMetric(snapshot.DisplayName, line)).ToList();
+            var candidates = snapshot.Lines
+                .Select(line => ToMetric(snapshot.DisplayName, line, taskbarStrip: true)).ToList();
             if (candidates.Count == 0) continue;
 
             var starred = MetricVisibility.SelectPinned(candidates, IsStarred, 2).ToList();
@@ -756,9 +862,9 @@ public partial class MainWindow : Window
         return selected;
     }
 
-    private MetricDisplay ToMetric(string provider, UsageMetricData line) => line switch
+    private MetricDisplay ToMetric(string provider, UsageMetricData line, bool taskbarStrip = false) => line switch
     {
-        ProgressMetricData p => BuildProgressMetric(provider, p),
+        ProgressMetricData p => BuildProgressMetric(provider, p, taskbarStrip),
         TextMetricData t => new(t.Label, t.Value, t.Subtitle ?? "", 0, "normal", provider),
         BadgeMetricData b => new(b.Label, b.Text, b.Subtitle ?? "", 0, b.Color is null ? "neutral" : "warn", provider),
         ValuesMetricData values => new(values.Label, FormatValuesValue(values), FormatValuesDetail(values), 0, "normal", provider),
@@ -773,7 +879,7 @@ public partial class MainWindow : Window
         _ => new(line.Label, "No value", "Open the provider for details", 0, "neutral", provider)
     };
 
-    private MetricDisplay BuildProgressMetric(string provider, ProgressMetricData p)
+    private MetricDisplay BuildProgressMetric(string provider, ProgressMetricData p, bool taskbarStrip = false)
     {
         var remaining = Math.Max(0, p.Limit - p.Used);
         var useRemaining = _settings.UsageDisplay.Equals("Remaining", StringComparison.OrdinalIgnoreCase);
@@ -783,9 +889,16 @@ public partial class MainWindow : Window
             : useRemaining
                 ? $"remaining of {FormatProgressValue(p.Limit, p.Unit)}"
                 : $"of {FormatProgressValue(p.Limit, p.Unit)}";
+        // The compact taskbar strip has no room for units, and mixing dollar/count strings in with
+        // every other provider's plain percent reads as broken. Collapse to percent-of-quota there;
+        // the dashboard card below keeps the precise dollar/count figure.
+        var isNativePercent = (p.Unit?.Trim().ToLowerInvariant()) is null or "" or "percent" or "%";
+        var value = taskbarStrip && !isNativePercent && p.Limit > 0
+            ? $"{Math.Round((useRemaining ? 1 - p.Used / p.Limit : p.Used / p.Limit) * 100)}%"
+            : FormatProgressValue(shown, p.Unit);
         return new MetricDisplay(
             p.Label,
-            FormatProgressValue(shown, p.Unit),
+            value,
             detail,
             p.Limit <= 0 ? 0 : Math.Clamp(p.Used / p.Limit, 0, 1),
             p.Used >= p.Limit ? "danger" : p.Used >= p.Limit * .75 ? "warn" : "normal",
@@ -795,7 +908,7 @@ public partial class MainWindow : Window
     }
 
     private string FormatReset(DateTimeOffset reset)
-        => ResetTimeFormatter.Format(reset, _settings.ResetTimeDisplay);
+        => ResetTimeFormatter.FormatSurface(reset, _settings.ResetTimeDisplay);
 
     private void ApplyScreenSharePrivacy()
     {
@@ -856,18 +969,18 @@ public partial class MainWindow : Window
     /// so the tray menu no longer opens a second native window with its own focus/position bugs.
     /// Falls back to the native dialog only when the popup itself is turned off.
     /// </summary>
-    public void ShowSettingsPage(DrawingPoint? anchor = null)
+    public void ShowSettingsPage(DrawingPoint? anchor = null, bool useWidgetAvoidRect = true)
     {
-        if (_settings.UseTauriPopup && _tauriPopup is not null && _tauriPopup.TryShow(anchor ?? ResolvePopupAnchor(), GetWidgetAvoidRect(), "settings"))
+        if (_tauriPopup is not null && _tauriPopup.TryShow(anchor ?? ResolvePopupAnchor(), useWidgetAvoidRect ? GetWidgetAvoidRect() : null, "settings"))
             return;
-        ShowSettings();
+        _tray?.ShowFallbackNotification("The compact dashboard is starting. Try again in a moment.");
     }
 
-    public void ShowCustomizePage(DrawingPoint? anchor = null)
+    public void ShowCustomizePage(DrawingPoint? anchor = null, bool useWidgetAvoidRect = true)
     {
-        if (_settings.UseTauriPopup && _tauriPopup is not null && _tauriPopup.TryShow(anchor ?? ResolvePopupAnchor(), GetWidgetAvoidRect(), "customize"))
+        if (_tauriPopup is not null && _tauriPopup.TryShow(anchor ?? ResolvePopupAnchor(), useWidgetAvoidRect ? GetWidgetAvoidRect() : null, "customize"))
             return;
-        ShowCustomize();
+        _tray?.ShowFallbackNotification("The compact dashboard is starting. Try again in a moment.");
     }
 
     public void ShowSettings()
@@ -900,8 +1013,7 @@ public partial class MainWindow : Window
             WindowState = WindowState.Minimized;
     }
 
-    public void ShowAbout() => System.Windows.MessageBox.Show("Usage Monitor\n\nA local Windows usage dashboard inspired by OpenUsage.\n\nNo telemetry is enabled by default.", "About Usage Monitor", MessageBoxButton.OK, MessageBoxImage.Information);
-    public void ShowUpdateStatus() => System.Windows.MessageBox.Show("The update channel is not configured for this unsigned development build. No network request was made. Install a signed release when a feed is available.", "Usage Monitor updates", MessageBoxButton.OK, MessageBoxImage.Information);
+    public void ShowUpdateStatus() => System.Windows.MessageBox.Show("The update channel is not configured for this unsigned development build. No network request was made. Install a signed release when a feed is available.", "TokenBurn updates", MessageBoxButton.OK, MessageBoxImage.Information);
     private void RefreshButton_OnClick(object sender, RoutedEventArgs e) => RefreshData(force: true);
     private void SettingsButton_OnClick(object sender, RoutedEventArgs e) => ShowSettings();
 
@@ -938,23 +1050,43 @@ public partial class MainWindow : Window
     /// the same choices the native SettingsDialog/CustomizeDialog offered. Two native windows
     /// coordinating with the popup window was the root cause of the settings-opening bugs (owner
     /// restoring the hidden dashboard, focus races, off-screen positioning): a page inside the
-    /// popup's own window has none of that, matching how OpenUsage's own settings panel works.
+    /// popup's own window has none of that, matching the compact settings panel behavior.
     /// </summary>
     internal string GetSettingsPageDataJson()
     {
         var monitors = new MonitorPlacementService().GetMonitors()
             .Select(m => new { id = m.Id, displayName = m.DisplayName }).ToArray();
-        var providers = DashboardData.Providers.Select(p => new
+        var snapshotsByProvider = _latestSnapshots.ToDictionary(snapshot => snapshot.ProviderId,
+            StringComparer.OrdinalIgnoreCase);
+        var providers = DashboardData.Providers.Select(p =>
         {
-            id = p.Id,
-            displayName = p.DisplayName,
-            logo = p.LogoPath
+            snapshotsByProvider.TryGetValue(p.Id, out var snapshot);
+            var available = snapshot is not null &&
+                snapshot.ErrorCategory is null &&
+                snapshot.Lines.OfType<ProgressMetricData>().Any(metric => metric.ResetsAt is not null);
+            return new
+            {
+                id = p.Id,
+                displayName = p.DisplayName,
+                logo = p.LogoPath,
+                available
+            };
+        }).ToArray();
+        // The Customize page needs only an actionable, already-redacted reason. Provider output
+        // can contain enough implementation detail to help a user reconnect, but it must never
+        // carry credentials, logs, or raw exception data into the webview.
+        var providerStatuses = DashboardData.Providers.Select(provider =>
+        {
+            snapshotsByProvider.TryGetValue(provider.Id, out var snapshot);
+            var reason = snapshot?.Error ?? snapshot?.Warning;
+            return new { id = provider.Id, reason = string.IsNullOrWhiteSpace(reason) ? null : reason };
         }).ToArray();
         var payload = new
         {
             settings = _settings,
             monitors,
             providers,
+            providerStatuses,
             metricNames = CustomizableMetricNames
         };
         return JsonSerializer.Serialize(payload, SettingsPageJsonOptions);
@@ -979,7 +1111,6 @@ public partial class MainWindow : Window
     }
 
     private void UpdateButton_OnClick(object sender, RoutedEventArgs e) => ShowUpdateStatus();
-    private void AboutButton_OnClick(object sender, RoutedEventArgs e) => ShowAbout();
     private void QuitButton_OnClick(object sender, RoutedEventArgs e) => ShutdownFromApp();
 
     private void ShareScreenshotButton_OnClick(object sender, RoutedEventArgs e)
@@ -993,7 +1124,7 @@ public partial class MainWindow : Window
             bitmap.Render(this);
             var dialog = new Microsoft.Win32.SaveFileDialog
             {
-                Title = "Export Usage Monitor share card",
+                Title = "Export TokenBurn share card",
                 Filter = "PNG image|*.png",
                 FileName = "UsageMonitor-share.png",
                 AddExtension = true,
@@ -1008,7 +1139,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             new FileDiagnosticsLogger().Warning("Share screenshot export failed", exception: ex);
-            System.Windows.MessageBox.Show("The share card could not be exported.", "Usage Monitor", MessageBoxButton.OK, MessageBoxImage.Warning);
+            System.Windows.MessageBox.Show("The share card could not be exported.", "TokenBurn", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 
@@ -1029,14 +1160,14 @@ internal static class DashboardData
 {
     public static IReadOnlyList<DashboardProvider> Providers { get; } =
     [
-        new(ProviderIds.ClaudeCode, "Claude Code", "#DA7756", "✳", "./assets/providers/claude.svg"),
+        new(ProviderIds.ClaudeCode, "Claude Code", "#D9D9DD", "✳", "./assets/providers/claude.svg"),
         new(ProviderIds.Codex, "Codex", "#3D82F6", "◎", "./assets/providers/codex.svg"),
         new(ProviderIds.Antigravity, "Antigravity", "#34A853", "A", "./assets/providers/antigravity.svg"),
-        new(ProviderIds.Cursor, "Cursor", "#6C7BFF", "C", "./assets/providers/cursor.svg"),
-        new(ProviderIds.Copilot, "Copilot", "#8957E5", "◉", "./assets/providers/copilot.svg"),
-        new(ProviderIds.Devin, "Devin", "#FFB454", "D", "./assets/providers/devin.svg"),
-        new(ProviderIds.Grok, "Grok", "#C9CED6", "G", "./assets/providers/grok.svg"),
-        new(ProviderIds.OpenCode, "OpenCode", "#2DD4BF", "O", "./assets/providers/opencode.svg")
+        new(ProviderIds.Cursor, "Cursor", "#B8B2A6", "C", "./assets/providers/cursor.svg"),
+        new(ProviderIds.Copilot, "Copilot", "#A56BFF", "◉", "./assets/providers/copilot.svg"),
+        new(ProviderIds.Devin, "Devin", "#35C8C0", "D", "./assets/providers/devin.svg"),
+        new(ProviderIds.Grok, "Grok", "#F2F2F0", "G", "./assets/providers/grok.svg"),
+        new(ProviderIds.OpenCode, "OpenCode", "#FFFFFF", "O", "./assets/providers/opencode.svg")
     ];
 
     public static IReadOnlyList<MetricDisplay> SampleMetrics { get; } =
@@ -1055,21 +1186,18 @@ internal sealed class SettingsDialog : Window
     private readonly WpfComboBox _monitor;
     private readonly WpfCheckBox _startup;
     private readonly WpfCheckBox _alerts;
-    private readonly WpfCheckBox _compact;
-    private readonly WpfCheckBox _showTotalSpend;
     private readonly WpfCheckBox _tauriPopup;
     private readonly WpfCheckBox _taskbarPositionLocked;
     private readonly WpfComboBox _usageDisplay;
     private readonly WpfComboBox _resetTimes;
-    private readonly WpfCheckBox _almostOut;
-    private readonly WpfCheckBox _cuttingItClose;
-    private readonly WpfCheckBox _willRunOut;
+    private readonly WpfButton _notificationProviders;
+    private readonly IReadOnlyList<WpfMenuItem> _notificationProviderItems;
     private readonly WpfCheckBox _hideFromScreenShare;
     private readonly IReadOnlyList<MonitorOption> _monitors;
 
     public SettingsDialog(UserSettings settings, MonitorPlacementService placement)
     {
-        Title = "Usage Monitor Settings";
+        Title = "TokenBurn Settings";
         Width = 660;
         Height = 860;
         MinHeight = 680;
@@ -1104,17 +1232,53 @@ internal sealed class SettingsDialog : Window
         _monitor.ItemTemplate = CreateComboItemTemplate(nameof(MonitorOption.DisplayName));
         _monitor.SelectedItem = _monitors.FirstOrDefault(x => x.Id.Equals(settings.SelectedMonitor, StringComparison.OrdinalIgnoreCase)) ?? _monitors.FirstOrDefault();
         _monitor.IsEnabled = true;
-        _startup = new WpfCheckBox { Content = "Launch Usage Monitor when I sign in", IsChecked = settings.StartAtLogin, Margin = new Thickness(0, 5, 0, 8) };
-        _alerts = new WpfCheckBox { Content = "Enable quota notifications", IsChecked = settings.NotificationsEnabled, Margin = new Thickness(0, 5, 0, 8) };
-        _compact = new WpfCheckBox { Content = "Use compact dashboard density", IsChecked = settings.CompactDensity, Margin = new Thickness(0, 5, 0, 8) };
-        _showTotalSpend = new WpfCheckBox { Content = "Show total spend ring", IsChecked = settings.ShowTotalSpend, Margin = new Thickness(0, 5, 0, 8) };
-        _tauriPopup = new WpfCheckBox { Content = "Use compact Tauri popup (OpenUsage-style)", IsChecked = settings.UseTauriPopup, Margin = new Thickness(0, 5, 0, 8) };
+        _startup = new WpfCheckBox { Content = "Launch TokenBurn when I sign in", IsChecked = settings.StartAtLogin, Margin = new Thickness(0, 5, 0, 8) };
+        _alerts = new WpfCheckBox { Content = "Notify when quotas reset", IsChecked = settings.NotificationsEnabled, Margin = new Thickness(0, 5, 0, 8) };
+        _tauriPopup = new WpfCheckBox { Content = "Use compact Tauri popup", IsChecked = settings.UseTauriPopup, Margin = new Thickness(0, 5, 0, 8) };
         _taskbarPositionLocked = new WpfCheckBox { Content = "Lock taskbar position", IsChecked = settings.TaskbarPositionLocked, Margin = new Thickness(0, 5, 0, 8) };
         _usageDisplay = CreateSettingsCombo(["Used", "Remaining"], settings.UsageDisplay, 0);
         _resetTimes = CreateSettingsCombo(["Countdown", "Exact time"], settings.ResetTimeDisplay, 0);
-        _almostOut = new WpfCheckBox { Content = "Almost out", IsChecked = settings.AlmostOutAlerts, Margin = new Thickness(0, 5, 0, 8) };
-        _cuttingItClose = new WpfCheckBox { Content = "Cutting it close", IsChecked = settings.CuttingItCloseAlerts, Margin = new Thickness(0, 5, 0, 8) };
-        _willRunOut = new WpfCheckBox { Content = "Will run out", IsChecked = settings.WillRunOutAlerts, Margin = new Thickness(0, 5, 0, 8) };
+        _notificationProviderItems = DashboardData.Providers.Select(provider =>
+        {
+            var item = new WpfMenuItem
+            {
+                Header = provider.DisplayName,
+                Tag = provider.Id,
+                IsCheckable = true,
+                StaysOpenOnClick = true,
+                IsChecked = (settings.NotificationProviderIds ?? []).Contains(provider.Id, StringComparer.OrdinalIgnoreCase)
+            };
+            item.Click += (_, _) =>
+            {
+                UpdateNotificationProviderSummary();
+                SettingsChanged?.Invoke(BuildResult(settings));
+            };
+            return item;
+        }).ToArray();
+        var notificationMenu = new WpfContextMenu
+        {
+            Background = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["PanelRaisedBrush"],
+            Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextPrimaryBrush"],
+            BorderBrush = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["PanelStrokeBrush"]
+        };
+        foreach (var item in _notificationProviderItems) notificationMenu.Items.Add(item);
+        _notificationProviders = new WpfButton
+        {
+            MinWidth = 150,
+            MinHeight = 32,
+            Padding = new Thickness(10, 0, 10, 0),
+            HorizontalContentAlignment = System.Windows.HorizontalAlignment.Left,
+            Background = System.Windows.Media.Brushes.Transparent,
+            BorderBrush = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["PanelStrokeBrush"],
+            ContextMenu = notificationMenu,
+            ToolTip = "Choose which providers can send reset notifications"
+        };
+        _notificationProviders.Click += (_, _) =>
+        {
+            notificationMenu.PlacementTarget = _notificationProviders;
+            notificationMenu.IsOpen = true;
+        };
+        UpdateNotificationProviderSummary();
         _hideFromScreenShare = new WpfCheckBox { Content = "Hide usage values from screen sharing", IsChecked = settings.HideFromScreenShare, Margin = new Thickness(0, 5, 0, 8) };
 
         var panel = new StackPanel();
@@ -1125,9 +1289,6 @@ internal sealed class SettingsDialog : Window
         panel.Children.Add(_monitor);
         panel.Children.Add(new TextBlock { Text = "Display selection applies to the experimental status strip. Windows owns the native taskbar button's monitor placement.", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, -6, 0, 10) });
         panel.Children.Add(_startup);
-        panel.Children.Add(_alerts);
-        panel.Children.Add(_compact);
-        panel.Children.Add(_showTotalSpend);
         panel.Children.Add(_tauriPopup);
         panel.Children.Add(_taskbarPositionLocked);
         panel.Children.Add(new TextBlock { Text = "Unlock this only when you need to drag the taskbar strip.", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, -4, 0, 8) });
@@ -1135,9 +1296,9 @@ internal sealed class SettingsDialog : Window
         panel.Children.Add(LabeledControl("Show usage as", _usageDisplay));
         panel.Children.Add(LabeledControl("Reset times", _resetTimes));
         panel.Children.Add(new TextBlock { Text = "NOTIFICATIONS", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, 14, 0, 2) });
-        panel.Children.Add(_almostOut);
-        panel.Children.Add(_cuttingItClose);
-        panel.Children.Add(_willRunOut);
+        panel.Children.Add(_alerts);
+        panel.Children.Add(LabeledControl("Providers", _notificationProviders));
+        panel.Children.Add(new TextBlock { Text = "The app watches each selected reset timer locally, so alerts do not wait for the next five-minute refresh.", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, -2, 0, 8) });
         panel.Children.Add(new TextBlock { Text = "PRIVACY", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, 14, 0, 2) });
         panel.Children.Add(_hideFromScreenShare);
         panel.Children.Add(new TextBlock { Text = "Usage values stay local. No anonymous usage or crash uploads are enabled in this build.", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, -3, 0, 8) });
@@ -1151,7 +1312,7 @@ internal sealed class SettingsDialog : Window
             FontSize = 11,
             Margin = new Thickness(0, 14, 0, 0)
         });
-        panel.Children.Add(new TextBlock { Text = "The compact status strip is the OpenUsage-like Windows surface. Explorer does not provide a public embedded-widget API, so it can fall back to the supported native taskbar button and tray without losing monitoring.", TextWrapping = TextWrapping.Wrap, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextSecondaryBrush"], FontSize = 11, Margin = new Thickness(0, 12, 0, 0) });
+        panel.Children.Add(new TextBlock { Text = "The compact status strip is the Windows surface. Explorer does not provide a public embedded-widget API, so it can fall back to the supported native taskbar button and tray without losing monitoring.", TextWrapping = TextWrapping.Wrap, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextSecondaryBrush"], FontSize = 11, Margin = new Thickness(0, 12, 0, 0) });
         var header = new Grid { Height = 58, Margin = new Thickness(18, 8, 18, 0) };
         header.MouseLeftButtonDown += (_, e) =>
         {
@@ -1170,7 +1331,7 @@ internal sealed class SettingsDialog : Window
         {
             Padding = new Thickness(26, 4, 26, 18),
             // Keep the long settings page wheel/keyboard-scrollable without adding a permanent
-            // stock rail that clashes with the compact OpenUsage-style surface.
+            // stock rail that clashes with the compact surface.
             VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Content = panel
@@ -1212,7 +1373,7 @@ internal sealed class SettingsDialog : Window
             }), System.Windows.Threading.DispatcherPriority.Background);
         }
 
-        foreach (var check in new[] { _startup, _alerts, _compact, _showTotalSpend, _tauriPopup, _taskbarPositionLocked, _almostOut, _cuttingItClose, _willRunOut, _hideFromScreenShare })
+        foreach (var check in new[] { _startup, _alerts, _tauriPopup, _taskbarPositionLocked, _hideFromScreenShare })
         {
             check.Checked += (_, _) => QueueApply();
             check.Unchecked += (_, _) => QueueApply();
@@ -1270,17 +1431,29 @@ internal sealed class SettingsDialog : Window
         result.SelectedMonitor = monitor?.Id ?? MonitorPlacementService.PrimaryMonitorId;
         result.StartAtLogin = _startup.IsChecked == true;
         result.NotificationsEnabled = _alerts.IsChecked == true;
-        result.CompactDensity = _compact.IsChecked == true;
-        result.ShowTotalSpend = _showTotalSpend.IsChecked == true;
+        result.CompactDensity = true;
+        result.ShowTotalSpend = true;
         result.UseTauriPopup = _tauriPopup.IsChecked == true;
         result.TaskbarPositionLocked = _taskbarPositionLocked.IsChecked == true;
         result.UsageDisplay = (_usageDisplay.SelectedItem as string) ?? "Used";
         result.ResetTimeDisplay = (_resetTimes.SelectedItem as string) ?? "Countdown";
-        result.AlmostOutAlerts = _almostOut.IsChecked == true;
-        result.CuttingItCloseAlerts = _cuttingItClose.IsChecked == true;
-        result.WillRunOutAlerts = _willRunOut.IsChecked == true;
+        result.NotificationProviderIds = _notificationProviderItems
+            .Where(item => item.IsChecked)
+            .Select(item => item.Tag?.ToString() ?? string.Empty)
+            .Where(id => id.Length > 0)
+            .ToList();
         result.HideFromScreenShare = _hideFromScreenShare.IsChecked == true;
         return result;
+    }
+
+    private void UpdateNotificationProviderSummary()
+    {
+        var selected = _notificationProviderItems.Count(item => item.IsChecked);
+        _notificationProviders.Content = selected == _notificationProviderItems.Count
+            ? "All providers"
+            : selected == 0
+                ? "No providers"
+                : $"{selected} provider{(selected == 1 ? string.Empty : "s")}";
     }
 }
 

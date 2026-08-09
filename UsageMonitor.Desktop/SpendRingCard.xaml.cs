@@ -9,7 +9,7 @@ using WpfUserControl = System.Windows.Controls.UserControl;
 
 namespace UsageMonitor.Desktop;
 
-/// <summary>OpenUsage-style spend summary card with local-history-only data.</summary>
+/// <summary>Spend summary card with local-history-only data.</summary>
 public partial class SpendRingCard : WpfUserControl
 {
     private IReadOnlyList<UsageSnapshotData> _snapshots = Array.Empty<UsageSnapshotData>();
@@ -41,6 +41,7 @@ public partial class SpendRingCard : WpfUserControl
     }
 
     public SpendRingSummary CurrentSummary { get; private set; } = SpendRingModel.Build(null);
+    private SpendRingSummary _rootSummary = SpendRingModel.Build(null);
 
     public event EventHandler<SpendRingSummary>? SummaryChanged;
     public event EventHandler? ShareRequested;
@@ -128,7 +129,13 @@ public partial class SpendRingCard : WpfUserControl
     private void Rebuild(bool animate = false)
     {
         if (!IsInitialized) return;
-        CurrentSummary = SpendRingModel.Build(_snapshots, Period, Metric, colors: _colors);
+        _rootSummary = SpendRingModel.Build(_snapshots, Period, Metric, colors: _colors);
+        CurrentSummary = _rootSummary;
+        RenderSummary(animate);
+    }
+
+    private void RenderSummary(bool animate)
+    {
         Ring.Summary = CurrentSummary;
         if (animate && IsLoaded)
         {
@@ -147,16 +154,34 @@ public partial class SpendRingCard : WpfUserControl
             Ring.AnimationProgress = 1;
         }
         LegendItems.Clear();
-        foreach (var segment in CurrentSummary.Segments.Take(5))
+        foreach (var segment in CurrentSummary.Segments)
             LegendItems.Add(new SpendRingLegendItem(segment.DisplayName, FormatLegendValue(segment), segment.Color));
         EmptyText.Visibility = CurrentSummary.HasData ? Visibility.Collapsed : Visibility.Visible;
         EstimateNotice.Visibility = CurrentSummary.HasEstimatedValues ? Visibility.Visible : Visibility.Collapsed;
+        BackButton.Visibility = CurrentSummary.IsDrillDown ? Visibility.Visible : Visibility.Collapsed;
         SummaryChanged?.Invoke(this, CurrentSummary);
         if (animate) AnimateSpendContent();
     }
 
+    private void LegendItem_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: SpendRingLegendItem item }) return;
+        var segment = CurrentSummary.Segments.FirstOrDefault(x => x.DisplayName.Equals(item.DisplayName, StringComparison.OrdinalIgnoreCase));
+        if (segment is not { IsAggregate: true }) return;
+        _rootSummary = SpendRingModel.Collapse(_rootSummary);
+        CurrentSummary = SpendRingModel.Expand(_rootSummary, segment);
+        RenderSummary(animate: true);
+    }
+
+    private void BackButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!CurrentSummary.IsDrillDown) return;
+        CurrentSummary = _rootSummary;
+        RenderSummary(animate: true);
+    }
+
     /// <summary>
-    /// Mirrors OpenUsage's springy ring/legend morph without animating layout. The WPF canvas
+    /// Uses a springy ring/legend morph without animating layout. The WPF canvas
     /// redraws synchronously when the selected period or metric changes, so a short scale/opacity
     /// settle makes the new slice ordering legible while keeping the controls immediately usable.
     /// </summary>
@@ -192,7 +217,8 @@ public partial class SpendRingCard : WpfUserControl
         return Metric switch
         {
             SpendRingMetric.Tokens => SpendRingModel.FormatTokens(segment.Tokens),
-            SpendRingMetric.CostPerMillionTokens => $"${segment.Value:0.00}",
+            // Segment.Value is the token weight that sizes the slice; the rate is derived here.
+            SpendRingMetric.CostPerMillionTokens => $"${(segment.Tokens > 0 ? segment.CostUsd / segment.Tokens * 1_000_000d : 0d):0.00}",
             _ => segment.Value >= 1000 ? $"${segment.Value / 1000:0.0}k" : $"${segment.Value:0.00}"
         };
     }

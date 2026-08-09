@@ -102,6 +102,7 @@
             </Setter>
         </Style>
         <DataTemplate x:Key="LegendTemplate">
+            <Button Click="LegendItem_OnClick" Tag="{Binding}" Background="Transparent" BorderBrush="Transparent" Padding="0" HorizontalContentAlignment="Stretch" AutomationProperties.Name="Open provider breakdown">
             <Grid Margin="0,5,0,5">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="12"/>
@@ -112,6 +113,7 @@
                 <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="14" FontWeight="SemiBold" Margin="8,0,12,0" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Grid.Column="2" Text="{Binding ValueLabel}" FontSize="14" Foreground="{StaticResource TextSecondaryBrush}" HorizontalAlignment="Right"/>
             </Grid>
+            </Button>
         </DataTemplate>
     </UserControl.Resources>
     <Border Background="{StaticResource PanelBrush}"
@@ -177,6 +179,9 @@
                          <ColumnDefinition Width="142"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
+                    <Button x:Name="BackButton" Grid.Column="0" Width="24" Height="24" HorizontalAlignment="Left" VerticalAlignment="Top" Panel.ZIndex="2" Visibility="Collapsed" Click="BackButton_OnClick" ToolTip="Back to all providers" AutomationProperties.Name="Back to all providers" Background="#38383C" BorderBrush="#55555A" Foreground="{StaticResource TextPrimaryBrush}" Padding="0">
+                        <Path Data="M 14,4 L 8,10 L 14,16" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                    </Button>
                     <local:SpendRingCanvas x:Name="Ring" Grid.Column="0" Width="132" Height="132" HorizontalAlignment="Center" VerticalAlignment="Center" RingThickness="17"/>
                     <ItemsControl x:Name="Legend" Grid.Column="1" ItemsSource="{Binding LegendItems}" ItemTemplate="{StaticResource LegendTemplate}" VerticalAlignment="Center" Margin="6,0,0,0"/>
                 </Grid>

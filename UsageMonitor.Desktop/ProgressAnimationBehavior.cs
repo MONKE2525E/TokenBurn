@@ -6,7 +6,7 @@ using WpfProgressBar = System.Windows.Controls.ProgressBar;
 namespace UsageMonitor.Desktop;
 
 /// <summary>
-/// Gives the compact quota meter the same quiet interpolation as OpenUsage's SwiftUI capsule.
+/// Gives the compact quota meter quiet capsule interpolation.
 /// The fill width is still owned by <see cref="ProgressWidthConverter"/>; this behavior only
 /// animates the presentation value after WPF has resolved that binding, so resizing and DPI
 /// changes continue to use the real track width.

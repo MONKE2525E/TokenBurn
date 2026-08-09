@@ -4,34 +4,7 @@
              xmlns:po="http://schemas.microsoft.com/winfx/2006/xaml/presentation/options"
              ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
-        <!-- Independent Usage Monitor mark. This is intentionally a simple status-strip mark, not OpenUsage branding. -->
-        <DrawingImage x:Key="UsageMonitorIcon">
-            <DrawingImage.Drawing>
-                <DrawingGroup>
-                    <GeometryDrawing Brush="#141B23">
-                        <GeometryDrawing.Geometry>
-                            <RectangleGeometry Rect="2,2,28,28" RadiusX="8" RadiusY="8"/>
-                        </GeometryDrawing.Geometry>
-                    </GeometryDrawing>
-                    <GeometryDrawing Brush="#53D2C3">
-                        <GeometryDrawing.Geometry>
-                            <RectangleGeometry Rect="8,8,4,14" RadiusX="1.5" RadiusY="1.5"/>
-                        </GeometryDrawing.Geometry>
-                    </GeometryDrawing>
-                    <GeometryDrawing Brush="#53D2C3">
-                        <GeometryDrawing.Geometry>
-                            <RectangleGeometry Rect="20,8,4,14" RadiusX="1.5" RadiusY="1.5"/>
-                        </GeometryDrawing.Geometry>
-                    </GeometryDrawing>
-                    <GeometryDrawing Brush="#53D2C3">
-                        <GeometryDrawing.Geometry>
-                            <RectangleGeometry Rect="10,20,12,4" RadiusX="1.5" RadiusY="1.5"/>
-                        </GeometryDrawing.Geometry>
-                    </GeometryDrawing>
-                </DrawingGroup>
-            </DrawingImage.Drawing>
-        </DrawingImage>
-        <!-- Neutral charcoal tokens keep the Windows surface visually close to OpenUsage's compact
+        <!-- Neutral charcoal tokens keep the Windows surface visually close to the compact
              popover. Provider colors are reserved for data, while the shell itself stays quiet. -->
         <SolidColorBrush x:Key="CanvasBrush" Color="#1B1B1D" po:Freeze="False"/>
         <SolidColorBrush x:Key="PanelBrush" Color="#242426" po:Freeze="False"/>

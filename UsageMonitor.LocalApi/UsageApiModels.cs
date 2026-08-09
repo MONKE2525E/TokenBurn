@@ -13,6 +13,9 @@ public sealed record UsageSnapshotData(
     /// <summary>Redacted refresh failure text, if the provider returned an error snapshot.</summary>
     public string? Error { get; init; }
 
+    /// <summary>Non-sensitive provider state used by local UI surfaces to distinguish unavailable authentication from transient failures.</summary>
+    public string? ErrorCategory { get; init; }
+
     /// <summary>Non-fatal provider notice, such as rate limiting while cached values remain usable.</summary>
     public string? Warning { get; init; }
 
@@ -27,6 +30,9 @@ public sealed record UsageSnapshotData(
 
 public sealed record UsageHistoryData(IReadOnlyList<UsageHistoryPointData> Points)
 {
+    public IReadOnlyList<string> UnknownModels { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<UsageBreakdownPointData> Breakdown { get; init; } = Array.Empty<UsageBreakdownPointData>();
+
     public UsageHistoryData(IEnumerable<UsageHistoryPointData>? points)
         : this(new ReadOnlyCollection<UsageHistoryPointData>((points ?? []).ToList())) { }
 
@@ -35,6 +41,22 @@ public sealed record UsageHistoryData(IReadOnlyList<UsageHistoryPointData> Point
 }
 
 public sealed record UsageHistoryPointData(DateOnly Date, double Tokens, double CostUsd, bool Estimated = false);
+
+/// <summary>Redacted transport representation of a locally aggregated model/day row.</summary>
+public sealed record UsageBreakdownPointData(
+    DateOnly Date,
+    string ProviderId,
+    string? ModelId,
+    double UncachedInputTokens,
+    double CachedInputTokens,
+    double CacheCreationTokens,
+    double OutputTokens,
+    double ReasoningTokens,
+    double CostUsd,
+    string CostBasis,
+    string PricingBasis,
+    bool Estimated,
+    double CacheSavingsUsd = 0);
 
 public abstract record UsageMetricData(string Label);
 

@@ -10,11 +10,12 @@ namespace UsageMonitor.Desktop;
 
 public partial class App : System.Windows.Application
 {
-    private static readonly uint ActivationMessage = NativeMethods.RegisterWindowMessage("UsageMonitor.Activate");
+    private static readonly uint ActivationMessage = NativeMethods.RegisterWindowMessage("TokenBurn.Activate");
     private Mutex? _instanceMutex;
     private bool _ownsInstanceMutex;
     private MainWindow? _mainWindow;
     private TrayIconService? _tray;
+    private WindowsAppNotificationService? _appNotifications;
     private TaskbarOverlayController? _taskbar;
     private TauriPopupBridge? _tauriPopup;
     private UsageApiHost? _apiHost;
@@ -29,9 +30,11 @@ public partial class App : System.Windows.Application
         // Give Explorer a stable identity for the taskbar button and jump list. Without an explicit
         // AppUserModelID, self-contained builds can be grouped under a transient path identity and
         // the button may disappear or launch a second unassociated instance after an update.
-        try { NativeMethods.SetCurrentProcessExplicitAppUserModelID("UsageMonitor.Windows"); } catch { }
+        // Windows uses the AppUserModelID as the notification source label. A raw implementation
+        // identifier made toasts say "TokenBurn.Windows" instead of the product's actual name.
+        try { NativeMethods.SetCurrentProcessExplicitAppUserModelID("TokenBurn"); } catch { }
 
-        _instanceMutex = new Mutex(true, "Global\\UsageMonitor.Windows.SingleInstance", out var isNew);
+        _instanceMutex = new Mutex(true, "Global\\TokenBurn.Windows.SingleInstance", out var isNew);
         _ownsInstanceMutex = isNew;
         if (!isNew)
         {
@@ -44,9 +47,17 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        NativeMethods.CloseStaleWindows("Usage Monitor", Environment.ProcessId);
-        NativeMethods.CloseStaleWindows("Usage Monitor status strip", Environment.ProcessId);
+        NativeMethods.CloseStaleWindows("TokenBurn", Environment.ProcessId);
+        NativeMethods.CloseStaleWindows("TokenBurn status strip", Environment.ProcessId);
         _settings = SettingsStore.Load();
+        // The WPF window is now a headless integration host only. Keep the compact Tauri popup
+        // as the sole dashboard even when an old settings file had opted into the legacy view.
+        _settings.UseTauriPopup = true;
+        // App notification activation is attached before the manager registers, as required by
+        // Windows App SDK, so a notification click returns to this shell process.
+        _appNotifications = new WindowsAppNotificationService(Dispatcher,
+            () => _mainWindow?.ShowFromTray());
+        _appNotifications.Register();
         StartupManager.SetEnabled(_settings.StartAtLogin);
         var launchedAtLogin = e.Args.Any(arg => string.Equals(arg, "--startup", StringComparison.OrdinalIgnoreCase));
         _mainWindow = new MainWindow();
@@ -76,18 +87,23 @@ public partial class App : System.Windows.Application
             json => _mainWindow.Dispatcher.Invoke(() => _mainWindow.ApplySettingsPageDataJson(json)),
             metric => _mainWindow.Dispatcher.Invoke(() => _mainWindow.ApplySpendMetric(metric)),
             visible => _taskbar?.SetPopupVisible(visible));
-        _tray = new TrayIconService(this, _mainWindow);
+        _tray = new TrayIconService(this, _mainWindow, _appNotifications);
         _taskbar = new TaskbarOverlayController(_mainWindow);
         _tray.AttachTaskbar(_taskbar);
 
         _mainWindow.Initialize(_settings, _taskbar, _tray, _tauriPopup);
-        if (_settings.UseTauriPopup)
-            _tauriPopup.StartHosted();
+        // Keep the popup and WebView2 warm. Taskbar clicks are the primary interaction and must
+        // never pay a cold-start penalty after the app has been idle for a while.
+        _tauriPopup.StartHosted();
         if (_mainWindow.SnapshotCatalog is { } catalog)
         {
             try
             {
-                _apiHost = UsageApiHost.Create(catalog, _mainWindow.SnapshotCache);
+                // The embedded Tauri webview can recover directly from the loopback API when its
+                // command bridge is still starting.  The service remains loopback-only and only
+                // exposes the same non-secret usage snapshot already shown in the taskbar.
+                _apiHost = UsageApiHost.Create(catalog, _mainWindow.SnapshotCache,
+                    new UsageApiOptions { EnableCors = true });
                 _ = StartApiAsync(_apiHost);
             }
             catch
@@ -110,44 +126,25 @@ public partial class App : System.Windows.Application
 
         var openedFromTaskbarTask = e.Args.Any(arg => string.Equals(arg, "--open", StringComparison.OrdinalIgnoreCase));
         var openedSettingsTask = e.Args.Any(arg => string.Equals(arg, "--settings", StringComparison.OrdinalIgnoreCase));
-        var popupOwnsPresentation = _settings.UseTauriPopup && !openedFromTaskbarTask && !openedSettingsTask;
-        if (popupOwnsPresentation)
-        {
-            // The WPF window is the provider/settings host and fallback only. Do not expose it
-            // as a second application window when the tray or embedded taskbar popup owns the
-            // presentation, otherwise a normal launch produces the oversized dashboard beside
-            // the compact OpenUsage-style surface.
-            // Keep the WPF host alive for activation and loopback IPC, but never expose it as a
-            // second minimized quota counter in the taskbar.
-            _mainWindow.Show();
-            _mainWindow.Hide();
-        }
-        else if (!launchedAtLogin || openedFromTaskbarTask || openedSettingsTask)
-        {
-            _mainWindow.Show();
-            _mainWindow.Activate();
-            if (openedSettingsTask)
-                CurrentApp.Dispatcher.BeginInvoke(() => _mainWindow.ShowSettings(), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
-        }
-        else
-        {
-            _mainWindow.Show();
-            _mainWindow.Hide();
-        }
+        // Keep WPF alive as the shell integration host, but never let it become a second
+        // dashboard. Taskbar and jump-list entry points are forwarded into the Tauri popup.
+        _mainWindow.Show();
+        _mainWindow.Hide();
+        if (openedSettingsTask)
+            CurrentApp.Dispatcher.BeginInvoke(() => _mainWindow.ShowSettingsPage(), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        else if (openedFromTaskbarTask || !launchedAtLogin)
+            CurrentApp.Dispatcher.BeginInvoke(() => _mainWindow.ShowFromTray(), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
     }
 
     public void SaveSettings(UserSettings settings)
     {
+        settings.UseTauriPopup = true;
         var monitorChanged = !string.Equals(_settings.SelectedMonitor, settings.SelectedMonitor, StringComparison.OrdinalIgnoreCase);
         settings.StatusSurface = StatusSurfaceMode.TaskbarWidget;
         _settings = settings;
         SettingsStore.Save(settings);
         StartupManager.SetEnabled(settings.StartAtLogin);
         _mainWindow?.ApplySettings(settings);
-        if (settings.UseTauriPopup)
-            _tauriPopup?.StartHosted();
-        else
-            _tauriPopup?.StopHosted();
         if (monitorChanged || _taskbar?.IsAttached != true)
             _taskbar?.TryAttach(settings.SelectedMonitor);
     }
@@ -183,6 +180,7 @@ public partial class App : System.Windows.Application
     {
         _taskbar?.Dispose();
         _tray?.Dispose();
+        _appNotifications?.Dispose();
         _tauriPopup?.Dispose();
         if (_apiHost is not null)
         {
@@ -216,7 +214,7 @@ public partial class App : System.Windows.Application
             jumpList.JumpItems.Add(new JumpTask
             {
                 Title = "Open dashboard",
-                Description = "Show Usage Monitor",
+                Description = "Show TokenBurn",
                 ApplicationPath = executable,
                 Arguments = "--open"
             });
@@ -257,7 +255,7 @@ public partial class App : System.Windows.Application
         {
             var currentId = Environment.ProcessId;
             var processName = Path.GetFileNameWithoutExtension(Environment.ProcessPath);
-            if (string.IsNullOrWhiteSpace(processName)) processName = "UsageMonitor";
+            if (string.IsNullOrWhiteSpace(processName)) processName = "TokenBurn";
 
             foreach (var process in Process.GetProcessesByName(processName))
             {
@@ -266,16 +264,8 @@ public partial class App : System.Windows.Application
                     if (process.Id == currentId) continue;
                     var hwnd = NativeMethods.FindTopLevelWindowForProcess(process.Id);
                     if (hwnd == IntPtr.Zero) continue;
-                    var action = args.Any(arg => string.Equals(arg, "--settings", StringComparison.OrdinalIgnoreCase)) ? 2
-                        : args.Any(arg => string.Equals(arg, "--open", StringComparison.OrdinalIgnoreCase)) ? 1
-                        : 0;
-                    if (action != 0)
-                        NativeMethods.PostMessage(hwnd, ActivationMessage, new IntPtr(action), IntPtr.Zero);
-                    else
-                    {
-                        NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
-                        NativeMethods.SetForegroundWindow(hwnd);
-                    }
+                    var action = args.Any(arg => string.Equals(arg, "--settings", StringComparison.OrdinalIgnoreCase)) ? 2 : 1;
+                    NativeMethods.PostMessage(hwnd, ActivationMessage, new IntPtr(action), IntPtr.Zero);
                     return;
                 }
                 finally

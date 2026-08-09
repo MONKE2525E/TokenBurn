@@ -54,22 +54,33 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         if (force || _cache is null)
         {
             snapshot = await RefreshAsync(provider, force, cancellationToken).ConfigureAwait(false);
+            var usedFallbackCache = false;
             if (snapshot is null && _cache is not null)
+            {
                 snapshot = await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false);
+                if (snapshot is { } cachedSnapshot && IsUsableCachedSnapshot(cachedSnapshot))
+                {
+                    // A failed forced refresh used to return this cache entry as if it were fresh.
+                    // Preserve the value, but mark it stale so the UI does not treat an expired
+                    // pre-reset timestamp as a confirmed live quota or start a retry loop.
+                    snapshot = cachedSnapshot with { Warning = "Refresh failed. Showing cached values." };
+                    usedFallbackCache = true;
+                }
+            }
             if (snapshot is { } refreshedSnapshot && !IsUsableCachedSnapshot(refreshedSnapshot) && _cache is not null)
             {
                 // A manual refresh must never blank a last-good dashboard. Keep the cached
-                // limits visible and carry the provider's redacted failure as a non-fatal warning.
+                // limits visible, but preserve authentication failures as actionable errors.
                 var cached = await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false);
                 if (cached is { } cachedSnapshot && IsUsableCachedSnapshot(cachedSnapshot))
                 {
                     var warning = refreshedSnapshot.Lines.FirstOrDefault(line => line.IsError)?.Text
                         ?? refreshedSnapshot.Warning
                         ?? "Refresh failed. Showing cached values.";
-                    snapshot = cachedSnapshot with { Warning = warning };
+                    snapshot = WithRefreshFailure(cachedSnapshot, refreshedSnapshot, warning);
                 }
             }
-            if (snapshot is not null && IsUsableCachedSnapshot(snapshot) && _cache is not null)
+            if (snapshot is not null && IsUsableCachedSnapshot(snapshot) && !usedFallbackCache && _cache is not null)
                 await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
         }
         else
@@ -99,12 +110,12 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
                 }
                 else if (cached is { } staleSnapshot && IsUsableCachedSnapshot(staleSnapshot))
                 {
-                    snapshot = staleSnapshot with
-                    {
-                        Warning = refreshed?.Lines.FirstOrDefault(line => line.IsError)?.Text
-                            ?? refreshed?.Warning
-                            ?? "Refresh failed. Showing cached values."
-                    };
+                    var warning = refreshed?.Lines.FirstOrDefault(line => line.IsError)?.Text
+                        ?? refreshed?.Warning
+                        ?? "Refresh failed. Showing cached values.";
+                    snapshot = refreshed is null
+                        ? staleSnapshot with { Warning = warning }
+                        : WithRefreshFailure(staleSnapshot, refreshed, warning);
                 }
                 else
                 {
@@ -116,7 +127,8 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         return snapshot is null
             ? new UsageSnapshotData(provider.Descriptor.Id, provider.Descriptor.DisplayName, null, [], DateTimeOffset.UtcNow)
             {
-                Error = "Provider refresh failed."
+                Error = "Provider refresh failed.",
+                ErrorCategory = ProviderErrorCategory.Other.ToString()
             }
             : Convert(snapshot);
     }
@@ -144,10 +156,11 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         }
         catch (Exception ex)
         {
-            // A failed refresh never blanks a previous cached value.  The cache coordinator controls
-            // stale-while-revalidate; this adapter simply omits an unavailable first snapshot.
+            // A failed refresh never blanks a previous cached value, but it must remain visible as
+            // a redacted provider error. Returning null here used to turn real bugs into a vague
+            // "refresh failed" warning and made the root cause impossible to diagnose.
             _context.Logger?.Warning("Provider refresh failed", exception: ex);
-            return null;
+            return ProviderSnapshot.Error(provider.Descriptor, ex, ProviderErrorCategory.Other);
         }
     }
 
@@ -161,17 +174,40 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         Error = snapshot.ErrorCategory is not null
             ? RedactError(snapshot.Lines.FirstOrDefault(line => line.IsError)?.Text ?? "Provider refresh failed.")
             : null,
+        ErrorCategory = snapshot.ErrorCategory?.ToString(),
         Warning = snapshot.Warning is null ? null : RedactError(snapshot.Warning),
         UsageHistory = snapshot.UsageHistory is null
             ? null
             : new UsageHistoryData(snapshot.UsageHistory.Points.Select(point =>
                 new UsageHistoryPointData(point.Date, point.Tokens, point.CostUsd, point.Estimated)))
+            {
+                UnknownModels = snapshot.UsageHistory.UnknownModels,
+                Breakdown = snapshot.UsageHistory.Breakdown.Select(point => new UsageBreakdownPointData(
+                    point.Date, point.ProviderId, point.ModelId,
+                    point.UncachedInputTokens, point.CachedInputTokens, point.CacheCreationTokens,
+                    point.OutputTokens, point.ReasoningTokens, point.CostUsd,
+                    point.CostBasis.ToString(), point.PricingBasis.ToString(), point.Estimated, point.CacheSavingsUsd)).ToArray()
+            }
     };
 
     private static bool IsUsableCachedSnapshot(ProviderSnapshot snapshot) =>
         snapshot.ErrorCategory is null &&
         (!snapshot.ProviderId.Equals("claude-code", StringComparison.OrdinalIgnoreCase) ||
          snapshot.Lines.Any(line => line.Type == MetricLineType.Progress));
+
+    private static ProviderSnapshot WithRefreshFailure(ProviderSnapshot cached,
+        ProviderSnapshot failure, string message) => cached with
+        {
+            // Keep the cached bars, but carry the provider's actual failure category alongside
+            // them. The UI can then distinguish signed-out, rate-limited, and network states
+            // instead of collapsing every failure into a vague stale label.
+            ErrorCategory = failure.ErrorCategory,
+            Lines = cached.Lines
+                .Where(line => !line.IsError)
+                .Append(MetricLine.Badge(MetricLine.ErrorBadgeLabel, message, "#EF4444", state: MetricState.Error))
+                .ToArray(),
+            Warning = message
+        };
 
     private static string RedactError(string message) => Regex.Replace(message,
         @"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[redacted-email]",

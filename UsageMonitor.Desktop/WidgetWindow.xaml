@@ -1,14 +1,14 @@
 <UserControl x:Class="UsageMonitor.Desktop.WidgetWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="180" Height="30"
+        Height="30"
         Background="Transparent"
         UseLayoutRounding="True"
         TextOptions.TextFormattingMode="Display">
     <Border x:Name="Root" Background="Transparent" Padding="8,3" MinHeight="30"
             SnapsToDevicePixels="True" Cursor="Arrow"
-            AutomationProperties.Name="Usage Monitor taskbar status strip"
-            AutomationProperties.HelpText="Click to open Usage Monitor. Unlock its position in Settings before dragging.">
+            AutomationProperties.Name="TokenBurn taskbar status strip"
+            AutomationProperties.HelpText="Click to open TokenBurn. Unlock its position in Settings before dragging.">
         <StackPanel x:Name="MetricStrip" Orientation="Horizontal"
                     VerticalAlignment="Center" HorizontalAlignment="Left" />
     </Border>

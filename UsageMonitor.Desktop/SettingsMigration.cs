@@ -12,6 +12,12 @@ internal static class SettingsMigration
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        settings.NotificationProviderIds = (settings.NotificationProviderIds ?? [])
+            .Select(ProviderCatalog.NormalizeId)
+            .Where(id => id.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         settings.StarredMetrics = (settings.StarredMetrics ?? [])
             .Select(NormalizeMetricKey)
             .Where(key => key.Length > 0)
@@ -19,6 +25,21 @@ internal static class SettingsMigration
             .ToList();
 
         settings.SpendMetric = NormalizeSpendMetric(settings.SpendMetric);
+        settings.MotionPreference = settings.MotionPreference?.Trim().ToLowerInvariant() switch
+        {
+            "full" => "full",
+            "reduced" => "reduced",
+            _ => "system"
+        };
+        settings.CompactDensity = true;
+        settings.ShowTotalSpend = true;
+        settings.NotificationTrigger = settings.NotificationTrigger?.Trim().ToLowerInvariant() switch
+        {
+            "rapid" => "rapid",
+            "both" => "both",
+            "none" => "none",
+            _ => "threshold5"
+        };
     }
 
     public static string NormalizeSpendMetric(string? value)

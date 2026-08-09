@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace UsageMonitor.Core.Providers.Antigravity;
 
 /// <summary>
-/// Windows-native Antigravity quota provider. It follows OpenUsage's strategy order but uses the
+/// Windows-native Antigravity quota provider. It follows the established strategy order but uses the
 /// Windows Credential Manager and Gemini CLI OAuth file instead of macOS Keychain.
 /// </summary>
 public sealed class AntigravityProvider : IUsageProvider
@@ -93,7 +93,7 @@ public sealed class AntigravityProvider : IUsageProvider
 
                 var result = await FetchUsageAsync(token!, context, cancellationToken).ConfigureAwait(false);
                 return ProviderSnapshot.Success(Provider, result.Lines, result.Plan, context.Now,
-                    history: _history.Scan(context.Now, cancellationToken));
+                    history: _history.Scan(context.Now, context.ModelCatalog, cancellationToken));
             }
             catch (AntigravityAuthenticationException)
             {
@@ -110,7 +110,7 @@ public sealed class AntigravityProvider : IUsageProvider
                             CacheToken(refreshed, candidate.RefreshToken!);
                             var recovered = await FetchUsageAsync(refreshed.AccessToken, context, cancellationToken).ConfigureAwait(false);
                             return ProviderSnapshot.Success(Provider, recovered.Lines, recovered.Plan, context.Now,
-                                history: _history.Scan(context.Now, cancellationToken));
+                                history: _history.Scan(context.Now, context.ModelCatalog, cancellationToken));
                         }
                     }
                     catch (AntigravityAuthenticationException) { }
@@ -120,17 +120,18 @@ public sealed class AntigravityProvider : IUsageProvider
             catch (AntigravityRequestException ex)
             {
                 return ErrorWithHistory(ex.Message,
-                    ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network, context.Now, cancellationToken);
+                    ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network,
+                    context.Now, context.ModelCatalog, cancellationToken);
             }
-            catch (AntigravityParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, context.Now, cancellationToken); }
-            catch (HttpRequestException) { return ErrorWithHistory("Antigravity connection failed.", ProviderErrorCategory.Network, context.Now, cancellationToken); }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Antigravity request timed out.", ProviderErrorCategory.Network, context.Now, cancellationToken); }
+            catch (AntigravityParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, context.Now, context.ModelCatalog, cancellationToken); }
+            catch (HttpRequestException) { return ErrorWithHistory("Antigravity connection failed.", ProviderErrorCategory.Network, context.Now, context.ModelCatalog, cancellationToken); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Antigravity request timed out.", ProviderErrorCategory.Network, context.Now, context.ModelCatalog, cancellationToken); }
         }
 
         return ErrorWithHistory(
             sawAuthFailure ? "Antigravity sign-in expired. Open Antigravity or Gemini CLI and sign in again." : "Antigravity usage is temporarily unavailable.",
             sawAuthFailure ? ProviderErrorCategory.Authentication : ProviderErrorCategory.Network,
-            context.Now, cancellationToken);
+            context.Now, context.ModelCatalog, cancellationToken);
     }
 
     private async Task<(string? Plan, IReadOnlyList<MetricLine> Lines)> FetchUsageAsync(string token, ProviderContext context, CancellationToken cancellationToken)
@@ -247,8 +248,9 @@ public sealed class AntigravityProvider : IUsageProvider
         return ProviderJson.String(ProviderJson.Property(document?.RootElement ?? default, "cloudaicompanionProject", "project"));
     }
 
-    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, DateTimeOffset now, CancellationToken cancellationToken)
-        => ProviderSnapshot.Error(Provider, message, category) with { UsageHistory = _history.Scan(now, cancellationToken) };
+    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, DateTimeOffset now,
+        IModelCatalog? catalog, CancellationToken cancellationToken)
+        => ProviderSnapshot.Error(Provider, message, category) with { UsageHistory = _history.Scan(now, catalog, cancellationToken) };
 
     private static void ThrowForStatus(ProviderHttpResponse response)
     {

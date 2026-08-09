@@ -6,7 +6,7 @@ namespace UsageMonitor.Desktop;
 /// <summary>
 /// Converts a normalized ProgressBar value into the pixel width of the filled portion.
 /// WPF's default template does this internally, but the compact dashboard uses a custom
-/// template so the track and fill keep the rounded OpenUsage treatment. Without an explicit
+/// template so the track and fill keep the rounded treatment. Without an explicit
 /// width binding the custom indicator renders at zero width, which looks like an empty bar.
 /// </summary>
 public sealed class ProgressWidthConverter : IMultiValueConverter

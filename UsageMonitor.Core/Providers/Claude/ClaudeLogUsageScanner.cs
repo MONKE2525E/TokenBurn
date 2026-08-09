@@ -3,7 +3,12 @@ namespace UsageMonitor.Core.Providers.Claude;
 public sealed class ClaudeLogUsageScanner
 {
     private readonly IProviderFileSystem _files;
-    public ClaudeLogUsageScanner(IProviderFileSystem? files = null) => _files = files ?? new LocalProviderFileSystem();
+    private readonly IModelCatalog _catalog;
+    public ClaudeLogUsageScanner(IProviderFileSystem? files = null, IModelCatalog? catalog = null)
+    {
+        _files = files ?? new LocalProviderFileSystem();
+        _catalog = catalog ?? new CachedModelCatalog();
+    }
 
     public static ProviderUsageHistory ScanDirectory(string claudeHome, DateTimeOffset since) => new ClaudeLogUsageScanner().Scan(claudeHome, since);
 
@@ -45,13 +50,43 @@ public sealed class ClaudeLogUsageScanner
 
         var deduped = Deduplicate(entries);
         var totals = new Dictionary<DateOnly, (double Tokens, double Cost)>();
+        var breakdown = new Dictionary<(DateOnly Date, string Model, UsageCostBasis Basis), UsageBreakdownPoint>();
+        var unknownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in deduped.Where(entry => entry.Timestamp >= since))
         {
+            if (!entry.PricingKnown && !string.IsNullOrWhiteSpace(entry.Model)) unknownModels.Add(entry.Model);
             var day = DateOnly.FromDateTime(entry.Timestamp.UtcDateTime);
             if (totals.TryGetValue(day, out var prior)) totals[day] = (prior.Tokens + entry.Tokens, prior.Cost + entry.Cost);
             else totals[day] = (entry.Tokens, entry.Cost);
+            var basis = entry.ReportedCost ? UsageCostBasis.ProviderReported
+                : entry.PricingKnown ? UsageCostBasis.CatalogEstimated : UsageCostBasis.Unpriced;
+            var key = (day, entry.Model, basis);
+            if (breakdown.TryGetValue(key, out var existing))
+            {
+                breakdown[key] = existing with
+                {
+                    UncachedInputTokens = existing.UncachedInputTokens + entry.Input,
+                    CachedInputTokens = existing.CachedInputTokens + entry.Cached,
+                    CacheCreationTokens = existing.CacheCreationTokens + entry.CacheCreation,
+                    OutputTokens = existing.OutputTokens + entry.Output,
+                    CostUsd = existing.CostUsd + entry.Cost,
+                    CacheSavingsUsd = existing.CacheSavingsUsd + entry.CacheSavings
+                };
+            }
+            else
+            {
+                breakdown[key] = new UsageBreakdownPoint(day, ProviderIds.ClaudeCode, entry.Model,
+                    entry.Input, entry.Cached, entry.CacheCreation, entry.Output, 0, entry.Cost, basis,
+                    basis == UsageCostBasis.ProviderReported ? PricingBasis.ProviderCredits
+                        : basis == UsageCostBasis.CatalogEstimated ? PricingBasis.LocalEstimate : PricingBasis.Unknown,
+                    basis != UsageCostBasis.ProviderReported, entry.CacheSavings);
+            }
         }
-        return new ProviderUsageHistory(totals.OrderBy(x => x.Key).Select(x => new UsageHistoryPoint(x.Key, x.Value.Tokens, x.Value.Cost, true)).ToArray());
+        return new ProviderUsageHistory(totals.OrderBy(x => x.Key).Select(x => new UsageHistoryPoint(x.Key, x.Value.Tokens, x.Value.Cost, true)).ToArray())
+        {
+            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
+            Breakdown = breakdown.Values.OrderBy(point => point.Date).ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase).ToArray()
+        };
     }
 
     private static IReadOnlyList<ClaudeUsageEntry> Deduplicate(IReadOnlyList<ClaudeUsageEntry> entries)
@@ -105,12 +140,20 @@ public sealed class ClaudeLogUsageScanner
         DateTimeOffset Timestamp,
         double Tokens,
         double Cost,
+        double Input,
+        double Cached,
+        double CacheCreation,
+        double Output,
+        double CacheSavings,
         string? MessageId,
         string? RequestId,
+        string Model,
+        bool PricingKnown,
+        bool ReportedCost,
         bool IsSidechain,
         bool HasSpeed);
 
-    private static IReadOnlyList<ClaudeUsageEntry> ParseEntries(
+    private IReadOnlyList<ClaudeUsageEntry> ParseEntries(
         System.Text.Json.JsonElement root,
         System.Text.Json.JsonElement? message,
         System.Text.Json.JsonElement usage,
@@ -120,7 +163,7 @@ public sealed class ClaudeLogUsageScanner
         if (TryCreateEntry(root, message, usage, timestamp, null, null, null, out var parent))
             entries.Add(parent!);
 
-        // Claude Code can include advisor work in usage.iterations. OpenUsage counts only
+        // Claude Code can include advisor work in usage.iterations. Count only
         // advisor_message iterations as separate model usage. Ordinary iterations are already
         // represented by the parent usage and would double-count the same turn.
         var iterations = ProviderJson.Array(ProviderJson.Property(usage, "iterations"));
@@ -148,7 +191,7 @@ public sealed class ClaudeLogUsageScanner
         return entries;
     }
 
-    private static bool TryCreateEntry(
+    private bool TryCreateEntry(
         System.Text.Json.JsonElement root,
         System.Text.Json.JsonElement? message,
         System.Text.Json.JsonElement usage,
@@ -187,12 +230,16 @@ public sealed class ClaudeLogUsageScanner
             ?? (message is { } requestObject ? ProviderJson.String(ProviderJson.Property(requestObject, "requestId", "request_id")) : null);
         var reportedCost = ProviderJson.Number(ProviderJson.Property(root, "costUSD", "cost_usd"))
             ?? (message is { } costMessage ? ProviderJson.Number(ProviderJson.Property(costMessage, "costUSD", "cost_usd")) : null);
-        var cost = reportedCost is { } exactCost && IsFiniteNonNegative(exactCost)
-            ? exactCost
-            : ModelPricingCatalog.Resolve(model).Estimate(input, cached, output, cacheCreation);
+        var hasReportedCost = reportedCost is { } exactCost && IsFiniteNonNegative(exactCost);
+        var pricing = _catalog.ResolvePrice(ProviderIds.ClaudeCode, model);
+        var cost = hasReportedCost
+            ? reportedCost!.Value
+            : pricing?.Estimate(input, cached, output, cacheCreation) ?? 0;
         if (!IsFiniteNonNegative(cost)) return false;
         var isSidechain = ProviderJson.Bool(ProviderJson.Property(root, "isSidechain")) ?? false;
-        entry = new ClaudeUsageEntry(timestamp, tokens, cost, messageId, requestId, isSidechain, speed is not null);
+        var cacheSavings = pricing is null ? 0 : cached / 1_000_000d * Math.Max(0, pricing.InputPerMillion - pricing.CachedInputPerMillion);
+        entry = new ClaudeUsageEntry(timestamp, tokens, cost, input, cached, cacheCreation, output, cacheSavings, messageId, requestId, model,
+            hasReportedCost || pricing is not null, hasReportedCost, isSidechain, speed is not null);
         return true;
     }
 

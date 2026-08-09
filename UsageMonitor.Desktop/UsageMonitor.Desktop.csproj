@@ -1,72 +1,74 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <EmbeddedResource Include="..\assets\brand\exports\tokenburn-app-icon-256.png">
+      <LogicalName>TokenBurn.Icons.App.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\assets\brand\exports\tokenburn-app-icon.ico">
+      <LogicalName>TokenBurn.Icons.App.ico</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\assets\brand\exports\tokenburn-app-icon-32.png">
+      <LogicalName>TokenBurn.Icons.Tray.png</LogicalName>
+    </EmbeddedResource>
+    <!-- The notification-area icon needs actual 16/20/24/32/48/256px frames. Do not reuse
+         the general app icon and leave Explorer to resample it at runtime. -->
+    <EmbeddedResource Include="..\assets\brand\exports\tokenburn-tray-icon.ico">
+      <LogicalName>TokenBurn.Icons.Tray.ico</LogicalName>
+    </EmbeddedResource>
+    <Content Include="..\assets\brand\exports\tokenburn-app-icon-32.png"
+             Link="Assets\Brand\tokenburn-app-icon-32.png"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\assets\brand\exports\tokenburn-app-icon-256.png"
+             Link="Assets\Brand\tokenburn-app-icon-256.png"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="..\UsageMonitor.Core\UsageMonitor.Core.csproj" />
     <ProjectReference Include="..\UsageMonitor.LocalApi\UsageMonitor.LocalApi.csproj" />
   </ItemGroup>
 
   <!-- These are the upstream provider marks, shared with the Tauri popup. The native taskbar
-       strip uses them as monochrome template glyphs, just like OpenUsage's status item. -->
+       strip uses them as monochrome template glyphs. -->
   <ItemGroup>
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\codex.svg"
-             Link="Assets\ProviderIcons\codex.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\claude.svg"
-             Link="Assets\ProviderIcons\claude.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\antigravity.svg"
-             Link="Assets\ProviderIcons\antigravity.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\cursor.svg"
-             Link="Assets\ProviderIcons\cursor.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\copilot.svg"
-             Link="Assets\ProviderIcons\copilot.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\devin.svg"
-             Link="Assets\ProviderIcons\devin.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\grok.svg"
-             Link="Assets\ProviderIcons\grok.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\opencode.svg"
-             Link="Assets\ProviderIcons\opencode.svg"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\codex.svg" Link="Assets\ProviderIcons\codex.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\claude.svg" Link="Assets\ProviderIcons\claude.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\antigravity.svg" Link="Assets\ProviderIcons\antigravity.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\cursor.svg" Link="Assets\ProviderIcons\cursor.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\copilot.svg" Link="Assets\ProviderIcons\copilot.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\devin.svg" Link="Assets\ProviderIcons\devin.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\grok.svg" Link="Assets\ProviderIcons\grok.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\opencode.svg" Link="Assets\ProviderIcons\opencode.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
   </ItemGroup>
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <ApplicationIcon>..\assets\brand\exports\tokenburn-app-icon.ico</ApplicationIcon>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <AssemblyName>UsageMonitor</AssemblyName>
+    <AssemblyName>TokenBurn</AssemblyName>
     <RootNamespace>UsageMonitor.Desktop</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <WindowsAppSdkMsixArchitecture Condition="'$(RuntimeIdentifier)' == 'win-x64'">win10-x64</WindowsAppSdkMsixArchitecture>
+    <WindowsAppSdkMsixArchitecture Condition="'$(RuntimeIdentifier)' == 'win-arm64'">win10-arm64</WindowsAppSdkMsixArchitecture>
   </PropertyGroup>
 
   <!-- Keep the hosted Tauri popup beside the WPF shell when a local Tauri build exists. The
        native taskbar adapter still ships independently and remains the fallback if this file is
        absent, so an installer can roll the popup forward without losing shell reliability. -->
   <Target Name="CopyTauriPopup" AfterTargets="Publish">
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\usage-monitor-tauri-poc.exe"
-          DestinationFiles="$(PublishDir)UsageMonitor.TauriPoc.exe"
-          SkipUnchangedFiles="true"
-          Condition="Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\usage-monitor-tauri-poc.exe')" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\usage-monitor-tauri-poc.exe"
-          DestinationFiles="$(PublishDir)UsageMonitor.TauriPoc.exe"
-          SkipUnchangedFiles="true"
-          Condition="!Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\usage-monitor-tauri-poc.exe') And Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\usage-monitor-tauri-poc.exe')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\tokenburn-desktop.exe" DestinationFiles="$(PublishDir)tokenburn-desktop.exe" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\tokenburn-desktop.exe')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\tokenburn-desktop.exe" DestinationFiles="$(PublishDir)tokenburn-desktop.exe" SkipUnchangedFiles="true" Condition="!Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\release\tokenburn-desktop.exe') And Exists('$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\src-tauri\target\debug\tokenburn-desktop.exe')" />
   </Target>
 
   <!-- Single-file publish does not reliably carry linked Content items into the publish folder.
@@ -76,9 +78,36 @@
     <ItemGroup>
       <ProviderIconFiles Include="$(MSBuildProjectDirectory)\..\UsageMonitor.TauriPoc\dist\assets\providers\*.svg" />
     </ItemGroup>
-    <Copy SourceFiles="@(ProviderIconFiles)"
-          DestinationFolder="$(PublishDir)Assets\ProviderIcons"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ProviderIconFiles)" DestinationFolder="$(PublishDir)Assets\ProviderIcons" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- AppNotificationManager depends on the Windows App Runtime Singleton package even in an
+       unpackaged self-contained app. The installer registers this signed per-user MSIX package. -->
+  <Target Name="CopyAppNotificationSingletonToPublish" AfterTargets="Publish">
+    <PropertyGroup>
+      <AppNotificationSingletonPackage>$(NuGetPackageRoot)microsoft.windowsappsdk.runtime\2.0.1\tools\MSIX\$(WindowsAppSdkMsixArchitecture)\Microsoft.WindowsAppRuntime.Singleton.2.msix</AppNotificationSingletonPackage>
+    </PropertyGroup>
+    <Copy SourceFiles="$(AppNotificationSingletonPackage)"
+          DestinationFolder="$(PublishDir)WindowsAppRuntime"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(AppNotificationSingletonPackage)')" />
+  </Target>
+
+  <!-- AppNotifications loads this resource DLL dynamically. Windows App SDK's self-contained
+       target does not currently copy it, so extract the signed SDK copy from its framework MSIX
+       into both local build and publish output. -->
+  <Target Name="ExtractAppNotificationResourceDll" AfterTargets="Build;Publish"
+          Condition="'$(WindowsAppSDKSelfContained)' == 'true' and '$(WindowsAppSdkMsixArchitecture)' != ''">
+    <PropertyGroup>
+      <AppNotificationFrameworkPackage>$(NuGetPackageRoot)microsoft.windowsappsdk.runtime\2.0.1\tools\MSIX\$(WindowsAppSdkMsixArchitecture)\Microsoft.WindowsAppRuntime.2.msix</AppNotificationFrameworkPackage>
+      <AppNotificationResourceDll>$(OutDir)Microsoft.WindowsAppRuntime.Insights.Resource.dll</AppNotificationResourceDll>
+    </PropertyGroup>
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [System.IO.Compression.ZipFile]::OpenRead('$(AppNotificationFrameworkPackage)'); try { $entry = $archive.GetEntry('Microsoft.WindowsAppRuntime.Insights.Resource.dll'); if ($null -eq $entry) { throw 'Missing Insights resource DLL in Windows App Runtime package.' }; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, '$(AppNotificationResourceDll)', $true) } finally { $archive.Dispose() }&quot;"
+          Condition="Exists('$(AppNotificationFrameworkPackage)')" />
+    <Copy SourceFiles="$(AppNotificationResourceDll)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="'$(PublishDir)' != '' and Exists('$(AppNotificationResourceDll)')" />
   </Target>
 
 </Project>

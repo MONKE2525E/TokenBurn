@@ -1,4 +1,4 @@
-# Usage Monitor Tauri presentation host
+# TokenBurn Tauri presentation host
 
 This is the Tauri presentation layer used by the Windows shell. The .NET solution remains the
 provider, cache, credential, API, and Explorer integration owner.
@@ -35,7 +35,9 @@ not part of the normal tray workflow.
 
 The migration is intentionally hybrid. The WPF process owns the native Explorer taskbar strip and
 the provider/cache/API process boundary. The Tauri process owns the popup surface, launched with
-`--hosted` beside the published desktop executable. The Tauri control channel is restricted to
-`127.0.0.1:6737` and carries only screen coordinates and show/hide commands. A separate desktop
+`--hosted` beside the published desktop executable. Its control channel is restricted to
+`127.0.0.1:6737` and carries only screen coordinates and show/hide commands. While the WPF shell
+is running, its hosted popup stays resident after it is hidden so tray and taskbar activation
+remains warm; it is stopped only when the shell exits. A separate desktop
 control channel on `127.0.0.1:6738` lets the Tauri Options button open the existing WPF settings
 dialog without exposing provider data to the shell.
