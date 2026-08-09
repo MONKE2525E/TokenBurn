@@ -22,3 +22,5 @@ Legacy billing-key adapters remain in the source for compatibility, but they are
 - Use bounded HTTP timeouts and cancellation. Do not introduce retry loops without a clear retryable-error gate and backoff.
 - Preserve last-good local history when a live provider call fails.
 - Add fixture coverage for new response shapes and parser edge cases.
+
+Antigravity refresh-token rotation reads OAuth client credentials from the existing local OAuth envelope when the provider supplies them. Installations without those fields can provide `TOKENBURN_GOOGLE_CLIENT_ID` and `TOKENBURN_GOOGLE_CLIENT_SECRET` in the process environment. TokenBurn does not ship client credentials in source or write them back to disk.

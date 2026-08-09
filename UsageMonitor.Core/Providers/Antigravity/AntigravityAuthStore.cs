@@ -3,7 +3,13 @@ using System.Text.Json;
 
 namespace UsageMonitor.Core.Providers.Antigravity;
 
-public sealed record AntigravityToken(string? AccessToken, string? RefreshToken, DateTimeOffset? ExpiresAt, string Source)
+public sealed record AntigravityToken(
+    string? AccessToken,
+    string? RefreshToken,
+    DateTimeOffset? ExpiresAt,
+    string Source,
+    string? ClientId = null,
+    string? ClientSecret = null)
 {
     public bool HasAccessToken => !string.IsNullOrWhiteSpace(AccessToken);
     public bool HasRefreshToken => !string.IsNullOrWhiteSpace(RefreshToken);
@@ -87,8 +93,12 @@ public sealed class AntigravityAuthStore
         var access = ProviderJson.String(ProviderJson.Property(value, "access_token", "accessToken", "bearerToken", "id_token", "idToken"));
         var refresh = ProviderJson.String(ProviderJson.Property(value, "refresh_token", "refreshToken"));
         var expiry = ProviderJson.Date(ProviderJson.Property(value, "expiry", "expiry_date", "expires_at", "expiresAt"));
+        var clientId = ProviderJson.String(ProviderJson.Property(value, "client_id", "clientId")) ??
+            ProviderJson.String(ProviderJson.Property(root, "client_id", "clientId"));
+        var clientSecret = ProviderJson.String(ProviderJson.Property(value, "client_secret", "clientSecret")) ??
+            ProviderJson.String(ProviderJson.Property(root, "client_secret", "clientSecret"));
         if (!string.IsNullOrWhiteSpace(access) || !string.IsNullOrWhiteSpace(refresh))
-            return new AntigravityToken(access?.Trim(), refresh?.Trim(), expiry, source);
+            return new AntigravityToken(access?.Trim(), refresh?.Trim(), expiry, source, clientId?.Trim(), clientSecret?.Trim());
 
         foreach (var name in new[] { "oauth", "oauth2", "credentials", "auth", "tokens" })
         {

@@ -67,7 +67,7 @@ public sealed class AntigravityProvider : IUsageProvider
                     token = GetCachedToken(candidate.RefreshToken!, context.Now) ?? token;
                     if (string.IsNullOrWhiteSpace(token))
                     {
-                        var refreshed = await RefreshGoogleTokenAsync(candidate.RefreshToken!, context, cancellationToken).ConfigureAwait(false);
+                        var refreshed = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
                         if (refreshed is not null)
                         {
                             token = refreshed.AccessToken;
@@ -82,7 +82,7 @@ public sealed class AntigravityProvider : IUsageProvider
                 }
                 if (string.IsNullOrWhiteSpace(token) && candidate.HasRefreshToken)
                 {
-                    var refreshed = await RefreshGoogleTokenAsync(candidate.RefreshToken!, context, cancellationToken).ConfigureAwait(false);
+                    var refreshed = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
                     if (refreshed is not null)
                     {
                         token = refreshed.AccessToken;
@@ -104,7 +104,7 @@ public sealed class AntigravityProvider : IUsageProvider
                 {
                     try
                     {
-                        var refreshed = await RefreshGoogleTokenAsync(candidate.RefreshToken!, context, cancellationToken).ConfigureAwait(false);
+                        var refreshed = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
                         if (refreshed is not null)
                         {
                             CacheToken(refreshed, candidate.RefreshToken!);
@@ -208,9 +208,14 @@ public sealed class AntigravityProvider : IUsageProvider
         return last ?? new ProviderHttpResponse(503, new Dictionary<string, string>(), string.Empty);
     }
 
-    private async Task<GoogleRefreshResult?> RefreshGoogleTokenAsync(string refreshToken, ProviderContext context, CancellationToken cancellationToken)
+    private async Task<GoogleRefreshResult?> RefreshGoogleTokenAsync(AntigravityToken candidate, ProviderContext context, CancellationToken cancellationToken)
     {
-        var form = $"client_id={Uri.EscapeDataString(GoogleClientId)}&client_secret={Uri.EscapeDataString(GoogleClientSecret)}&refresh_token={Uri.EscapeDataString(refreshToken)}&grant_type=refresh_token";
+        var clientId = candidate.ClientId ?? Environment.GetEnvironmentVariable(GoogleClientIdEnvironmentVariable);
+        var clientSecret = candidate.ClientSecret ?? Environment.GetEnvironmentVariable(GoogleClientSecretEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(candidate.RefreshToken) || string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
+            return null;
+
+        var form = $"client_id={Uri.EscapeDataString(clientId)}&client_secret={Uri.EscapeDataString(clientSecret)}&refresh_token={Uri.EscapeDataString(candidate.RefreshToken)}&grant_type=refresh_token";
         var response = await _http.SendAsync(HttpMethod.Post, new Uri(GoogleTokenUri),
             new Dictionary<string, string> { ["Accept"] = "application/json" }, form, "application/x-www-form-urlencoded", context.Proxy, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode is 400 or 401) return null;
