@@ -54,7 +54,10 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>TokenBurn</AssemblyName>
     <RootNamespace>UsageMonitor.Desktop</RootNamespace>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Windows App SDK invokes mt.exe from an intermediate working directory on hosted
+         runners. Use an absolute project-root-relative path so the manifest merge remains
+         deterministic there as well as in Visual Studio/local builds. -->
+    <ApplicationManifest>$(MSBuildProjectDirectory)\app.manifest</ApplicationManifest>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
