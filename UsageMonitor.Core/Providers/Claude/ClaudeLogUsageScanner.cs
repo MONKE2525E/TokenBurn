@@ -29,12 +29,9 @@ public sealed class ClaudeLogUsageScanner
             // Claude session files can be hundreds of megabytes because a single line may contain
             // a tool result or a long conversation transcript. Stream them so a refresh cannot
             // retain the complete history and its split-line copies simultaneously.
-            foreach (var raw in _files.ReadLines(path))
+            foreach (var raw in _files.ReadLinesContaining(path, "\"usage\""))
             {
                 if (string.IsNullOrWhiteSpace(raw)) continue;
-                // Most Claude records are transcript/tool metadata and cannot contribute usage.
-                // Avoid allocating a JsonDocument for those very large lines.
-                if (!raw.Contains("\"usage\"", StringComparison.OrdinalIgnoreCase)) continue;
                 using var doc = ProviderJson.Parse(raw.Trim());
                 if (doc is null) continue;
                 var root = doc.RootElement;
