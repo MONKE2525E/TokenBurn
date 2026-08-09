@@ -1,20 +1,22 @@
 # TokenBurn
 
-TokenBurn is a local-first Windows utility for monitoring AI coding usage, quotas, reset times, tokens, and estimated spend from the taskbar, tray, dashboard, CLI, and loopback API.
+TokenBurn started as a personal Windows utility. I wanted a quick way to glance at AI coding usage and quota information from the taskbar, and the tools I found did not work the way I wanted. So I built this one.
 
-It reads the local state that supported AI tools already keep on the machine. It does not upload prompts, transcripts, session history, or credentials to a TokenBurn service. It is an independent project inspired by the compact usage surfaces of [OpenUsage](https://github.com/robinebers/openusage), not an official OpenUsage product.
+It is a local-first Windows AI usage monitor for supported Codex, Claude Code, Antigravity, OpenCode, and related provider sources. It can surface quotas, reset times, token usage, estimated cost, caching information, and local usage history where the provider exposes enough data to calculate them honestly.
+
+TokenBurn is intentionally more Windows-native than a normal web dashboard. The WPF shell owns the taskbar, tray, settings, and Windows integration. The optional Tauri process provides a compact popup. The project has no TokenBurn cloud service, accounts, telemetry pipeline, or hosted backend.
 
 ## What works today
 
-- WPF dashboard, notification-area tray, and a native Windows taskbar status surface.
-- Tauri presentation popup backed by the existing .NET provider and shell boundary.
-- Codex, Claude Code, Antigravity, and OpenCode local usage integrations.
-- Honest unsupported states for providers without a stable supported usage source.
-- Local 30-day history aggregation and model-aware cost estimates.
+- WPF dashboard, notification-area tray, and native Windows taskbar status surface.
+- Optional Tauri popup backed by the existing .NET provider and shell boundary.
+- Local/provider integrations for Codex, Claude Code, Antigravity, and OpenCode.
+- Honest unavailable and unsupported states instead of fabricated zero usage.
+- Local 30-day history aggregation and model-aware cost estimates where pricing is known.
 - One-shot JSON through `usage-monitor` and a loopback-only API on `127.0.0.1:6736`.
 - Windows Credential Manager and DPAPI-backed secret handling, plus redacted local diagnostics.
 
-TokenBurn never fabricates zero usage when a provider is unavailable. Unknown model prices remain unknown instead of being assigned a generic rate. See [Provider integrations](docs/PROVIDERS.md), [Cost methodology](docs/COSTS.md), and [Privacy and local data](docs/PRIVACY.md).
+Some refreshes contact the relevant provider using credentials already available on the machine. TokenBurn does not upload prompts, transcripts, session history, or credentials to a TokenBurn service. Unknown model prices remain unknown instead of being assigned a generic rate. See [provider integrations](docs/PROVIDERS.md), [cost methodology](docs/COSTS.md), and [privacy and local data](docs/PRIVACY.md).
 
 ## Project layout
 
@@ -69,10 +71,34 @@ Start with [docs/README.md](docs/README.md). The most useful guides are:
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Security policy](SECURITY.md)
 
+## Credits and inspiration
+
+TokenBurn is an independent project. The projects below do not endorse, sponsor, maintain, or have any affiliation with TokenBurn.
+
+### OpenUsage
+
+[OpenUsage](https://github.com/robinebers/openusage) was the biggest conceptual and visual influence. It established the general product idea of making AI usage, quotas, resets, providers, and token or cost information easy to see in a dedicated desktop utility.
+
+TokenBurn took inspiration from OpenUsage's quota and usage presentation, provider cards, usage indicators, visual organization, and compact at-a-glance surface. The Windows experience evolved differently around persistent taskbar information, popup behavior, provider switching, detailed usage analysis, and native shell integration. TokenBurn is not a Windows port of OpenUsage.
+
+This repository also contains a limited amount of OpenUsage-derived material: the `openusage.limits.v1` compatibility schema, adapted near-full quota-bar geometry, and provider icon SVG assets. Those items are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### Pane
+
+[Pane](https://github.com/ItsJazii/pane) was a useful Windows product reference. It helped validate that a local tray utility for AI subscription limits was a sensible category and provided a practical reference for how a Windows usage monitor could feel.
+
+TokenBurn was built around a different set of priorities: persistent taskbar visibility, compact quota information, popup interactions, detailed provider and model analysis, and a different visual design. No Pane code or assets were copied into TokenBurn.
+
+### T3 Code
+
+[T3 Code](https://github.com/pingdotgg/t3code) was the primary visual reference for TokenBurn's detailed usage dashboard. The influence is direct: TokenBurn's usage page was heavily inspired by T3 Code's usage screen, including large headline usage and cost metrics, time-series usage and cost graphs, provider breakdowns, model breakdowns, cache-related statistics, and the overall information hierarchy.
+
+TokenBurn adds its own provider support, local data model, Windows behavior, metrics, and cost methodology on top of that reference. No T3 Code code or assets were copied into TokenBurn.
+
 ## Privacy
 
-Settings, cache, local usage history, pricing overrides, and diagnostics stay in Windows application-data directories. Credentials are read from supported local stores and are not written to the repository, cache, logs, or API responses. Telemetry and crash uploads are disabled by default. Read [docs/PRIVACY.md](docs/PRIVACY.md) for the data flow and deletion boundaries.
+Settings, cache, local usage history, pricing overrides, and diagnostics stay in Windows application-data directories. Credentials are read from supported local stores and are not written to the repository, cache, logs, or API responses. Read [docs/PRIVACY.md](docs/PRIVACY.md) for the data flow and deletion boundaries.
 
-## License and attribution
+## License
 
-TokenBurn is licensed under the MIT License. See [LICENSE](LICENSE). The `upstream-openusage` directory is retained for local reference and attribution boundaries. TokenBurn does not use OpenUsage branding or logo assets.
+TokenBurn's original code is licensed under the [MIT License](LICENSE). Third-party material that requires a separate notice is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

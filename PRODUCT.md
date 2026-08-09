@@ -10,7 +10,7 @@ Windows developers who use multiple AI coding providers and want to glance at qu
 
 ## Product Purpose
 
-Usage Monitor is a local-first Windows dashboard and taskbar companion inspired by OpenUsage's compact macOS popover. It should make the current quota obvious in one glance, open the full dashboard from the taskbar or tray, and remain useful when a provider is offline or stale.
+TokenBurn is a local-first Windows dashboard and taskbar companion inspired by OpenUsage's compact macOS popover. It should make the current quota obvious in one glance, open the full dashboard from the taskbar or tray, and remain useful when a provider is offline or stale.
 
 ## Brand Personality
 
