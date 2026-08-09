@@ -8,23 +8,30 @@ Releases are currently unsigned and do not use an automatic update feed. Windows
 
 ## Build from source
 
-Install Windows 10 or 11, the .NET 10 SDK, Node.js, Rust and Cargo, WebView2 for the Tauri popup, and Inno Setup 6 when building the installer.
+Install Windows 10 or 11, the .NET 10 SDK, Node.js, Rust and Cargo, WebView2 for the Tauri
+dashboard, and Inno Setup 6 when building the installer.
 
 ```powershell
 git clone <repository-url>
 cd TokenBurn
 dotnet restore UsageMonitor.slnx
-dotnet build UsageMonitor.slnx --configuration Release
-dotnet run --project UsageMonitor.Desktop
 ```
 
-Build the Tauri presentation host separately:
+Build the Tauri presentation host before launching the .NET host. The normal TokenBurn process is
+`TokenBurn.exe` from `UsageMonitor.Desktop`; it starts the sibling Tauri companion and the Tauri
+window renders the visible dashboard.
 
 ```powershell
 npm --prefix UsageMonitor.TauriPoc ci
 npm --prefix UsageMonitor.TauriPoc run build
 node UsageMonitor.TauriPoc\selfcheck.mjs
+dotnet build UsageMonitor.slnx --configuration Release
+dotnet run --project UsageMonitor.Desktop
 ```
+
+`npm run build` produces the debug Tauri companion used by the local .NET build. A published
+desktop build copies the release or debug `tokenburn-desktop.exe` beside `TokenBurn.exe` when that
+companion exists.
 
 ## First run
 

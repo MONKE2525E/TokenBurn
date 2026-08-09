@@ -23,7 +23,9 @@ Token counts can be available even when a model price is not. Add a correct Clau
 
 ## The Tauri popup does not open
 
-Build the Tauri presentation host and confirm the WPF app can find `tokenburn-desktop.exe` beside its published output. The native WPF dashboard, tray, and taskbar surface are the fallback by design.
+Build the Tauri presentation host and confirm the .NET host can find `tokenburn-desktop.exe` beside
+its published output. The taskbar and tray can remain available when the companion is missing, but
+the current normal dashboard is Tauri/WebView, not the legacy WPF window.
 
 ## Taskbar or popup placement is wrong
 

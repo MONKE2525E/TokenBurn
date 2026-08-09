@@ -1,15 +1,15 @@
 # TokenBurn Tauri presentation host
 
-This is the Tauri presentation layer used by the Windows shell. The .NET solution remains the
-provider, cache, credential, API, and Explorer integration owner.
+This is TokenBurn's primary dashboard presentation layer. The .NET solution remains the provider,
+cache, credential, API, and Explorer integration owner.
 
 - The Rust/Tauri shell owns the frameless, transparent popup. In hosted mode it has no tray icon;
   the WPF shell keeps the single Windows tray icon and sends popup coordinates over loopback.
 - The existing `UsageMonitor.Desktop` process owns the .NET providers, cache, credential handling,
   and loopback API at `http://127.0.0.1:6736`.
-- The native Win32/WPF taskbar strip remains the shell boundary. Tauri owns the popup presentation,
-  while the supported taskbar button and tray stay in .NET so Explorer restarts cannot take down the
-  usage surface.
+- The native Win32/WPF taskbar strip remains the shell boundary. Tauri owns the main popup/dashboard
+  presentation, while the supported taskbar button and tray stay in .NET so Explorer restarts
+  cannot take down the usage surface.
 - The popup is deliberately compact: 320 logical pixels wide by 800 logical pixels high, matching
   the OpenUsage-inspired compact panel proportions. It is a popup surface, not a normal desktop
   window, and is clamped to the monitor work area at the selected DPI.
@@ -21,10 +21,10 @@ provider, cache, credential, API, and Explorer integration owner.
 
 ## Run
 
-1. Start the existing desktop build so the loopback API is listening.
-2. From this folder run `npm install` once, then `npm run dev`.
-3. Click the tray icon. The popup is positioned from the tray click coordinates, has no normal
-   application button, and hides on Escape or focus loss.
+1. Build or start the .NET desktop host so the loopback API is listening.
+2. From this folder run `npm install` once, then `npm run dev` for standalone Tauri development.
+3. For the normal hosted runtime, build the Tauri companion with `npm run build` and launch
+   `TokenBurn.exe`; the .NET host starts `tokenburn-desktop.exe` with `--hosted`.
 
 The Anthropic usage endpoint can rate-limit aggressively. In that case the POC deliberately shows the
 provider warning and whatever cached local history is available. It never invents zero usage.
@@ -39,5 +39,7 @@ the provider/cache/API process boundary. The Tauri process owns the popup surfac
 `127.0.0.1:6737` and carries only screen coordinates and show/hide commands. While the WPF shell
 is running, its hosted popup stays resident after it is hidden so tray and taskbar activation
 remains warm; it is stopped only when the shell exits. A separate desktop
-control channel on `127.0.0.1:6738` lets the Tauri Options button open the existing WPF settings
-dialog without exposing provider data to the shell.
+control channel on `127.0.0.1:6738` supplies settings data and applies settings changes through the
+.NET host. The Settings and Customize pages themselves render inside the Tauri window. Legacy WPF
+settings dialogs remain in the .NET project for compatibility paths, but are not the normal hosted
+settings surface.
