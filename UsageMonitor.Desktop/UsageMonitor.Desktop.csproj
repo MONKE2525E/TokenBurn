@@ -40,7 +40,7 @@
     <Content Include="..\UsageMonitor.TauriPoc\dist\assets\providers\opencode.svg" Link="Assets\ProviderIcons\opencode.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
   </ItemGroup>
 
   <PropertyGroup>
