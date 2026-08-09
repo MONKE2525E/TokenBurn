@@ -20,6 +20,10 @@ jobs:
     if: github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && (github.event.comment.body == '/tokenburn-review' || startsWith(github.event.comment.body, '/tokenburn-review ')))
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Job-level scope is required because the Tailscale step's condition is evaluated
+      # before step-level environment variables exist.
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
     steps:
       - name: Checkout trusted base repository
         uses: actions/checkout@v4
