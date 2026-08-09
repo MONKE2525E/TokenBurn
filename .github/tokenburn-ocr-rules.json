@@ -1,0 +1,9 @@
+{
+  "rules": [
+    {
+      "path": "**/*",
+      "rule": ".github/tokenburn-review-rules.md",
+      "merge_system_rule": true
+    }
+  ]
+}

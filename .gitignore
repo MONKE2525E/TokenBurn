@@ -15,3 +15,17 @@ UsageMonitor.Desktop/app.manifest
 node_modules/
 UsageMonitor.TauriPoc/src-tauri/target/
 upstream-openusage/
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+
+# Local diagnostic output
+*.log
+*.trace

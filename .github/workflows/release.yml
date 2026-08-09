@@ -1,0 +1,83 @@
+name: TokenBurn Windows release
+
+on:
+  push:
+    tags: ["TokenBurn-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Installer version, for example 0.1.39
+        required: true
+        default: 0.1.39
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: UsageMonitor.TauriPoc/package-lock.json
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri dependencies
+        run: npm --prefix UsageMonitor.TauriPoc ci
+      - name: Build Tauri popup
+        run: npm --prefix UsageMonitor.TauriPoc run build
+      - name: Restore and test .NET
+        run: |
+          dotnet restore UsageMonitor.slnx
+          dotnet build UsageMonitor.slnx --configuration Release --no-restore -m:1 /p:BuildInParallel=false /p:UseSharedCompilation=false
+          dotnet test UsageMonitor.slnx --configuration Release --no-build --no-restore -m:1 /p:BuildInParallel=false /p:UseSharedCompilation=false
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+      - name: Package installer
+        shell: pwsh
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $version = '${{ github.ref_name }}' -replace '^TokenBurn-v', ''
+          } else {
+            $version = $env:DISPATCH_VERSION
+          }
+          powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version $version
+          Get-ChildItem .\artifacts\installer -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Set-Content .\artifacts\installer\SHA256SUMS.txt
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TokenBurn-Windows-installer
+          path: artifacts/installer/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/TokenBurn-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: TokenBurn-Windows-installer
+          path: release-assets
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

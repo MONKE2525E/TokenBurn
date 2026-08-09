@@ -15,11 +15,11 @@ use tauri::{
     WebviewWindow, WindowEvent,
 };
 use windows::core::HSTRING;
+use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, GA_ROOT, HWND_TOPMOST,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
-use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
 const API_BASE: &str = "http://127.0.0.1:6736";
 const CONTROL_BIND: &str = "127.0.0.1:6737";

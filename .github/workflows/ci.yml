@@ -1,0 +1,62 @@
+name: TokenBurn CI
+
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+    branches: [dev, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tokenburn-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dotnet:
+    name: .NET build and tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore UsageMonitor.slnx
+      - name: Build
+        run: dotnet build UsageMonitor.slnx --configuration Release --no-restore -m:1 /p:BuildInParallel=false /p:UseSharedCompilation=false
+      - name: Test
+        run: dotnet test UsageMonitor.slnx --configuration Release --no-build --no-restore --logger "console;verbosity=minimal" -m:1 /p:BuildInParallel=false /p:UseSharedCompilation=false
+      - name: Check NuGet vulnerabilities
+        run: dotnet list UsageMonitor.slnx package --vulnerable --include-transitive
+
+  tauri:
+    name: Tauri and Rust checks
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: UsageMonitor.TauriPoc/package-lock.json
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Install Tauri dependencies
+        run: npm --prefix UsageMonitor.TauriPoc ci
+      - name: Build Tauri popup
+        run: npm --prefix UsageMonitor.TauriPoc run build
+      - name: Rust format
+        run: cargo fmt --manifest-path UsageMonitor.TauriPoc\src-tauri\Cargo.toml -- --check
+      - name: Rust tests
+        run: cargo test --manifest-path UsageMonitor.TauriPoc\src-tauri\Cargo.toml
+      - name: Popup self-check
+        run: node UsageMonitor.TauriPoc\selfcheck.mjs
