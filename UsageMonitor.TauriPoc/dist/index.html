@@ -21,6 +21,11 @@
         </div>
       </div>
       <div id="info-popover" class="hint overlay-surface">Cost shows billable history. Tokens also includes Antigravity CLI usage.</div>
+      <div id="share-popover" class="share-menu overlay-surface" role="menu" aria-label="Copy options">
+        <button data-share-copy="both" role="menuitem"><span class="menu-indicator" aria-hidden="true"></span><span>Summary + chart image</span></button>
+        <button data-share-copy="image" role="menuitem"><span class="menu-indicator" aria-hidden="true"></span><span>Chart image only</span></button>
+        <button data-share-copy="text" role="menuitem"><span class="menu-indicator" aria-hidden="true"></span><span>Text only</span></button>
+      </div>
       <div id="metric-popover" class="metric-menu overlay-surface" role="menu">
         <button data-metric="cost" role="menuitemradio" aria-checked="true" class="selected"><span class="menu-indicator is-on" aria-hidden="true"></span><span>Cost</span></button>
         <button data-metric="cost-mtok" role="menuitemradio" aria-checked="false"><span class="menu-indicator" aria-hidden="true"></span><span>Cost/MTok</span></button>

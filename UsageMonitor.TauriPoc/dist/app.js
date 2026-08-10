@@ -285,6 +285,7 @@ function setOverlayOpen(element, open) {
 function closeHeaderPopovers() {
   setOverlayOpen($('#info-popover'), false);
   setOverlayOpen($('#metric-popover'), false);
+  setOverlayOpen($('#share-popover'), false);
   $('#metric-menu')?.setAttribute('aria-expanded', 'false');
 }
 
@@ -334,6 +335,67 @@ function breakdownSummary(rows) {
     if (row.costBasis === 'Unpriced') result.unpriced += row.processed || 0;
     return result;
   }, { cost:0, processed:0, cached:0, uncached:0, creation:0, output:0, reasoning:0, cacheSavings:0, reportedCost:0, modelPricedCost:0, unpriced:0 });
+}
+
+// The ledger aggregation the breakdown table renders. Shared with the share copy so pasting the
+// text always mirrors exactly what the page shows for the current grouping and sort.
+function breakdownGroupedRows(rows) {
+  const modelRows = Object.values(rows.reduce((map,row) => { const key = `${row.providerId}|${row.modelId || ''}`; const target = map[key] ||= { ...row, processed:0, costUsd:0, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.costBasis = target.costBases.size === 1 ? [...target.costBases][0] : target.costBases.has('Unpriced') ? 'PartiallyPriced' : 'Mixed'; return map; }, {}));
+  const dayRows = Object.values(rows.reduce((map,row) => { const target = map[row.date] ||= { date:row.date, processed:0, costUsd:0, providers:{}, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.providers[row.providerId] = (target.providers[row.providerId] || 0) + (state.breakdownMetric === 'cost' ? Number(row.costUsd || 0) : row.processed || 0); return map; }, {}));
+  const data = state.breakdownGrouping === 'model' ? modelRows : dayRows;
+  const column = state.breakdownSort.column; const factor = state.breakdownSort.direction === 'asc' ? 1 : -1;
+  data.sort((a,b) => { const av = column === 'model' ? (a.modelId || a.providerName || '') : column === 'date' ? a.date : Number(a[column] || 0); const bv = column === 'model' ? (b.modelId || b.providerName || '') : column === 'date' ? b.date : Number(b[column] || 0); return typeof av === 'string' ? factor * av.localeCompare(bv) : factor * (av-bv); });
+  return { data, modelRows, dayRows };
+}
+
+function breakdownBasisLabel(value) {
+  return ({ ProviderReported: 'Provider reported', CatalogEstimated: 'Catalog estimated', CoarseEstimate: 'Coarse estimate', Unpriced: 'Unpriced', PartiallyPriced: 'Partially priced', Mixed: 'Mixed pricing' }[value] || 'Unknown');
+}
+
+function breakdownDayQuality(row) {
+  return row.costBases.has('Unpriced') ? (row.costBases.size > 1 ? 'Partially priced' : 'Unpriced') : row.costBases.has('ProviderReported') ? (row.costBases.size > 1 ? 'Mixed pricing' : 'Provider reported') : 'Catalog estimated';
+}
+
+// The usage page copies as dense text only: the same summary stats and ledger rows the page
+// renders, formatted for pasting into an assistant conversation.
+function breakdownShareText() {
+  const rows = breakdownRows();
+  const summary = breakdownSummary(rows);
+  const { data } = breakdownGroupedRows(rows);
+  const input = summary.cached + summary.uncached + summary.creation;
+  const cacheRate = input > 0 ? summary.cached / input : 0;
+  const lines = [
+    `TokenBurn · Usage · ${breakdownStart()} to ${dayKey(0)} (${breakdownDays()} days, local history only)`,
+    `Raw cost: ${formatCost(summary.cost)} (reported ${formatCost(summary.reportedCost)}, estimated ${formatCost(summary.modelPricedCost)}${summary.unpriced ? `, unpriced ${compactNumber(summary.unpriced)} tokens` : ''})`,
+    `Processed: ${compactNumber(summary.processed)} tokens · cached input ${compactNumber(summary.cached)} (${(cacheRate * 100).toFixed(1)}%) · uncached ${compactNumber(summary.uncached)} · cache creation ${compactNumber(summary.creation)} · output ${compactNumber(summary.output)}${summary.reasoning ? ` (${compactNumber(summary.reasoning)} reasoning)` : ''}`,
+  ];
+  if (summary.cacheSavings) lines.push(`Cache savings: ${formatCost(summary.cacheSavings)} (estimated with catalog rates)`);
+  lines.push('');
+  if (!rows.length) {
+    lines.push('No local usage history is available for this range.');
+    return lines.join('\n');
+  }
+  const metricLabel = state.breakdownMetric === 'cost' ? 'cost' : 'tokens';
+  if (state.breakdownGrouping === 'model') {
+    const shareTotal = state.breakdownMetric === 'cost' ? summary.cost : summary.processed;
+    lines.push(`By model (${metricLabel})`, 'Model | Provider | Cost | Share | Tokens | $/MTok | Pricing');
+    data.forEach(row => {
+      const modelLabel = row.modelId || `${row.providerName} aggregate`;
+      const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed;
+      lines.push(`${modelLabel} | ${row.providerName} | ${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)} | ${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'} | ${compactNumber(row.processed)} | ${row.costBasis === 'Unpriced' || !row.processed ? '—' : formatCost(row.costUsd / row.processed * 1e6)} | ${breakdownBasisLabel(row.costBasis)}`);
+    });
+  } else {
+    const series = breakdownSeries(rows);
+    lines.push(`By day (${metricLabel})`, ['Day', ...series.map(item => item.name), 'Total', 'Tokens', 'Pricing'].join(' | '));
+    data.forEach(row => {
+      const cells = [row.date,
+        ...series.map(item => state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)),
+        state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed),
+        compactNumber(row.processed), breakdownDayQuality(row)];
+      lines.push(cells.join(' | '));
+    });
+  }
+  return lines.join('\n');
 }
 function breakdownSeries(rows) {
   const days = Array.from({ length: breakdownDays() }, (_, index) => dayKey(breakdownDays() - 1 - index));
@@ -421,17 +483,13 @@ function formatCost(value) {
 function renderBreakdown() {
   const root = $('#breakdown'); if (!root) return; const rows = breakdownRows(); const summary = breakdownSummary(rows); const series = breakdownSeries(rows);
   const input = summary.cached + summary.uncached + summary.creation; const cacheRate = input > 0 ? summary.cached / input : 0;
-  const modelRows = Object.values(rows.reduce((map,row) => { const key = `${row.providerId}|${row.modelId || ''}`; const target = map[key] ||= { ...row, processed:0, costUsd:0, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.costBasis = target.costBases.size === 1 ? [...target.costBases][0] : target.costBases.has('Unpriced') ? 'PartiallyPriced' : 'Mixed'; return map; }, {}));
-  const dayRows = Object.values(rows.reduce((map,row) => { const target = map[row.date] ||= { date:row.date, processed:0, costUsd:0, providers:{}, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.providers[row.providerId] = (target.providers[row.providerId] || 0) + (state.breakdownMetric === 'cost' ? Number(row.costUsd || 0) : row.processed || 0); return map; }, {}));
-  const data = state.breakdownGrouping === 'model' ? modelRows : dayRows;
-  const column = state.breakdownSort.column; const factor = state.breakdownSort.direction === 'asc' ? 1 : -1;
-  data.sort((a,b) => { const av = column === 'model' ? (a.modelId || a.providerName || '') : column === 'date' ? a.date : Number(a[column] || 0); const bv = column === 'model' ? (b.modelId || b.providerName || '') : column === 'date' ? b.date : Number(b[column] || 0); return typeof av === 'string' ? factor * av.localeCompare(bv) : factor * (av-bv); });
+  const { data, modelRows, dayRows } = breakdownGroupedRows(rows);
   const head = state.breakdownGrouping === 'model'
     ? '<tr><th><button data-breakdown-sort="model">Model</button></th><th>Provider</th><th class="num"><button data-breakdown-sort="costUsd">Cost</button></th><th class="num">Share</th><th class="num"><button data-breakdown-sort="processed">Tokens</button></th><th class="num">$/MTok</th><th>Pricing</th></tr>'
     : `<tr><th><button data-breakdown-sort="date">Day</button></th>${series.map(item => `<th class="num">${esc(item.name)}</th>`).join('')}<th class="num">Total</th><th class="num">Tokens</th><th>Pricing</th></tr>`;
-  const basisLabel = value => ({ ProviderReported: 'Provider reported', CatalogEstimated: 'Catalog estimated', CoarseEstimate: 'Coarse estimate', Unpriced: 'Unpriced', PartiallyPriced: 'Partially priced', Mixed: 'Mixed pricing' }[value] || 'Unknown');
+  const basisLabel = breakdownBasisLabel;
   const shareTotal = state.breakdownMetric === 'cost' ? summary.cost : summary.processed;
-  const body = state.breakdownGrouping === 'model' ? data.map(row => { const modelLabel = row.modelId || `${row.providerName} aggregate`; const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed; return `<tr><td title="${esc(modelLabel)}">${esc(modelLabel)}</td><td>${esc(row.providerName)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)}</td><td class="num">${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'}</td><td class="num">${compactNumber(row.processed)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : row.processed ? formatCost(row.costUsd / row.processed * 1e6) : '—'}</td><td class="breakdown-basis">${esc(basisLabel(row.costBasis))}</td></tr>`; }).join('') : data.map(row => { const quality = row.costBases.has('Unpriced') ? (row.costBases.size > 1 ? 'Partially priced' : 'Unpriced') : row.costBases.has('ProviderReported') ? (row.costBases.size > 1 ? 'Mixed pricing' : 'Provider reported') : 'Catalog estimated'; return `<tr><td>${esc(row.date)}</td>${series.map(item => `<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)}</td>`).join('')}<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed)}</td><td class="num">${compactNumber(row.processed)}</td><td class="breakdown-basis">${esc(quality)}</td></tr>`; }).join('');
+  const body = state.breakdownGrouping === 'model' ? data.map(row => { const modelLabel = row.modelId || `${row.providerName} aggregate`; const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed; return `<tr><td title="${esc(modelLabel)}">${esc(modelLabel)}</td><td>${esc(row.providerName)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)}</td><td class="num">${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'}</td><td class="num">${compactNumber(row.processed)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : row.processed ? formatCost(row.costUsd / row.processed * 1e6) : '—'}</td><td class="breakdown-basis">${esc(basisLabel(row.costBasis))}</td></tr>`; }).join('') : data.map(row => { const quality = breakdownDayQuality(row); return `<tr><td>${esc(row.date)}</td>${series.map(item => `<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)}</td>`).join('')}<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed)}</td><td class="num">${compactNumber(row.processed)}</td><td class="breakdown-basis">${esc(quality)}</td></tr>`; }).join('');
   root.innerHTML = `<div class="breakdown-header"><div><h2 id="breakdown-title">Usage</h2><p class="breakdown-eyebrow">${esc(breakdownStart())} to ${esc(dayKey(0))} · local history only</p></div></div><div class="breakdown-controls"><div class="breakdown-toggle" role="tablist" aria-label="Breakdown period">${['7','30','90'].map(day => `<button class="breakdown-segment ${state.breakdownPeriod===day?'selected':''}" data-breakdown-period="${day}" role="tab" aria-selected="${state.breakdownPeriod===day}">${day} days</button>`).join('')}</div><div class="breakdown-toggle" role="tablist" aria-label="Chart metric"><button class="breakdown-segment ${state.breakdownMetric==='cost'?'selected':''}" data-breakdown-chart="cost" role="tab" aria-selected="${state.breakdownMetric==='cost'}">Cost</button><button class="breakdown-segment ${state.breakdownMetric==='tokens'?'selected':''}" data-breakdown-chart="tokens" role="tab" aria-selected="${state.breakdownMetric==='tokens'}">Tokens</button></div></div>${rows.length ? `<div class="breakdown-summary"><div class="breakdown-stat"><small>Raw cost</small><strong>${formatCost(summary.cost)}</strong><span>Reported + estimated</span></div><div class="breakdown-stat"><small>Processed tokens</small><strong>${compactNumber(summary.processed)}</strong><span>Observed local history</span></div><div class="breakdown-stat"><small>Cached input</small><strong>${compactNumber(summary.cached)}</strong><span>${(cacheRate*100).toFixed(1)}% of observed input</span></div><div class="breakdown-stat"><small>Output</small><strong>${compactNumber(summary.output)}</strong><span>${compactNumber(summary.reasoning)} reasoning</span></div><div class="breakdown-stat"><small>Cache savings</small><strong>${summary.cacheSavings ? formatCost(summary.cacheSavings) : 'Unavailable'}</strong><span>Estimated with catalog rates</span></div></div><div class="breakdown-chart-wrap"><div class="breakdown-chart-top"><h3>Daily ${state.breakdownMetric === 'cost' ? 'cost' : 'processed tokens'}</h3></div><div class="breakdown-chart-shell"><canvas id="breakdown-chart" tabindex="0" aria-label="Daily provider usage chart. Use left and right arrow keys to inspect dates."></canvas><div id="breakdown-chart-tooltip" class="breakdown-chart-tooltip" role="tooltip" hidden></div></div><div class="breakdown-legend">${series.map(item => `<button data-breakdown-provider="${esc(item.id)}" class="${state.hiddenChartProviders.has(item.id)?'off':''}" aria-pressed="${!state.hiddenChartProviders.has(item.id)}"><span class="breakdown-dot" style="background:${item.color}"></span>${esc(item.name)}</button>`).join('')}</div></div><div class="breakdown-lower"><div class="ledger-panel"><div class="ledger-heading"><h3>Breakdown</h3><div class="breakdown-toggle"><button class="breakdown-segment ${state.breakdownGrouping==='model'?'selected':''}" data-breakdown-group="model">Model</button><button class="breakdown-segment ${state.breakdownGrouping==='day'?'selected':''}" data-breakdown-group="day">Day</button></div></div><div class="breakdown-table-scroll"><table class="breakdown-table"><thead>${head}</thead><tbody>${body}</tbody></table></div></div><aside class="pricing-quality"><h3>Cost quality</h3><div class="quality-row"><span>Provider reported</span><strong>${summary.cost ? `${(summary.reportedCost/summary.cost*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Model priced</span><strong>${summary.cost ? `${(summary.modelPricedCost/summary.cost*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Unpriced</span><strong>${summary.processed ? `${(summary.unpriced/summary.processed*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Cache savings</span><strong>${summary.cacheSavings ? formatCost(summary.cacheSavings) : 'Unavailable'}</strong></div><div class="quality-row"><span>Data source</span><strong>Local</strong></div></aside></div>` : '<div class="breakdown-empty">No local usage history is available for this range. TokenBurn will show model detail when supported provider logs are present.</div>'}`;
   drawBreakdownChart(series);
   wireBreakdownChart(series);
@@ -669,115 +727,131 @@ function drawRing(values, centerValue, centerUnit) {
       const start = previousById.get(item.id) ?? 0;
       return { ...item, value: start + (target - start) * progress };
     });
-    const displayedTotal = displayedValues.reduce((sum, item) => sum + item.value, 0);
-    ctx.clearRect(0, 0, size, size);
-    // Unfilled track. Without it a zero-spend period renders as a bare floating "$0.00" with no
-    // indication the chart drew at all, and growing arcs have nothing to grow into.
-    ctx.beginPath();
-    ctx.arc(center, center, radius, 0, TAU);
-    ctx.strokeStyle = '#34383b';
-    ctx.lineWidth = stroke;
-    ctx.stroke();
-    let cursor = -Math.PI / 2;
-    const microMarkers = [];
-    displayedValues.forEach(item => {
-      if (!item.value || displayedTotal <= 0) return;
-      const angle = item.value / displayedTotal * Math.PI * 2;
-      const sweep = angle;
-      if (sweep > 0) {
-        const focused = state.hoveredSpendProviderId === item.id;
-        const dimmed = state.hoveredSpendProviderId && !focused;
-        ctx.globalAlpha = dimmed ? 1 - .58 * hoverT : 1;
-        const width = focused ? stroke + 4 * hoverT : stroke;
-        ctx.strokeStyle = item.color;
-        ctx.fillStyle = item.color;
-        fillSpendSegment(ctx, {
-          cx: center,
-          cy: center,
-          startBoundary: cursor,
-          endBoundary: cursor + sweep,
-          radius,
-          width,
-          gap: Math.min(3.5, size * .022),
-          corner: Math.min(2.75, size * .016),
-        });
-        // A provider can legitimately account for only a few pixels of the total. Keep the
-        // proportional arc as the source of truth, then add a tiny rounded locator at its actual
-        // angular position so the provider is still discoverable in the chart and legend.
-        // At small sizes the normal boundary gap can consume the entire slice. Keep the
-        // proportional cursor movement, but redraw these tiny slices with the reduced-gap
-        // marker below so they do not appear as a misleading empty hole.
-        // Fade in over the last third of the tween. Switching these on at progress >= 1 made tiny
-        // providers pop into existence at the exact moment the motion stopped.
-        if (angle < 0.11 && progress > .66) {
-          microMarkers.push({
-            item,
-            center: cursor + angle / 2,
-            sweep: Math.max(0.018, angle),
-            alpha: Math.min(1, (progress - .66) / .34),
-          });
-        }
-        ctx.globalAlpha = 1;
-      }
-      cursor += angle;
+    paintRingFrame(ctx, size, displayedValues, centerValue, centerUnit, {
+      hoveredId: state.hoveredSpendProviderId,
+      hoverT,
+      microMarkerProgress: progress,
     });
-    microMarkers.forEach(({ item, center: markerCenter, sweep: markerSweep, alpha }) => {
-      const focused = state.hoveredSpendProviderId === item.id;
-      const dimmed = state.hoveredSpendProviderId && !focused;
-      ctx.globalAlpha = (dimmed ? 1 - .58 * hoverT : 1) * alpha;
-      // Keep the tiny slice as an annular sliver. A centerline stroke is wrong here because
-      // its round caps overlap when the arc is shorter than the ring width and become a dot.
-      const markerPath = donutSegmentPath({
-        cx: center,
-        cy: center,
-        startBoundary: markerCenter - markerSweep / 2,
-        endBoundary: markerCenter + markerSweep / 2,
-        radius,
-        width: focused ? stroke + 4 * hoverT : stroke,
-        gap: 0,
-        corner: Math.min(1.25, size * .008),
-      });
-      if (markerPath) {
-        ctx.fillStyle = item.color;
-        ctx.fill(markerPath);
-      }
-      ctx.globalAlpha = 1;
-    });
-    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    // The center label must fit inside the ring's hole, not just the canvas. A fixed 21px font
-    // overflowed into the ring for longer values (e.g. "$204.14"). Shrink to fit the actual hole
-    // width instead, same approach as the WPF spend ring.
-    const maxTextWidth = (radius - stroke / 2) * 2 * 0.82;
-    let primarySize = Math.min(19, size * 0.118);
-    ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
-    while (ctx.measureText(centerValue).width > maxTextWidth && primarySize > 11) {
-      primarySize -= 1;
-      ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
-    }
-    if (centerUnit) {
-      let secondarySize = Math.min(12, size * 0.073);
-      ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
-      while (ctx.measureText(centerUnit).width > maxTextWidth && secondarySize > 8) {
-        secondarySize -= 1;
-        ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
-      }
-      ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
-      const primaryMetrics = ctx.measureText(centerValue);
-      const primaryHeight = (primaryMetrics.actualBoundingBoxAscent || primarySize) + (primaryMetrics.actualBoundingBoxDescent || primarySize * .25);
-      ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
-      const secondaryMetrics = ctx.measureText(centerUnit);
-      const secondaryHeight = (secondaryMetrics.actualBoundingBoxAscent || secondarySize) + (secondaryMetrics.actualBoundingBoxDescent || secondarySize * .25);
-      const gap = Math.max(3, secondarySize * .25);
-      const top = center - (primaryHeight + gap + secondaryHeight) / 2;
-      ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerValue, center, top + (primaryMetrics.actualBoundingBoxAscent || primarySize));
-      ctx.fillStyle = '#99999e'; ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerUnit, center, top + primaryHeight + gap + (secondaryMetrics.actualBoundingBoxAscent || secondarySize));
-    } else {
-      ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; drawCenteredText(ctx, centerValue, center, center);
-    }
     if (linear < 1 || hoverT < 1) ringAnimationFrame = requestAnimationFrame(paint);
   };
   if (renderChanged && !reduced) ringAnimationFrame = requestAnimationFrame(paint);
   else paint(performance.now());
+}
+
+// The same ring geometry as drawRing, painted once at final values. The live popup ring and the
+// generated share image both draw through this so the copied chart always matches the dashboard.
+function paintRingFrame(ctx, size, values, centerValue, centerUnit, options = {}) {
+  const hoveredId = options.hoveredId || null;
+  const hoverT = options.hoverT ?? 1;
+  const microMarkerProgress = options.microMarkerProgress ?? 1;
+  const center = size / 2;
+  const radius = size * .335;
+  const stroke = size * .11;
+  const displayedTotal = values.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  ctx.clearRect(0, 0, size, size);
+  // Unfilled track. Without it a zero-spend period renders as a bare floating "$0.00" with no
+  // indication the chart drew at all, and growing arcs have nothing to grow into.
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, TAU);
+  ctx.strokeStyle = '#34383b';
+  ctx.lineWidth = stroke;
+  ctx.stroke();
+  let cursor = -Math.PI / 2;
+  const microMarkers = [];
+  values.forEach(item => {
+    if (!item.value || displayedTotal <= 0) return;
+    const angle = item.value / displayedTotal * Math.PI * 2;
+    const sweep = angle;
+    if (sweep > 0) {
+      const focused = hoveredId === item.id;
+      const dimmed = hoveredId && !focused;
+      ctx.globalAlpha = dimmed ? 1 - .58 * hoverT : 1;
+      const width = focused ? stroke + 4 * hoverT : stroke;
+      ctx.strokeStyle = item.color;
+      ctx.fillStyle = item.color;
+      fillSpendSegment(ctx, {
+        cx: center,
+        cy: center,
+        startBoundary: cursor,
+        endBoundary: cursor + sweep,
+        radius,
+        width,
+        gap: Math.min(3.5, size * .022),
+        corner: Math.min(2.75, size * .016),
+      });
+      // A provider can legitimately account for only a few pixels of the total. Keep the
+      // proportional arc as the source of truth, then add a tiny rounded locator at its actual
+      // angular position so the provider is still discoverable in the chart and legend.
+      // At small sizes the normal boundary gap can consume the entire slice. Keep the
+      // proportional cursor movement, but redraw these tiny slices with the reduced-gap
+      // marker below so they do not appear as a misleading empty hole.
+      // Fade in over the last third of the tween. Switching these on at progress >= 1 made tiny
+      // providers pop into existence at the exact moment the motion stopped.
+      if (angle < 0.11 && microMarkerProgress > .66) {
+        microMarkers.push({
+          item,
+          center: cursor + angle / 2,
+          sweep: Math.max(0.018, angle),
+          alpha: Math.min(1, (microMarkerProgress - .66) / .34),
+        });
+      }
+      ctx.globalAlpha = 1;
+    }
+    cursor += angle;
+  });
+  microMarkers.forEach(({ item, center: markerCenter, sweep: markerSweep, alpha }) => {
+    const focused = hoveredId === item.id;
+    const dimmed = hoveredId && !focused;
+    ctx.globalAlpha = (dimmed ? 1 - .58 * hoverT : 1) * alpha;
+    // Keep the tiny slice as an annular sliver. A centerline stroke is wrong here because
+    // its round caps overlap when the arc is shorter than the ring width and become a dot.
+    const markerPath = donutSegmentPath({
+      cx: center,
+      cy: center,
+      startBoundary: markerCenter - markerSweep / 2,
+      endBoundary: markerCenter + markerSweep / 2,
+      radius,
+      width: focused ? stroke + 4 * hoverT : stroke,
+      gap: 0,
+      corner: Math.min(1.25, size * .008),
+    });
+    if (markerPath) {
+      ctx.fillStyle = item.color;
+      ctx.fill(markerPath);
+    }
+    ctx.globalAlpha = 1;
+  });
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  // The center label must fit inside the ring's hole, not just the canvas. A fixed 21px font
+  // overflowed into the ring for longer values (e.g. "$204.14"). Shrink to fit the actual hole
+  // width instead, same approach as the WPF spend ring.
+  const maxTextWidth = (radius - stroke / 2) * 2 * 0.82;
+  let primarySize = Math.min(19, size * 0.118);
+  ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
+  while (ctx.measureText(centerValue).width > maxTextWidth && primarySize > 11) {
+    primarySize -= 1;
+    ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
+  }
+  if (centerUnit) {
+    let secondarySize = Math.min(12, size * 0.073);
+    ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
+    while (ctx.measureText(centerUnit).width > maxTextWidth && secondarySize > 8) {
+      secondarySize -= 1;
+      ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
+    }
+    ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
+    const primaryMetrics = ctx.measureText(centerValue);
+    const primaryHeight = (primaryMetrics.actualBoundingBoxAscent || primarySize) + (primaryMetrics.actualBoundingBoxDescent || primarySize * .25);
+    ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
+    const secondaryMetrics = ctx.measureText(centerUnit);
+    const secondaryHeight = (secondaryMetrics.actualBoundingBoxAscent || secondarySize) + (secondaryMetrics.actualBoundingBoxDescent || secondarySize * .25);
+    const gap = Math.max(3, secondarySize * .25);
+    const top = center - (primaryHeight + gap + secondaryHeight) / 2;
+    ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerValue, center, top + (primaryMetrics.actualBoundingBoxAscent || primarySize));
+    ctx.fillStyle = '#99999e'; ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerUnit, center, top + primaryHeight + gap + (secondaryMetrics.actualBoundingBoxAscent || secondarySize));
+  } else {
+    ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; drawCenteredText(ctx, centerValue, center, center);
+  }
 }
 
 // The provider list used to be rebuilt from a template string on every render(), and render() runs
@@ -1144,15 +1218,73 @@ $('#content').addEventListener('scroll', () => {
   scrollTimer = setTimeout(() => $('#content').classList.remove('scrolling'), 650);
 }, { passive: true });
 $('#refresh-button').addEventListener('click', () => { closeHeaderPopovers(); refresh(true); });
-$('#share-button').addEventListener('click', async () => {
-  closeHeaderPopovers();
-  try {
-    await navigator.clipboard?.writeText(`TokenBurn: ${$('#spend-legend').innerText}`);
-    showStatus('Copied spend summary');
-  } catch (_) {
-    showStatus('Clipboard access was blocked by Windows.', STATUS_LONG);
+const shareButton = $('#share-button');
+let sharePressTimer = 0;
+let shareMenuOpenedByPress = false;
+
+function setShareMenu(open) {
+  setOverlayOpen($('#share-popover'), open);
+  if (!open) shareMenuOpenedByPress = false;
+}
+
+async function copyCompactSummary() {
+  const text = compactShareText();
+  const image = buildShareImage();
+  if (await copyShareToClipboard(text, image)) {
+    showStatus('Copied spend summary + chart image');
+    return;
   }
+  const ok = await copyTextToClipboard(text);
+  showStatus(ok ? 'Copied spend summary without the chart image.' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
+}
+
+async function copyCompactChartImage() {
+  const image = buildShareImage();
+  if (await copyShareImageOnly(image)) {
+    showStatus('Copied chart image');
+    return;
+  }
+  showStatus('Clipboard access was blocked by Windows.', STATUS_LONG);
+}
+
+// A plain click copies the summary with the chart. A long press opens the copy menu: chat apps
+// that paste text first would otherwise drop the image, so an image-only copy matches how a
+// Snipping Tool screenshot pastes everywhere.
+shareButton.addEventListener('pointerdown', () => {
+  if (state.view === 'breakdown') return;
+  clearTimeout(sharePressTimer);
+  sharePressTimer = window.setTimeout(() => {
+    shareMenuOpenedByPress = true;
+    setShareMenu(true);
+  }, 480);
 });
+shareButton.addEventListener('pointerup', () => clearTimeout(sharePressTimer));
+shareButton.addEventListener('pointerleave', () => clearTimeout(sharePressTimer));
+shareButton.addEventListener('click', async () => {
+  closeHeaderPopovers();
+  if (state.view === 'breakdown') {
+    const ok = await copyTextToClipboard(breakdownShareText());
+    showStatus(ok ? 'Copied usage breakdown' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
+    return;
+  }
+  if (shareMenuOpenedByPress) {
+    setShareMenu(false);
+    return;
+  }
+  await copyCompactSummary();
+});
+document.querySelectorAll('[data-share-copy]').forEach(item => item.addEventListener('click', async () => {
+  const mode = item.dataset.shareCopy;
+  setShareMenu(false);
+  if (mode === 'image') {
+    await copyCompactChartImage();
+  } else if (mode === 'text') {
+    const ok = await copyTextToClipboard(compactShareText());
+    showStatus(ok ? 'Copied spend summary text' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
+  } else {
+    await copyCompactSummary();
+  }
+}));
 $('#info-button').addEventListener('click', event => {
   const popover = $('#info-popover');
   const next = !popover.classList.contains('is-open');
@@ -1741,7 +1873,7 @@ copyLogsButton?.addEventListener('click', async () => {
 async function copyTextToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
-    return;
+    return true;
   } catch (_) { /* fall through to the legacy path */ }
   const textarea = document.createElement('textarea');
   textarea.value = text;
@@ -1749,7 +1881,7 @@ async function copyTextToClipboard(text) {
   textarea.style.opacity = '0';
   document.body.appendChild(textarea);
   textarea.select();
-  try { document.execCommand('copy'); } finally { textarea.remove(); }
+  try { return document.execCommand('copy'); } finally { textarea.remove(); }
 }
 
 const providerStatusTooltip = $('#provider-status-tooltip');
@@ -2167,6 +2299,196 @@ function renderLegend(rows) {
     });
   }
   applyLegendHighlight();
+}
+
+// --- Share copy: generated chart image + text ------------------------------------------------
+
+function formatShareDate(key) {
+  const [year, month, day] = String(key).split('-').map(Number);
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${names[(month || 1) - 1] || ''} ${day || ''}, ${year || ''}`.trim();
+}
+
+function periodRangeText() {
+  if (state.period === 'today') return `Today · ${formatShareDate(dayKey(0))}`;
+  if (state.period === 'yesterday') return `Yesterday · ${formatShareDate(dayKey(1))}`;
+  return `${formatShareDate(dayKey(29))} – ${formatShareDate(dayKey(0))} · Last 30 Days`;
+}
+
+function compactShareText() {
+  const rows = lastSpendRootRows;
+  const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
+  const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const lines = [`TokenBurn · ${periodRangeText()}`];
+  lines.push(...rows.map(row => `${row.name} ${legendLabel(row)}`));
+  if (state.metric === 'tokens') lines.push(`Total ${compactNumber(totalTokens)} tokens`);
+  else if (state.metric === 'cost-mtok') lines.push(`Total $${totalCost.toFixed(2)} · ${compactNumber(totalTokens)} tokens`);
+  else lines.push(`Total $${totalCost.toFixed(2)}`);
+  return lines.join('\n');
+}
+
+const SHARE_IMAGE_WIDTH = 800;
+const SHARE_IMAGE_HEIGHT = 400;
+
+// Draws the spend card as a shareable image straight from the data the dashboard renders — the
+// same rows and the same ring painter, not a screenshot. The clipboard carries the PNG-equivalent
+// bitmap alongside the text so pasting into an assistant chat brings both. Sized like the compact
+// card: small ring, tight legend rows, minimal chrome.
+function buildShareImage() {
+  const canvas = document.createElement('canvas');
+  canvas.width = SHARE_IMAGE_WIDTH;
+  canvas.height = SHARE_IMAGE_HEIGHT;
+  const ctx = canvas.getContext('2d');
+  const rows = lastSpendRootRows;
+  const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
+  const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const centerValue = state.metric === 'tokens' ? compactNumber(totalTokens)
+    : state.metric === 'cost' ? `$${compactNumber(totalCost)}`
+    : `$${(totalTokens > 0 ? totalCost / totalTokens * 1e6 : 0).toFixed(2)}`;
+  const centerUnit = state.metric === 'tokens' ? 'tokens' : '';
+  const margin = 32;
+  const footerH = 40;
+  const bodyTop = 62;
+  const bodyBottom = SHARE_IMAGE_HEIGHT - footerH;
+
+  // Card surface and hairline border, matching the popup's dark theme.
+  ctx.fillStyle = '#0F1115';
+  ctx.fillRect(0, 0, SHARE_IMAGE_WIDTH, SHARE_IMAGE_HEIGHT);
+  ctx.strokeStyle = 'rgba(255,255,255,.08)';
+  ctx.lineWidth = 1;
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(.5, .5, SHARE_IMAGE_WIDTH - 1, SHARE_IMAGE_HEIGHT - 1, 16);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(.5, .5, SHARE_IMAGE_WIDTH - 1, SHARE_IMAGE_HEIGHT - 1);
+  }
+
+  // Header: brand + period on the left, generated timestamp on the right, one compact row.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f1f1f2';
+  ctx.font = '700 19px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText('TokenBurn', margin, 32);
+  ctx.fillStyle = '#9ea0a8';
+  ctx.font = '500 12px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(periodRangeText(), margin, 50);
+  const generated = `Generated ${new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+  ctx.fillStyle = '#77777D';
+  ctx.font = '400 11px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(generated, SHARE_IMAGE_WIDTH - margin - ctx.measureText(generated).width, 32);
+  ctx.strokeStyle = 'rgba(255,255,255,.09)';
+  ctx.beginPath();
+  ctx.moveTo(margin, bodyTop);
+  ctx.lineTo(SHARE_IMAGE_WIDTH - margin, bodyTop);
+  ctx.stroke();
+
+  // The donut, painted by the same painter the live dashboard uses at final values. Sized near
+  // the compact card's proportion so the exported chart reads like the dashboard, not a poster.
+  const ringSize = 240;
+  const ringCanvas = document.createElement('canvas');
+  ringCanvas.width = ringSize;
+  ringCanvas.height = ringSize;
+  paintRingFrame(ringCanvas.getContext('2d'), ringSize, rows, centerValue, centerUnit);
+  const ringLeft = 48;
+  const ringTop = bodyTop + (bodyBottom - bodyTop - ringSize) / 2;
+  ctx.drawImage(ringCanvas, ringLeft, ringTop);
+
+  // Legend rows mirror #spend-legend: dot, name, value right-aligned.
+  const legendLeft = 300;
+  const legendRight = SHARE_IMAGE_WIDTH - margin;
+  const rowHeight = 28;
+  const legendTop = bodyTop + Math.max(0, (bodyBottom - bodyTop - rows.length * rowHeight) / 2);
+  if (!rows.length) {
+    ctx.fillStyle = '#9ea0a8';
+    ctx.font = '500 13px -apple-system,Segoe UI,sans-serif';
+    ctx.fillText('No usage data for this period.', legendLeft + 5, legendTop + 13);
+  }
+  rows.forEach((row, index) => {
+    const y = legendTop + index * rowHeight + rowHeight / 2;
+    ctx.fillStyle = row.color;
+    ctx.beginPath();
+    ctx.arc(legendLeft + 5, y, 4.5, 0, TAU);
+    ctx.fill();
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f1f1f2';
+    ctx.font = '500 13px -apple-system,Segoe UI,sans-serif';
+    ctx.fillText(row.name, legendLeft + 18, y + 4.5);
+    ctx.textAlign = 'right';
+    ctx.font = '600 13px -apple-system,Segoe UI,sans-serif';
+    ctx.fillText(legendLabel(row), legendRight, y + 4.5);
+  });
+  ctx.textAlign = 'left';
+
+  // Footer: totals for the selected period.
+  ctx.strokeStyle = 'rgba(255,255,255,.09)';
+  ctx.beginPath();
+  ctx.moveTo(margin, SHARE_IMAGE_HEIGHT - footerH);
+  ctx.lineTo(SHARE_IMAGE_WIDTH - margin, SHARE_IMAGE_HEIGHT - footerH);
+  ctx.stroke();
+  const footer = state.metric === 'tokens' ? `Total ${compactNumber(totalTokens)} tokens`
+    : state.metric === 'cost' ? `Total $${totalCost.toFixed(2)}`
+    : `Total $${totalCost.toFixed(2)} · ${compactNumber(totalTokens)} tokens`;
+  ctx.fillStyle = '#9ea0a8';
+  ctx.font = '500 12px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(footer, margin, SHARE_IMAGE_HEIGHT - 18);
+  const caption = 'Local usage history';
+  ctx.fillStyle = '#77777D';
+  ctx.font = '400 11px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(caption, SHARE_IMAGE_WIDTH - margin - ctx.measureText(caption).width, SHARE_IMAGE_HEIGHT - 18);
+  return canvas;
+}
+
+// Writes the chart bitmap to the clipboard. The native command is the primary path because it
+// bypasses the WebView clipboard-permission quirks; the web ClipboardItem path covers older
+// binaries that predate the command. A null text writes the image formats only.
+async function copyShareToClipboard(text, canvas) {
+  try {
+    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    let binary = '';
+    const chunk = 0x8000;
+    for (let index = 0; index < pixels.length; index += chunk) {
+      binary += String.fromCharCode.apply(null, pixels.subarray(index, index + chunk));
+    }
+    // Chromium paste targets (ChatGPT, browser uploads) read image data from the registered PNG
+    // clipboard format, so encode the same canvas as a PNG alongside the raw bitmap.
+    const pngBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    let pngBase64 = '';
+    if (pngBlob) {
+      pngBase64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(pngBlob);
+      });
+    }
+    await withTimeout(invoke('copy_share', {
+      payload: {
+        text,
+        width: canvas.width,
+        height: canvas.height,
+        rgbaBase64: btoa(binary),
+        pngBase64,
+      },
+    }), COMMAND_TIMEOUT_MS, 'The clipboard command did not respond.');
+    return true;
+  } catch (_) {
+    // Fall through to the web clipboard path.
+  }
+  try {
+    if (typeof ClipboardItem === 'undefined') return false;
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return false;
+    const payload = { 'image/png': blob };
+    if (text) payload['text/plain'] = new Blob([text], { type: 'text/plain' });
+    await navigator.clipboard.write([new ClipboardItem(payload)]);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function copyShareImageOnly(canvas) {
+  return copyShareToClipboard(null, canvas);
 }
 
 function drawMiniSpendRing(rows) {

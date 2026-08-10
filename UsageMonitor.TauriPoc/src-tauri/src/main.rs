@@ -14,7 +14,13 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, State,
     WebviewWindow, WindowEvent,
 };
-use windows::core::HSTRING;
+use windows::core::{w, HSTRING};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, GA_ROOT, HWND_TOPMOST,
@@ -230,6 +236,135 @@ async fn fetch_usage(force: bool, state: State<'_, AppState>) -> Result<Vec<Valu
         *in_flight = false;
     }
     result
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareClipboardPayload {
+    // null when only the chart image is wanted (paste targets that drop images when text is
+    // present, e.g. some chat composers).
+    text: Option<String>,
+    width: u32,
+    height: u32,
+    rgba_base64: String,
+    png_base64: String,
+}
+
+// Chromium-family apps (ChatGPT, Edge, browser pastes) read image data from the registered "PNG"
+// clipboard format, not CF_DIB. Register it once and write the PNG alongside the text and DIB so
+// browser paste targets receive the chart instead of an empty upload box.
+static PNG_CLIPBOARD_FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+fn png_clipboard_format() -> u32 {
+    *PNG_CLIPBOARD_FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("PNG")) })
+}
+
+// The popup shares a chart image plus text in one atomic clipboard write: CF_UNICODETEXT for plain
+// editors and assistant chats, CF_DIB (32bpp BI_RGB) for image targets. The image arrives as raw
+// RGBA bytes from the WebView canvas so no image-decoding dependency is needed. Windows expects a
+// bottom-up DIB, so the header marks the rows as already top-down with a negative height.
+fn dib_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(40 + rgba.len());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&(width as i32).to_le_bytes());
+    bytes.extend_from_slice(&(-(height as i32)).to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&(rgba.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    for pixel in rgba.chunks_exact(4) {
+        bytes.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    bytes
+}
+
+unsafe fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
+    let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len() + 1)
+        .map_err(|_| "GlobalAlloc failed".to_string())?;
+    let locked = unsafe { GlobalLock(handle) };
+    if locked.is_null() {
+        let _ = GlobalFree(Some(handle));
+        return Err("GlobalLock failed".to_string());
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len());
+    let _ = GlobalUnlock(handle);
+    Ok(handle)
+}
+
+#[tauri::command]
+fn copy_share(payload: ShareClipboardPayload) -> Result<(), String> {
+    use base64::Engine;
+    if payload.width == 0 || payload.height == 0 || payload.width > 4096 || payload.height > 4096 {
+        return Err("share image dimensions are invalid".into());
+    }
+    let expected = (payload.width as usize)
+        .checked_mul(payload.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("share image dimensions overflow")?;
+    let rgba = base64::engine::general_purpose::STANDARD
+        .decode(&payload.rgba_base64)
+        .map_err(|_| "share image data is not valid base64")?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "share image size mismatch: expected {expected} bytes, got {}",
+            rgba.len()
+        ));
+    }
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(&payload.png_base64)
+        .map_err(|_| "share image PNG is not valid base64")?;
+
+    // (clipboard format, allocated handle). Handles the clipboard accepts are owned by the system
+    // once SetClipboardData succeeds; rejected ones must be freed by us. Text is optional: an
+    // image-only copy skips CF_UNICODETEXT so text-first paste targets attach the chart.
+    let mut placements = Vec::with_capacity(3);
+    if let Some(text) = &payload.text {
+        let text_bytes: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        placements.push((CF_UNICODETEXT.0 as u32, unsafe {
+            alloc_global_bytes(&text_bytes)
+        }?));
+    }
+    let dib = dib_bytes(payload.width, payload.height, &rgba);
+    placements.push((CF_DIB.0 as u32, unsafe { alloc_global_bytes(&dib) }?));
+    let png_format = png_clipboard_format();
+    if png_format != 0 {
+        placements.push((png_format, unsafe { alloc_global_bytes(&png) }?));
+    }
+
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            for (_, handle) in &placements {
+                let _ = GlobalFree(Some(*handle));
+            }
+            return Err("could not open the Windows clipboard".into());
+        }
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            for (_, handle) in &placements {
+                let _ = GlobalFree(Some(*handle));
+            }
+            return Err("could not empty the Windows clipboard".into());
+        }
+        let mut accepted = vec![false; placements.len()];
+        for (index, (format, handle)) in placements.iter().enumerate() {
+            accepted[index] = SetClipboardData(*format, Some(HANDLE(handle.0))).is_ok();
+        }
+        let _ = CloseClipboard();
+        let all_accepted = accepted.iter().all(|ok| *ok);
+        for (index, (_, handle)) in placements.iter().enumerate() {
+            if !accepted[index] {
+                let _ = GlobalFree(Some(*handle));
+            }
+        }
+        if !all_accepted {
+            return Err("the clipboard rejected part of the share payload".into());
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1246,7 +1381,8 @@ fn main() {
             apply_settings_data,
             get_diagnostics_bundle,
             set_spend_metric,
-            set_screen_share_privacy
+            set_screen_share_privacy,
+            copy_share
         ])
         .setup(move |app| {
             start_control_server(app.handle().clone());
@@ -1367,10 +1503,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        anchored_resize_x, animated_window_bounds, calculate_popup_position, popup_motion_y,
-        popup_size_for_monitor, resolve_anchor, second_instance_activation_target, LayoutRect,
-        PhysicalWindowBounds,
+        alloc_global_bytes, anchored_resize_x, animated_window_bounds, calculate_popup_position,
+        dib_bytes, png_clipboard_format, popup_motion_y, popup_size_for_monitor, resolve_anchor,
+        second_instance_activation_target, LayoutRect, PhysicalWindowBounds,
     };
+    use base64::Engine;
+    use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 
     const MONITOR: LayoutRect = LayoutRect {
         left: 0.0,
@@ -1573,5 +1716,99 @@ mod tests {
             second_instance_activation_target(&["--hosted".to_string()]),
             "main"
         );
+    }
+
+    // Writes a real text + bitmap payload to the system clipboard and reads it back through the
+    // same formats a paste target would use. This replaces the dev machine's clipboard content.
+    #[test]
+    fn share_clipboard_round_trip() {
+        const WIDTH: u32 = 2;
+        const HEIGHT: u32 = 2;
+        let rgba = [
+            255u8, 0, 0, 255, 0, 0, 255, 255, //
+            0, 255, 0, 255, 255, 255, 0, 255,
+        ];
+        let dib = dib_bytes(WIDTH, HEIGHT, &rgba);
+        let text_bytes: Vec<u8> = "TokenBurn · test"
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        // A real 1x1 PNG so the read-back verifies the exact bytes a Chromium paste would decode.
+        let png: Vec<u8> = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+        let png_format = png_clipboard_format();
+        assert_ne!(png_format, 0, "the PNG clipboard format must register");
+
+        let text_handle = unsafe { alloc_global_bytes(&text_bytes) }.unwrap();
+        let dib_handle = unsafe { alloc_global_bytes(&dib) }.unwrap();
+        let png_handle = unsafe { alloc_global_bytes(&png) }.unwrap();
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            assert!(EmptyClipboard().is_ok());
+            assert!(SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(text_handle.0))).is_ok());
+            assert!(SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(dib_handle.0))).is_ok());
+            assert!(SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_ok());
+            let _ = CloseClipboard();
+        }
+
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            let handle =
+                GetClipboardData(CF_UNICODETEXT.0 as u32).expect("text format must be present");
+            let locked = GlobalLock(HGLOBAL(handle.0));
+            assert!(!locked.is_null(), "text memory must lock");
+            let copied = std::slice::from_raw_parts(locked.cast::<u8>(), text_bytes.len()).to_vec();
+            let _ = GlobalUnlock(HGLOBAL(handle.0));
+            let units = copied
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<u16>>();
+            assert_eq!(
+                String::from_utf16(&units).unwrap(),
+                "TokenBurn · test",
+                "pasted text must survive the round trip"
+            );
+
+            let handle = GetClipboardData(CF_DIB.0 as u32).expect("image format must be present");
+            let locked = GlobalLock(HGLOBAL(handle.0));
+            assert!(!locked.is_null(), "image memory must lock");
+            let copied = std::slice::from_raw_parts(locked.cast::<u8>(), dib.len()).to_vec();
+            let _ = GlobalUnlock(HGLOBAL(handle.0));
+            assert_eq!(copied, dib, "the clipboard DIB must survive the round trip");
+
+            let handle = GetClipboardData(png_format).expect("PNG format must be present");
+            let locked = GlobalLock(HGLOBAL(handle.0));
+            assert!(!locked.is_null(), "PNG memory must lock");
+            let copied = std::slice::from_raw_parts(locked.cast::<u8>(), png.len()).to_vec();
+            let _ = GlobalUnlock(HGLOBAL(handle.0));
+            assert_eq!(copied, png, "the clipboard PNG must survive the round trip");
+            let _ = CloseClipboard();
+        }
+
+        // Image-only copy phase: no text placement means no CF_UNICODETEXT on the clipboard,
+        // which is what makes text-first chat composers attach the chart instead of pasting only
+        // the text. Kept in the same test as the full round trip because the system clipboard is
+        // process-global and these tests would otherwise race each other's clipboard writes.
+        let image_only_dib = dib_bytes(2, 2, &rgba);
+        let dib_handle = unsafe { alloc_global_bytes(&image_only_dib) }.unwrap();
+        let png_handle = unsafe { alloc_global_bytes(&png) }.unwrap();
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            assert!(EmptyClipboard().is_ok());
+            assert!(SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(dib_handle.0))).is_ok());
+            assert!(SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_ok());
+            let _ = CloseClipboard();
+        }
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            assert!(
+                GetClipboardData(CF_UNICODETEXT.0 as u32).is_err(),
+                "an image-only copy must not leave a text format behind"
+            );
+            assert!(GetClipboardData(CF_DIB.0 as u32).is_ok());
+            assert!(GetClipboardData(png_format).is_ok());
+            let _ = CloseClipboard();
+        }
     }
 }
