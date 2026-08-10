@@ -49,6 +49,8 @@ jobs:
           CLIPROXY_URL: ${{ secrets.CLIPROXY_URL }}
         run: |
           for u in "${CLIPROXY_URL%/}" "http://verenu-cliproxy.tail1e2217.ts.net:8317/v1" "http://100.67.234.20:8317/v1"; do
+            [ -z "${u}" ] && continue
+            rm -f /tmp/models.json
             code=$(curl -s -o /tmp/models.json -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${CLIPROXY_API_KEY}" "${u}/models" || true)
             echo "probe ${u} -> ${code}"
             cat /tmp/models.json 2>/dev/null | head -c 200 || true

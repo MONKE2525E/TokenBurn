@@ -30,11 +30,12 @@ function required(name) {
 }
 
 function redact(value) {
-  const token = process.env.CLIPROXY_API_KEY || "";
-  return String(value || "")
-    .split(token)
-    .join("REDACTED")
-    .replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]+/gi, "$1REDACTED");
+  const apiKey = process.env.CLIPROXY_API_KEY || "";
+  const githubToken = process.env.GITHUB_TOKEN || "";
+  let out = String(value || "");
+  if (apiKey) out = out.split(apiKey).join("REDACTED");
+  if (githubToken) out = out.split(githubToken).join("REDACTED");
+  return out.replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]+/gi, "$1REDACTED");
 }
 
 async function github(pathname, init = {}) {
