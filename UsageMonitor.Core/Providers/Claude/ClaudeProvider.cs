@@ -15,6 +15,9 @@ public sealed class ClaudeProvider : IUsageProvider
     private DateTimeOffset? _rateLimitedUntil;
     private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromMinutes(5);
 
+    /// <summary>When non-null, the live usage endpoint is being throttled until this time.</summary>
+    public DateTimeOffset? RateLimitedUntil => _rateLimitedUntil;
+
     public ClaudeProvider(ClaudeAuthStore? auth = null, IProviderHttpClient? http = null, IProviderFileSystem? files = null, IModelCatalog? catalog = null)
     {
         _files = files ?? new LocalProviderFileSystem();
@@ -38,7 +41,9 @@ public sealed class ClaudeProvider : IUsageProvider
             {
                 if (_rateLimitedUntil is { } limitedUntil && limitedUntil > context.Now)
                 {
-                    var cachedHistory = ScanHistory(state.Path, context.Now);
+                    var cachedHistory = ScanHistory(state.Path, context.Now, context);
+                    LogInfo(context, "Claude refresh is rate limited; serving the last good limits",
+                        new Dictionary<string, object?> { ["rateLimitedUntil"] = limitedUntil });
                     if (_lastGoodUsage is { } cachedUsage)
                         return ProviderSnapshot.Success(Provider, cachedUsage.Lines, cachedUsage.Plan, context.Now, cachedHistory,
                             $"Claude updates are rate limited. Showing the last good limits until {limitedUntil.LocalDateTime:t}.");
@@ -47,7 +52,8 @@ public sealed class ClaudeProvider : IUsageProvider
                         $"Claude updates are rate limited until {limitedUntil.LocalDateTime:t}. Local spend history is still available.",
                         ProviderErrorCategory.RateLimited,
                         candidates,
-                        context.Now);
+                        context.Now,
+                        context);
                 }
 
                 // Claude Code owns OAuth refresh-token rotation. TokenBurn deliberately reads the
@@ -60,7 +66,9 @@ public sealed class ClaudeProvider : IUsageProvider
                 // accounting but cannot access Anthropic's subscription usage endpoint.
                 if (state.InferenceOnly || !state.HasProfileScope)
                 {
-                    var historyOnly = ScanHistory(state.Path, context.Now);
+                    var historyOnly = ScanHistory(state.Path, context.Now, context);
+                    LogInfo(context, "Claude inference-only credential; live limits unavailable, history only",
+                        new Dictionary<string, object?> { ["historyPoints"] = historyOnly.Points.Count });
                     return ProviderSnapshot.Success(Provider, Array.Empty<MetricLine>(), state.OAuth.SubscriptionType, context.Now, historyOnly,
                         "Re-login with `claude` to restore live Session and Weekly limits. Local spend history is still available.");
                 }
@@ -81,11 +89,13 @@ public sealed class ClaudeProvider : IUsageProvider
                     : null;
 
                 var mapped = ClaudeUsageMapper.Map(response, state.OAuth, context.Now);
-                var history = ScanHistory(state.Path, context.Now);
+                var history = ScanHistory(state.Path, context.Now, context);
                 var warning = mapped.Warning;
                 if (mapped.Warning is not null)
                 {
                     ExtendRateLimit(context.Now, retryAfterSeconds);
+                    LogInfo(context, "Claude usage response rate limited; keeping the last good limits",
+                        new Dictionary<string, object?> { ["retryAfterSeconds"] = retryAfterSeconds });
                     if (_lastGoodUsage is { } lastGood)
                         return ProviderSnapshot.Success(Provider, lastGood.Lines, lastGood.Plan, context.Now, history, warning);
 
@@ -107,6 +117,14 @@ public sealed class ClaudeProvider : IUsageProvider
                     _lastGoodUsage = mapped;
                     _rateLimitedUntil = null;
                 }
+                LogInfo(context, "Claude usage refreshed",
+                    new Dictionary<string, object?>
+                    {
+                        ["metricCount"] = mapped.Lines.Count,
+                        ["historyPoints"] = history.Points.Count,
+                        ["historyBreakdown"] = history.Breakdown.Count,
+                        ["servedFromLastGood"] = mapped.Warning is not null
+                    });
                 return ProviderSnapshot.Success(Provider, mapped.Lines, mapped.Plan, context.Now, history, warning);
             }
             catch (ClaudeAuthenticationException ex)
@@ -128,24 +146,25 @@ public sealed class ClaudeProvider : IUsageProvider
                     ExtendRateLimit(context.Now, ex.RetryAfterSeconds);
                     if (_lastGoodUsage is { } lastGood)
                     {
-                        var history = ScanHistory(state.Path, context.Now);
+                        var history = ScanHistory(state.Path, context.Now, context);
                         return ProviderSnapshot.Success(Provider, lastGood.Lines, lastGood.Plan, context.Now, history,
                             "Claude token refresh is rate limited. Showing the last good limits for five minutes.");
                     }
-                    return ErrorWithHistory("Claude token refresh is rate limited (HTTP 429). Try again in a few minutes.", ProviderErrorCategory.RateLimited, candidates, context.Now);
+                    return ErrorWithHistory("Claude token refresh is rate limited (HTTP 429). Try again in a few minutes.", ProviderErrorCategory.RateLimited, candidates, context.Now, context);
                 }
-                return ErrorWithHistory(ex.Message, ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network, candidates, context.Now);
+                return ErrorWithHistory(ex.Message, ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network, candidates, context.Now, context);
             }
-            catch (ClaudeParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, candidates, context.Now); }
-            catch (HttpRequestException) { return ErrorWithHistory("Claude connection failed.", ProviderErrorCategory.Network, candidates, context.Now); }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Claude request timed out.", ProviderErrorCategory.Network, candidates, context.Now); }
+            catch (ClaudeParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, candidates, context.Now, context); }
+            catch (HttpRequestException) { return ErrorWithHistory("Claude connection failed.", ProviderErrorCategory.Network, candidates, context.Now, context); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Claude request timed out.", ProviderErrorCategory.Network, candidates, context.Now, context); }
         }
 
         return ErrorWithHistory(
             lastAuthentication?.Message ?? "Claude live limits are unavailable. Run `claude` to sign in again. Local spend history is still available.",
             ProviderErrorCategory.Authentication,
             candidates,
-            context.Now);
+            context.Now,
+            context);
     }
 
     private sealed record OAuthEndpoints(Uri UsageUri);
@@ -197,15 +216,26 @@ public sealed class ClaudeProvider : IUsageProvider
                !value.Trim().Equals("off", StringComparison.OrdinalIgnoreCase);
     }
 
-    private ProviderUsageHistory ScanHistory(string path, DateTimeOffset now)
+    private ProviderUsageHistory ScanHistory(string path, DateTimeOffset now, ProviderContext context)
     {
         var home = string.Equals(path, "environment", StringComparison.OrdinalIgnoreCase)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude")
             : Path.GetDirectoryName(path) ?? string.Empty;
-        return new ClaudeLogUsageScanner(_files, _catalog).Scan(home, now.AddDays(-90));
+        return new ClaudeLogUsageScanner(_files, _catalog).Scan(home, now.AddDays(-90), context.CacheDirectory, report =>
+            context.Logger?.Info("Claude history scanned",
+                new Dictionary<string, object?>
+                {
+                    ["filesDiscovered"] = report.FilesDiscovered,
+                    ["filesChanged"] = report.FilesChanged,
+                    ["filesUnchanged"] = report.FilesUnchanged,
+                    ["rowsRead"] = report.RowsRead,
+                    ["scanMs"] = report.Milliseconds,
+                    ["oldestRecord"] = report.OldestRecord,
+                    ["newestRecord"] = report.NewestRecord
+                }));
     }
 
-    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, IReadOnlyList<ClaudeAuthState> candidates, DateTimeOffset now)
+    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, IReadOnlyList<ClaudeAuthState> candidates, DateTimeOffset now, ProviderContext context)
     {
         var path = candidates.FirstOrDefault(x => !string.Equals(x.Path, "environment", StringComparison.OrdinalIgnoreCase))?.Path ?? "environment";
         var oauth = candidates.FirstOrDefault()?.OAuth;
@@ -213,7 +243,7 @@ public sealed class ClaudeProvider : IUsageProvider
         return ProviderSnapshot.Error(Provider, message, category) with
         {
             Plan = plan,
-            UsageHistory = ScanHistory(path, now)
+            UsageHistory = ScanHistory(path, now, context)
         };
     }
 
@@ -223,5 +253,8 @@ public sealed class ClaudeProvider : IUsageProvider
         if (_rateLimitedUntil is null || candidate > _rateLimitedUntil)
             _rateLimitedUntil = candidate;
     }
+
+    private static void LogInfo(ProviderContext context, string message, IReadOnlyDictionary<string, object?> data)
+        => context.Logger?.Info(message, data);
 
 }

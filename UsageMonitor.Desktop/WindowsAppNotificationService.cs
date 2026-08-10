@@ -56,7 +56,11 @@ internal sealed class WindowsAppNotificationService : IDisposable
         }
     }
 
-    public void ShowQuotaAlert(string message)
+    public void ShowQuotaAlert(string message) => ShowAlert(message, "quota-alert", "quota");
+
+    public void ShowAuthAlert(string message) => ShowAlert(message, "auth-alert", "auth");
+
+    private void ShowAlert(string message, string tag, string group)
     {
         if (!_registered || _manager is null) return;
 
@@ -70,8 +74,8 @@ internal sealed class WindowsAppNotificationService : IDisposable
                 .AddArgument("action", "open-dashboard")
                 .AddText("TokenBurn")
                 .AddText(message)
-                .SetTag("quota-alert")
-                .SetGroup("quota");
+                .SetTag(tag)
+                .SetGroup(group);
             if (File.Exists(logoPath))
                 builder.SetAppLogoOverride(new Uri(logoPath, UriKind.Absolute));
 

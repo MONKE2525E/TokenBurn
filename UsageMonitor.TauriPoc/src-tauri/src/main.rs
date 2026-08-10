@@ -474,6 +474,45 @@ fn open_claude_login() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_antigravity_login() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::env;
+        use std::os::windows::process::CommandExt;
+
+        // The Antigravity CLI ships through npm as an `agy.cmd` shim. Open it in its own console so
+        // the user can complete the browser sign-in flow, then finish in the CLI.
+        let mut candidates = Vec::new();
+        if let Ok(app_data) = env::var("APPDATA") {
+            candidates.push(std::path::PathBuf::from(app_data).join("npm\\agy.cmd"));
+        }
+        if let Ok(output) = Command::new("where.exe").arg("agy.cmd").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            candidates.extend(stdout.lines().map(std::path::PathBuf::from));
+        }
+        let script = candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| {
+                "The Antigravity CLI (agy) was not found on PATH. Install it, then try again."
+                    .to_string()
+            })?;
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+        Command::new("cmd.exe")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .arg("/c")
+            .arg(script)
+            .spawn()
+            .map_err(|error| format!("Could not start Antigravity sign-in: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Antigravity sign-in is only available on Windows in this build.".to_string())
+    }
+}
+
+#[tauri::command]
 async fn get_settings_data() -> Result<Value, String> {
     let response = reqwest::Client::new()
         .get("http://127.0.0.1:6738/settings-data")
@@ -526,6 +565,26 @@ async fn set_spend_metric(metric: String) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn get_diagnostics_bundle() -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .get("http://127.0.0.1:6738/diagnostics-bundle")
+        .timeout(Duration::from_millis(2000))
+        .send()
+        .await
+        .map_err(|error| format!("The desktop diagnostics surface is unavailable: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "The desktop diagnostics surface returned HTTP {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("The desktop diagnostics surface returned invalid JSON: {error}"))
 }
 
 #[tauri::command]
@@ -1182,8 +1241,10 @@ fn main() {
             fetch_refresh_status,
             hide_popup,
             open_claude_login,
+            open_antigravity_login,
             get_settings_data,
             apply_settings_data,
+            get_diagnostics_bundle,
             set_spend_metric,
             set_screen_share_privacy
         ])

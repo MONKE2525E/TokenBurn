@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http;
 using System.Text.Json;
 
@@ -50,6 +51,7 @@ public sealed class AntigravityProvider : IUsageProvider
 
     public async Task<ProviderSnapshot> RefreshAsync(ProviderContext context, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
         var candidates = _auth.LoadCandidates();
         if (candidates.Count == 0)
             return ProviderSnapshot.Error(Provider, "Not configured. Sign in to Antigravity or Gemini CLI first.", ProviderErrorCategory.NotConfigured);
@@ -90,10 +92,23 @@ public sealed class AntigravityProvider : IUsageProvider
                     }
                 }
                 if (string.IsNullOrWhiteSpace(token)) continue;
+                var tokenMs = stopwatch.ElapsedMilliseconds;
 
                 var result = await FetchUsageAsync(token!, context, cancellationToken).ConfigureAwait(false);
+                var apiMs = stopwatch.ElapsedMilliseconds;
+                var history = _history.Scan(context.Now, context.ModelCatalog, cancellationToken);
+                context.Logger?.Info("Antigravity usage refreshed",
+                    new Dictionary<string, object?>
+                    {
+                        ["metricCount"] = result.Lines.Count,
+                        ["historyPoints"] = history.Points.Count,
+                        ["historyCostUsd"] = history.TotalCostUsd,
+                        ["tokenMs"] = tokenMs,
+                        ["apiMs"] = apiMs,
+                        ["historyMs"] = stopwatch.ElapsedMilliseconds - apiMs
+                    });
                 return ProviderSnapshot.Success(Provider, result.Lines, result.Plan, context.Now,
-                    history: _history.Scan(context.Now, context.ModelCatalog, cancellationToken));
+                    history: history);
             }
             catch (AntigravityAuthenticationException)
             {
@@ -109,8 +124,17 @@ public sealed class AntigravityProvider : IUsageProvider
                         {
                             CacheToken(refreshed, candidate.RefreshToken!);
                             var recovered = await FetchUsageAsync(refreshed.AccessToken, context, cancellationToken).ConfigureAwait(false);
+                            var recoveredHistory = _history.Scan(context.Now, context.ModelCatalog, cancellationToken);
+                            context.Logger?.Info("Antigravity usage refreshed",
+                                new Dictionary<string, object?>
+                                {
+                                    ["metricCount"] = recovered.Lines.Count,
+                                    ["historyPoints"] = recoveredHistory.Points.Count,
+                                    ["recoveredFromAuthFailure"] = true,
+                                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                                });
                             return ProviderSnapshot.Success(Provider, recovered.Lines, recovered.Plan, context.Now,
-                                history: _history.Scan(context.Now, context.ModelCatalog, cancellationToken));
+                                history: recoveredHistory);
                         }
                     }
                     catch (AntigravityAuthenticationException) { }
@@ -121,17 +145,17 @@ public sealed class AntigravityProvider : IUsageProvider
             {
                 return ErrorWithHistory(ex.Message,
                     ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network,
-                    context.Now, context.ModelCatalog, cancellationToken);
+                    context, cancellationToken, stopwatch.ElapsedMilliseconds);
             }
-            catch (AntigravityParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, context.Now, context.ModelCatalog, cancellationToken); }
-            catch (HttpRequestException) { return ErrorWithHistory("Antigravity connection failed.", ProviderErrorCategory.Network, context.Now, context.ModelCatalog, cancellationToken); }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Antigravity request timed out.", ProviderErrorCategory.Network, context.Now, context.ModelCatalog, cancellationToken); }
+            catch (AntigravityParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, context, cancellationToken, stopwatch.ElapsedMilliseconds); }
+            catch (HttpRequestException) { return ErrorWithHistory("Antigravity connection failed.", ProviderErrorCategory.Network, context, cancellationToken, stopwatch.ElapsedMilliseconds); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Antigravity request timed out.", ProviderErrorCategory.Network, context, cancellationToken, stopwatch.ElapsedMilliseconds); }
         }
 
         return ErrorWithHistory(
             sawAuthFailure ? "Antigravity sign-in expired. Open Antigravity or Gemini CLI and sign in again." : "Antigravity usage is temporarily unavailable.",
             sawAuthFailure ? ProviderErrorCategory.Authentication : ProviderErrorCategory.Network,
-            context.Now, context.ModelCatalog, cancellationToken);
+            context, cancellationToken, stopwatch.ElapsedMilliseconds);
     }
 
     private async Task<(string? Plan, IReadOnlyList<MetricLine> Lines)> FetchUsageAsync(string token, ProviderContext context, CancellationToken cancellationToken)
@@ -253,9 +277,22 @@ public sealed class AntigravityProvider : IUsageProvider
         return ProviderJson.String(ProviderJson.Property(document?.RootElement ?? default, "cloudaicompanionProject", "project"));
     }
 
-    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, DateTimeOffset now,
-        IModelCatalog? catalog, CancellationToken cancellationToken)
-        => ProviderSnapshot.Error(Provider, message, category) with { UsageHistory = _history.Scan(now, catalog, cancellationToken) };
+    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category,
+        ProviderContext context, CancellationToken cancellationToken, long elapsedMs = 0)
+    {
+        var history = _history.Scan(context.Now, context.ModelCatalog, cancellationToken);
+        if (elapsedMs > 0)
+        {
+            context.Logger?.Info("Antigravity refresh failed",
+                new Dictionary<string, object?>
+                {
+                    ["errorCategory"] = category,
+                    ["elapsedMs"] = elapsedMs,
+                    ["historyPoints"] = history.Points.Count
+                });
+        }
+        return ProviderSnapshot.Error(Provider, message, category) with { UsageHistory = history };
+    }
 
     private static void ThrowForStatus(ProviderHttpResponse response)
     {

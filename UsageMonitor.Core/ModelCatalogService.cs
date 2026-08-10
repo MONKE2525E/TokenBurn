@@ -153,6 +153,14 @@ public sealed class CachedModelCatalog : IModelCatalog
             if (overrideValue.CanonicalModel is { Length: > 0 } aliasTarget)
                 return ModelPricingCatalog.TryResolve(providerId, aliasTarget);
         }
+        if (IsOpenCodeProvider(providerId))
+        {
+            // OpenCode Go bills its own rates, which differ from OpenRouter's published cache
+            // price for the same model. Pin the rates that match OpenCode's billing dashboard so
+            // the remote catalog cannot shadow them with a different cache figure.
+            var openCodePrice = TryResolveOpenCodePrice(normalized);
+            if (openCodePrice is not null) return openCodePrice;
+        }
         var direct = ModelPricingCatalog.TryResolve(providerId, modelId);
         if (direct is not null) return direct;
         if (providerId.Equals(ProviderIds.Codex, StringComparison.OrdinalIgnoreCase) &&
@@ -160,6 +168,17 @@ public sealed class CachedModelCatalog : IModelCatalog
             return ModelPricingCatalog.TryResolve(providerId, $"openai/{modelId}");
         return null;
     }
+
+    private static bool IsOpenCodeProvider(string providerId) =>
+        providerId.Equals(ProviderIds.OpenCode, StringComparison.OrdinalIgnoreCase) ||
+        providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase);
+
+    private static ModelPrice? TryResolveOpenCodePrice(string normalized) => normalized switch
+    {
+        "deepseek-v4-flash" => new ModelPrice(.14, .0028, .28),
+        _ when normalized.Contains("-free", StringComparison.OrdinalIgnoreCase) => new ModelPrice(0, 0, 0),
+        _ => null
+    };
 
     private static IReadOnlyDictionary<string, ModelPricingOverride> ReadOverrides(string path)
     {

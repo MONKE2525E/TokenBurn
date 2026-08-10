@@ -368,8 +368,10 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .provider-name-label img { width: 18px; height: 18px; object-fit: contain; filter: brightness(0) invert(1); opacity: .8; }
 .provider-customize-logo { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; }
 .provider-customize-logo.has-issue img { filter: brightness(0) saturate(100%) invert(79%) sepia(64%) saturate(520%) hue-rotate(343deg) brightness(103%) contrast(91%); opacity: 1; }
-.provider-status-badge { position: absolute; top: -6px; right: -7px; width: 13px; height: 13px; display: grid; place-items: center; border: 2px solid #242426; border-radius: 50%; background: var(--warning); color: #242426; font-size: 9px; font-weight: 900; line-height: 1; }
-.provider-status-trigger { border: 0; padding: 0; background: transparent; cursor: help; }
+.provider-status-badge { position: absolute; top: -6px; right: -7px; width: 13px; height: 13px; display: grid; place-items: center; border: 2px solid #242426; border-radius: 50%; background: var(--warning); color: #242426; font-size: 9px; font-weight: 900; line-height: 0; }
+/* line-height 0 keeps the glyph box itself centered in the badge: with a normal line box the
+   "!" renders against the top of the circle because its em-box has no descender space. */
+.provider-status-trigger { border: 0; padding: 0; background: transparent; cursor: pointer; }
 .provider-status-trigger:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 5px; }
 .provider-switch { grid-column: 3; display: flex; justify-content: flex-end; align-items: center; cursor: pointer; }
 .provider-switch .toggle-track { margin-left: 0; }
@@ -402,10 +404,9 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .provider-metric-options .toggle-row { min-height: 31px; font-size: 12px; }
 .provider-metric-options .toggle-label { color: var(--muted); }
 .field-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 7px 0; font-size: 13px; }
-.notification-providers { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; }
-.notification-providers > span:first-child { display: grid; gap: 2px; min-width: 0; line-height: 1.3; }
-.notification-providers > span:first-child small { display: block; color: var(--muted); font-size: 11px; line-height: 1.35; }
-.notification-providers > .provider-multi-select { width: 178px; min-width: 0; max-width: 178px; justify-self: end; }
+.notification-providers > .field-title { display: grid; gap: 2px; min-width: 0; line-height: 1.3; }
+.notification-providers > .field-title small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.notification-providers > .provider-multi-select { flex: 0 0 auto; min-width: 142px; }
 /* Kept out of the tab order: it is a 1x1 invisible element, and leaving it focusable put a phantom
    tab stop in front of every enhanced select. The custom control below carries the keyboard model. */
 .field-row select.select-native { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -420,14 +421,14 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .select-menu { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; min-width: 100%; padding: 6px; display: grid; gap: 3px; border: 1px solid rgba(255,255,255,.2); border-radius: 10px; background: var(--frost-menu); box-shadow: 0 14px 30px rgba(0,0,0,.45); transform-origin: top right; }
 .select-option { padding: 8px 9px; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; white-space: nowrap; transition: background 140ms ease, color 140ms ease; }
 .select-option:hover, .select-option.selected, .select-option.is-active { background: #414145; color: var(--text); transition-duration: var(--dur-micro); }
-.notification-provider-menu { top: calc(100% + 6px); right: 0; width: 178px; min-width: 178px; max-width: 178px; max-height: min(280px, calc(100vh - 138px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.28) transparent; }
+.notification-provider-menu { top: calc(100% + 6px); right: 0; min-width: 100%; max-width: 264px; max-height: min(280px, calc(100vh - 138px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.28) transparent; }
 .notification-provider-menu::-webkit-scrollbar { width: 8px; }
 .notification-provider-menu::-webkit-scrollbar-track { background: transparent; }
 .notification-provider-menu::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 .notification-provider-menu::-webkit-scrollbar-thumb { min-height: 28px; border: 2px solid transparent; border-radius: 999px; background: rgba(255,255,255,.28); background-clip: padding-box; }
 .notification-provider-menu::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.44); background-clip: padding-box; }
-.notification-provider-option { width: 100%; display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 8px 9px; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), transform 80ms var(--ease-out); }
-.notification-provider-option:hover, .notification-provider-option:focus-visible { background: rgba(255,255,255,.08); color: var(--text); transition-duration: var(--dur-micro); }
+.notification-provider-option { width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; white-space: nowrap; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), transform 80ms var(--ease-out); }
+.notification-provider-option:hover, .notification-provider-option:focus-visible { background: #414145; color: var(--text); transition-duration: var(--dur-micro); }
 .notification-provider-option:not(.notification-provider-select-all)[aria-selected="true"] { background: #414145; color: var(--text); }
 .notification-provider-option:active { transform: scale(.985); }
 .notification-provider-option:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }

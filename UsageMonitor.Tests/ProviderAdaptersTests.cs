@@ -3,6 +3,7 @@ using UsageMonitor.Core.Providers;
 using UsageMonitor.Core.Providers.Claude;
 using UsageMonitor.Core.Providers.Codex;
 using UsageMonitor.Core.Providers.Antigravity;
+using UsageMonitor.Core.Providers.Grok;
 using UsageMonitor.Core.Providers.OpenRouter;
 using UsageMonitor.Core.Providers.Zai;
 
@@ -415,12 +416,139 @@ public sealed class ProviderAdaptersTests
     }
 
     [Fact]
+    public async Task GrokProviderReadsGrokBuildAuthAndFetchesWeeklyQuota()
+    {
+        var grokHome = CreateTempGrokHome(AuthJson(GrokProvider.DefaultAuthScope, "fixture-grok-token", "oidc", "fixture-user-123"));
+        var body = """
+            {
+              "config": {
+                "creditUsagePercent": 42.5,
+                "currentPeriod": {
+                  "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                  "start": "2030-01-01T00:00:00Z",
+                  "end": "2030-01-08T00:00:00Z"
+                },
+                "onDemandCap": {"val": 5000},
+                "onDemandUsed": {"val": 300},
+                "prepaidBalance": {"val": 1250}
+              },
+              "onDemandEnabled": true,
+              "subscriptionTier": "SuperGrok"
+            }
+            """;
+        var http = new FakeHttpClient(new ProviderHttpResponse(200, new Dictionary<string, string>(), body));
+        var snapshot = await new GrokProvider(http, grokHome).RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderIds.Grok, snapshot.ProviderId);
+        Assert.Null(snapshot.ErrorCategory);
+        Assert.Equal("Bearer fixture-grok-token", http.Authorization);
+        Assert.Equal("https://cli-chat-proxy.grok.com/v1/billing?format=credits", http.Uri?.ToString());
+        Assert.Equal("SuperGrok", snapshot.Plan);
+
+        var weekly = snapshot.GetLine("Weekly limit")!;
+        Assert.Equal(42.5, weekly.Used);
+        Assert.Equal(100, weekly.Limit);
+        Assert.Equal(new DateTimeOffset(2030, 1, 8, 0, 0, 0, TimeSpan.Zero), weekly.ResetsAt);
+
+        Assert.Equal(12.5, snapshot.GetLine("Credits")!.Values.Single().Number);
+        Assert.Equal(MetricKind.Dollars, snapshot.GetLine("Credits")!.Values.Single().Kind);
+    }
+
+    [Fact]
+    public async Task GrokProviderNotConfiguredUntilGrokLoginWritesAuth()
+    {
+        var snapshot = await new GrokProvider(grokHome: CreateTempGrokHome("{}"))
+            .RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.NotConfigured, snapshot.ErrorCategory);
+        Assert.Contains("grok login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GrokProviderReportsExpiredGrokBuildSession()
+    {
+        var grokHome = CreateTempGrokHome(AuthJson(GrokProvider.DefaultAuthScope, "fixture-grok-token", "oidc", "fixture-user-123"));
+        var http = new FakeHttpClient(new ProviderHttpResponse(401, new Dictionary<string, string>(), "{}"));
+        var snapshot = await new GrokProvider(http, grokHome).RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.Authentication, snapshot.ErrorCategory);
+        Assert.Contains("grok login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("fixture-grok-token", snapshot.GetLine("Error")!.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GrokBillingMapperUsesDeprecatedMonthlyFieldsWhenPercentIsAbsent()
+    {
+        const string body = """
+            {
+              "config": {
+                "monthlyLimit": {"val": 2000},
+                "used": {"val": 500}
+              }
+            }
+            """;
+
+        var result = GrokBillingMapper.Map(body);
+
+        Assert.NotNull(result);
+        Assert.Equal("Grok Build", result!.Plan);
+        var usage = result.Lines.Single(line => line.Label == "Usage");
+        Assert.Equal(25, usage.Used);
+        Assert.Equal(100, usage.Limit);
+    }
+
+    [Fact]
+    public void GrokBillingMapperRejectsMalformedBody()
+    {
+        Assert.Null(GrokBillingMapper.Map("not json"));
+    }
+
+    [Fact]
+    public void GrokAuthSkipsDeprecatedWebLoginTokens()
+    {
+        var grokHome = CreateTempGrokHome("""
+            {
+              "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+                "key": "legacy-token",
+                "auth_mode": "web_login",
+                "user_id": "legacy-user"
+              },
+              "xai::api_key": { "key": "api-key", "auth_mode": "api_key", "user_id": "key-user" }
+            }
+            """);
+
+        var auth = GrokProvider.ReadGrokAuth(grokHome);
+
+        Assert.NotNull(auth);
+        Assert.Equal("api-key", auth!.Key);
+    }
+
+    private static string CreateTempGrokHome(string authJson)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "grok-fixture-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "auth.json"), authJson);
+        return directory;
+    }
+
+    private static string AuthJson(string scope, string key, string mode, string userId)
+        => $$"""
+            {
+              "{{scope}}": {
+                "key": "{{key}}",
+                "auth_mode": "{{mode}}",
+                "create_time": "2030-01-01T00:00:00Z",
+                "user_id": "{{userId}}"
+              }
+            }
+            """;
+
+    [Fact]
     public void OpenRouterMapperReadsSanitizedCreditsFixture()
     {
         var body = File.ReadAllText(Fixture("openrouter_credits.json"));
         var result = OpenRouterUsageMapper.Map(
             new ProviderHttpResponse(200, new Dictionary<string, string>(), body), Now);
-
         Assert.Equal(100.50, result.TotalCredits);
         Assert.Equal(25.75, result.TotalUsage);
         Assert.Equal(74.75, result.Balance);

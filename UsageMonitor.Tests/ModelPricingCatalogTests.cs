@@ -46,7 +46,49 @@ public sealed class ModelPricingCatalogTests
         var deepseek = ModelPricingCatalog.TryResolve("deepseek-v4-flash");
         Assert.NotNull(deepseek);
         Assert.Equal(.14, deepseek!.InputPerMillion, 6);
+        var free = ModelPricingCatalog.TryResolve("deepseek-v4-flash-free");
+        Assert.NotNull(free);
+        Assert.Equal(0, free!.InputPerMillion, 6);
         Assert.Null(ModelPricingCatalog.TryResolve("a-new-custom-model"));
+    }
+
+    [Fact]
+    public async Task OpenCodeGoRatesArePinnedAgainstTheRemoteCatalog()
+    {
+        // The live OpenRouter catalog prices deepseek cache reads far higher than OpenCode Go
+        // bills. The pin must win so OpenCode spend matches the OpenCode dashboard.
+        var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var snapshot = new ModelPricingSnapshot([
+                new ModelCatalogEntry("deepseek", "deepseek/deepseek-v4-flash", "DeepSeek V4 Flash",
+                    new ModelPrice(.14, .028, .28), null, DateTimeOffset.UtcNow, "openrouter", false,
+                    PricingBasis.PublicCatalog)
+            ], DateTimeOffset.UtcNow, "openrouter", false);
+            var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                Converters = { new JsonStringEnumConverter() }
+            };
+            await File.WriteAllTextAsync(Path.Combine(root, "model-catalog.json"), JsonSerializer.Serialize(snapshot, options));
+
+            var catalog = new CachedModelCatalog([], root);
+            await catalog.GetAsync();
+
+            var pinned = catalog.ResolvePrice("opencode-go", "deepseek-v4-flash");
+            Assert.NotNull(pinned);
+            Assert.Equal(.0028, pinned!.CachedInputPerMillion, 6);
+            var free = catalog.ResolvePrice("opencode", "deepseek-v4-flash-free");
+            Assert.NotNull(free);
+            Assert.Equal(0, free!.InputPerMillion, 6);
+        }
+        finally
+        {
+            // ApplyRemote is a static, process-wide cache. Reset it so this fixture's entries
+            // cannot leak into other tests via family matching.
+            ModelPricingCatalog.ApplyRemote([]);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]

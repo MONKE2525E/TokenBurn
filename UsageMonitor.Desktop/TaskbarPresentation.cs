@@ -1,3 +1,4 @@
+using UsageMonitor.Core;
 using UsageMonitor.LocalApi;
 
 namespace UsageMonitor.Desktop;
@@ -12,18 +13,28 @@ internal static class TaskbarMetricFilter
 
     public static bool IsConfigured(UsageSnapshotData snapshot)
     {
-        if (!string.IsNullOrWhiteSpace(snapshot.Error) || snapshot.Lines.Count == 0) return false;
-        return snapshot.Lines.Any(line => line switch
-        {
-            ProgressMetricData progress => double.IsFinite(progress.Used) &&
-                                           double.IsFinite(progress.Limit) &&
-                                           progress.Limit > 0,
-            TextMetricData text => HasValue(text.Value),
-            BadgeMetricData badge => HasValue(badge.Text),
-            ValuesMetricData values => values.Values.Count > 0,
-            BarChartMetricData chart => chart.Points.Count > 0,
-            _ => false
-        });
+        if (snapshot.Lines.Count == 0) return false;
+        var hasErrorBadge = snapshot.Lines.Any(line =>
+            line is BadgeMetricData badge &&
+            badge.Label.Equals(MetricLine.ErrorBadgeLabel, StringComparison.OrdinalIgnoreCase));
+        // A failed refresh that carried over the last good bars (CoreUsageSnapshotSource appends
+        // an error badge) must stay visible: dropping it makes providers vanish from the taskbar
+        // until a clean refresh. A plain error envelope with no error badge is a placeholder.
+        if (!string.IsNullOrWhiteSpace(snapshot.Error) && !hasErrorBadge) return false;
+        return snapshot.Lines
+            .Where(line => !(line is BadgeMetricData badge &&
+                             badge.Label.Equals(MetricLine.ErrorBadgeLabel, StringComparison.OrdinalIgnoreCase)))
+            .Any(line => line switch
+            {
+                ProgressMetricData progress => double.IsFinite(progress.Used) &&
+                                               double.IsFinite(progress.Limit) &&
+                                               progress.Limit > 0,
+                TextMetricData text => HasValue(text.Value),
+                BadgeMetricData badge => HasValue(badge.Text),
+                ValuesMetricData values => values.Values.Count > 0,
+                BarChartMetricData chart => chart.Points.Count > 0,
+                _ => false
+            });
     }
 
     private static bool HasValue(string? value)

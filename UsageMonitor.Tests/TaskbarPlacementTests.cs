@@ -79,6 +79,28 @@ public sealed class TaskbarPlacementTests
     }
 
     [Fact]
+    public void TaskbarFilterKeepsCachedBarsWhenTheLatestRefreshFailed()
+    {
+        // CoreUsageSnapshotSource carries the last good bars over with an error badge when a
+        // refresh fails. Dropping that envelope made providers vanish from the taskbar until the
+        // next clean refresh, so an error badge alone must not disqualify usable bars.
+        var withBars = new UsageSnapshotData(
+            "antigravity", "Antigravity", null,
+            [
+                new ProgressMetricData("Weekly", 12, 100),
+                new BadgeMetricData("Error", "Antigravity connection failed.", "#EF4444")
+            ],
+            DateTimeOffset.UtcNow) { Error = "Antigravity connection failed.", ErrorCategory = "Network" };
+        var placeholder = new UsageSnapshotData(
+            "antigravity", "Antigravity", null,
+            [new BadgeMetricData("Error", "Not configured. Sign in first.", "#EF4444")],
+            DateTimeOffset.UtcNow) { Error = "Not configured. Sign in first.", ErrorCategory = "NotConfigured" };
+
+        Assert.True(TaskbarMetricFilter.IsConfigured(withBars));
+        Assert.False(TaskbarMetricFilter.IsConfigured(placeholder));
+    }
+
+    [Fact]
     public void MetricVisibilityDoesNotInventAFallbackWhenNothingIsPinned()
     {
         var metrics = new[]

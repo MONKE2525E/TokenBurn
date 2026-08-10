@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace UsageMonitor.Core.Providers.Claude;
 
 public sealed class ClaudeLogUsageScanner
@@ -13,36 +15,98 @@ public sealed class ClaudeLogUsageScanner
     public static ProviderUsageHistory ScanDirectory(string claudeHome, DateTimeOffset since) => new ClaudeLogUsageScanner().Scan(claudeHome, since);
 
     public ProviderUsageHistory Scan(string claudeHome, DateTimeOffset since)
+        => Scan(claudeHome, since, null, null);
+
+    /// <summary>
+    /// Incremental history scan. When <paramref name="historyStoreDirectory"/> is provided, files
+    /// whose length and last-write time are unchanged since the previous scan are skipped and their
+    /// previously computed contribution is reused. Without a store directory (CLI, tests) every file
+    /// is parsed every time.
+    /// </summary>
+    public ProviderUsageHistory Scan(string claudeHome, DateTimeOffset since,
+        string? historyStoreDirectory, Action<HistoryScanReport>? report)
     {
-        var entries = new List<ClaudeUsageEntry>();
+        var stopwatch = Stopwatch.StartNew();
+        var scanReport = new HistoryScanReport();
+        var store = string.IsNullOrWhiteSpace(historyStoreDirectory)
+            ? null
+            : new ProviderHistoryIndexStore(historyStoreDirectory);
+        var index = store?.TryLoad("claude-code") ?? new ProviderHistoryIndex();
+        if (store is not null)
+        {
+            var catalogFingerprint = HistorySourceFingerprint.Catalog(UsageMonitorPaths.Current.PricingDirectory);
+            if (index.CatalogFingerprint.Length > 0 && index.CatalogFingerprint != catalogFingerprint)
+                index = new ProviderHistoryIndex { CatalogFingerprint = catalogFingerprint };
+            index.CatalogFingerprint = catalogFingerprint;
+        }
+
+        var files = DiscoverFiles(claudeHome).ToArray();
+        scanReport.FilesDiscovered = files.Length;
+        var knownPaths = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+        foreach (var stalePath in index.Sources.Keys.Where(path => !knownPaths.Contains(path)).ToArray())
+            index.Sources.Remove(stalePath);
+
+        foreach (var path in files)
+        {
+            var fingerprint = store is null ? string.Empty : HistorySourceFingerprint.Of(path);
+            if (index.Sources.TryGetValue(path, out var existing) && existing.Fingerprint == fingerprint)
+            {
+                scanReport.FilesUnchanged++;
+                continue;
+            }
+            scanReport.FilesChanged++;
+            index.Sources[path] = ParseFile(path, since, scanReport);
+        }
+
+        var merged = HistoryIndexMerge.Merge(index.Sources.Values,
+            sinceDate: DateOnly.FromDateTime(since.LocalDateTime));
+        if (store is not null) store.Save("claude-code", index);
+        scanReport.Milliseconds = stopwatch.ElapsedMilliseconds;
+        report?.Invoke(scanReport);
+        return merged;
+    }
+
+    private IReadOnlyList<string> DiscoverFiles(string claudeHome)
+    {
         // Claude keeps billable conversation records under `projects`. Older installations and
         // sanitized fixtures may pass that directory itself or place a single fixture directly at
         // the root. Prefer the canonical project tree when it exists so debug, cache, and sidecar
         // JSONL files cannot silently inflate spend.
         var projectsRoot = Path.Combine(claudeHome, "projects");
         var projectFiles = _files.EnumerateFiles(projectsRoot, "*.jsonl", SearchOption.AllDirectories).ToArray();
-        var files = projectFiles.Length > 0
+        return projectFiles.Length > 0
             ? projectFiles
-            : _files.EnumerateFiles(claudeHome, "*.jsonl", SearchOption.AllDirectories);
-        foreach (var path in files)
+            : _files.EnumerateFiles(claudeHome, "*.jsonl", SearchOption.AllDirectories).ToArray();
+    }
+
+    private SourceHistoryContribution ParseFile(string path, DateTimeOffset since, HistoryScanReport report)
+    {
+        // Capture the fingerprint before reading. If the file is appended to mid-parse the stored
+        // fingerprint will not match the file's final state, so the next scan re-parses it instead
+        // of permanently missing the appended records.
+        var fingerprint = HistorySourceFingerprint.Of(path);
+        var entries = new List<ClaudeUsageEntry>();
+        // Claude session files can be hundreds of megabytes because a single line may contain
+        // a tool result or a long conversation transcript. Stream them so a refresh cannot
+        // retain the complete history and its split-line copies simultaneously.
+        foreach (var raw in _files.ReadLinesContaining(path, "\"usage\""))
         {
-            // Claude session files can be hundreds of megabytes because a single line may contain
-            // a tool result or a long conversation transcript. Stream them so a refresh cannot
-            // retain the complete history and its split-line copies simultaneously.
-            foreach (var raw in _files.ReadLinesContaining(path, "\"usage\""))
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            using var doc = ProviderJson.Parse(raw.Trim());
+            if (doc is null) continue;
+            var root = doc.RootElement;
+            var timestamp = ProviderJson.Date(ProviderJson.Property(root, "timestamp", "created_at", "time"));
+            if (timestamp is null || timestamp < since || !IsValidEntry(root)) continue;
+            var message = ProviderJson.Object(ProviderJson.Property(root, "message"));
+            var usage = ProviderJson.Object(message is { } msg ? ProviderJson.Property(msg, "usage") : ProviderJson.Property(root, "usage"));
+            if (usage is null) continue;
+            var parsed = ParseEntries(root, message, usage.Value, timestamp.Value);
+            if (parsed.Count > 0)
             {
-                if (string.IsNullOrWhiteSpace(raw)) continue;
-                using var doc = ProviderJson.Parse(raw.Trim());
-                if (doc is null) continue;
-                var root = doc.RootElement;
-                var timestamp = ProviderJson.Date(ProviderJson.Property(root, "timestamp", "created_at", "time"));
-                if (timestamp is null || timestamp < since || !IsValidEntry(root)) continue;
-                var message = ProviderJson.Object(ProviderJson.Property(root, "message"));
-                var usage = ProviderJson.Object(message is { } msg ? ProviderJson.Property(msg, "usage") : ProviderJson.Property(root, "usage"));
-                if (usage is null) continue;
-                var parsed = ParseEntries(root, message, usage.Value, timestamp.Value);
-                entries.AddRange(parsed);
+                report.RowsRead++;
+                TrackRecord(report, timestamp);
             }
+            entries.AddRange(parsed);
         }
 
         var deduped = Deduplicate(entries);
@@ -52,7 +116,10 @@ public sealed class ClaudeLogUsageScanner
         foreach (var entry in deduped.Where(entry => entry.Timestamp >= since))
         {
             if (!entry.PricingKnown && !string.IsNullOrWhiteSpace(entry.Model)) unknownModels.Add(entry.Model);
-            var day = DateOnly.FromDateTime(entry.Timestamp.UtcDateTime);
+            // Bucket by the Windows local calendar day like Codex, OpenCode, and the dashboard
+            // selectors. UTC bucketing moves evening usage into tomorrow and makes "Today" empty
+            // for west-of-UTC machines.
+            var day = DateOnly.FromDateTime(entry.Timestamp.LocalDateTime);
             if (totals.TryGetValue(day, out var prior)) totals[day] = (prior.Tokens + entry.Tokens, prior.Cost + entry.Cost);
             else totals[day] = (entry.Tokens, entry.Cost);
             var basis = entry.ReportedCost ? UsageCostBasis.ProviderReported
@@ -79,11 +146,20 @@ public sealed class ClaudeLogUsageScanner
                     basis != UsageCostBasis.ProviderReported, entry.CacheSavings);
             }
         }
-        return new ProviderUsageHistory(totals.OrderBy(x => x.Key).Select(x => new UsageHistoryPoint(x.Key, x.Value.Tokens, x.Value.Cost, true)).ToArray())
+        return new SourceHistoryContribution
         {
-            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
-            Breakdown = breakdown.Values.OrderBy(point => point.Date).ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase).ToArray()
+            Fingerprint = fingerprint,
+            Points = totals.OrderBy(p => p.Key).Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToList(),
+            Breakdown = breakdown.Values.OrderBy(point => point.Date).ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase).ToList(),
+            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()
         };
+    }
+
+    private static void TrackRecord(HistoryScanReport report, DateTimeOffset? timestamp)
+    {
+        if (timestamp is not { } value) return;
+        if (report.OldestRecord is null || value < report.OldestRecord) report.OldestRecord = value;
+        if (report.NewestRecord is null || value > report.NewestRecord) report.NewestRecord = value;
     }
 
     private static IReadOnlyList<ClaudeUsageEntry> Deduplicate(IReadOnlyList<ClaudeUsageEntry> entries)

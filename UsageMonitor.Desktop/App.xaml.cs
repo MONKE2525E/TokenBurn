@@ -82,9 +82,10 @@ public partial class App : System.Windows.Application
                 System.Windows.Threading.DispatcherPriority.Normal),
             () => _mainWindow.GetEnabledProviderIds(),
             () => new TauriPopupBridge.RefreshStatus(_mainWindow.NextRefreshAt, _mainWindow.IsRefreshInFlight),
-            () => _mainWindow.Dispatcher.InvokeAsync(() => _mainWindow.RefreshDataAsync(true)).Task.Unwrap(),
+            () => _mainWindow.Dispatcher.InvokeAsync(() => _mainWindow.RefreshDataAsync(false, "popup-refresh")).Task.Unwrap(),
             () => _mainWindow.Dispatcher.Invoke(() => _mainWindow.GetSettingsPageDataJson()),
             json => _mainWindow.Dispatcher.Invoke(() => _mainWindow.ApplySettingsPageDataJson(json)),
+            () => _mainWindow.Dispatcher.Invoke(() => _mainWindow.BuildDiagnosticsBundleJson()),
             metric => _mainWindow.Dispatcher.Invoke(() => _mainWindow.ApplySpendMetric(metric)),
             visible => _taskbar?.SetPopupVisible(visible));
         _tray = new TrayIconService(this, _mainWindow, _appNotifications);

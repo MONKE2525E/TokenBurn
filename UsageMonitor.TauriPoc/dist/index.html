@@ -81,13 +81,18 @@
         <div class="field-group">
           <div class="field-label">Notifications</div>
           <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="notificationsEnabled"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Notify when quotas reset</span></label>
-          <label class="field-row notification-providers"><span><strong>Providers</strong><small>Choose which providers can notify you.</small></span><span class="provider-multi-select" id="notification-provider-picker"><button type="button" class="select-trigger" id="notification-provider-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="notification-provider-menu" aria-label="Notification providers"><span id="notification-provider-summary">Checking providers</span><svg viewBox="0 0 12 7" aria-hidden="true"><path d="m1 1.25 5 4.5 5-4.5"></path></svg></button><div class="select-menu overlay-surface notification-provider-menu" id="notification-provider-menu" role="listbox" aria-multiselectable="true" aria-label="Notification providers"></div></span></label>
+          <label class="field-row notification-providers"><span class="field-title"><strong>Reset Notifications</strong><small>Choose which quota resets you want to be notified about.</small></span><span class="provider-multi-select" id="notification-provider-picker"><button type="button" class="select-trigger" id="notification-provider-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="notification-provider-menu" aria-label="Reset notification providers"><span id="notification-provider-summary">Checking providers</span><svg viewBox="0 0 12 7" aria-hidden="true"><path d="m1 1.25 5 4.5 5-4.5"></path></svg></button><div class="select-menu overlay-surface notification-provider-menu" id="notification-provider-menu" role="listbox" aria-multiselectable="true" aria-label="Reset notification providers"></div></span></label>
           <div class="field-note">The app watches each selected reset timer locally, so notifications are not held for the next five-minute refresh.</div>
         </div>
         <div class="field-group">
           <div class="field-label">Privacy</div>
           <label class="toggle-row"><input class="toggle-input" type="checkbox" data-field="hideFromScreenShare"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span class="toggle-label">Hide usage values from screen sharing</span></label>
           <div class="field-note">Usage values stay local. No anonymous usage or crash uploads are enabled in this build.</div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Diagnostics</div>
+          <button type="button" class="provider-action diagnostics-copy" id="copy-logs-button">Copy logs</button>
+          <div class="field-note">Copies the current session logs and client state to the clipboard so you can paste them into an assistant for debugging.</div>
         </div>
       </section>
     </div>

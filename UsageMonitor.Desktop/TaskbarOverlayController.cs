@@ -158,8 +158,12 @@ public sealed class TaskbarOverlayController : IDisposable
 
     public void ApplyPositionLock(bool locked)
     {
+        if (locked) _dragActive = false;
         _overlay?.SetPositionLocked(locked);
         LogState(locked ? "position-locked" : "position-unlocked", "settings", System.Drawing.Rectangle.Empty, false, false, 0, _edgeOffsetDip);
+        // Re-assert the strip after the lock change so the layered surface repositions/re-paints
+        // cleanly instead of lingering in whatever compositing state the previous drag left it in.
+        ReconcileTaskbarStrip(locked ? "position-locked" : "position-unlocked");
     }
 
     public void ApplyScreenSharePrivacy(bool excluded)
@@ -676,6 +680,7 @@ internal sealed class NativeTaskbarOverlay : IDisposable
     private bool _dragging;
     private bool _locked = true;
     private bool _visible;
+    private bool _suppressNextClick;
     private IntPtr _bitmap;
     private IntPtr _bitmapDc;
     private IntPtr _oldBitmap;
@@ -719,6 +724,10 @@ internal sealed class NativeTaskbarOverlay : IDisposable
         {
             _capture = false;
             _dragging = false;
+            // The user may still be holding the button down right now (lock toggled mid-drag).
+            // Swallow the following mouse-up so releasing does not read as a click that toggles
+            // the popup and leaves the strip looking "bugged out".
+            _suppressNextClick = true;
             ReleaseCapture();
         }
     }
@@ -891,6 +900,7 @@ internal sealed class NativeTaskbarOverlay : IDisposable
             _down = GetCursor();
             _last = _down;
             _dragging = false;
+            _suppressNextClick = false;
             if (!_locked)
             {
                 _dragStart(new System.Drawing.Point(_down.X, _down.Y));
@@ -923,6 +933,11 @@ internal sealed class NativeTaskbarOverlay : IDisposable
             {
                 _capture = false;
                 ReleaseCapture();
+            }
+            if (_suppressNextClick)
+            {
+                _suppressNextClick = false;
+                return IntPtr.Zero;
             }
             if (_dragging)
             {

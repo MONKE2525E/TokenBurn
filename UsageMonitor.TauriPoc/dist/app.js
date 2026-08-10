@@ -347,7 +347,10 @@ let breakdownChartGeometry = null;
 function traceSmoothLine(ctx, coordinates) {
   if (!coordinates.length) return;
   ctx.moveTo(coordinates[0].x, coordinates[0].y);
-  for (let index = 1; index < coordinates.length - 1; index++) {
+  // Stop one point earlier: the tail quadratic ends ON the last point, so the loop must not
+  // already have advanced past the midpoint of the last pair. Drawing that final segment twice
+  // made the last section hook back toward the peak at the right edge of the chart.
+  for (let index = 1; index < coordinates.length - 2; index++) {
     const current = coordinates[index];
     const next = coordinates[index + 1];
     ctx.quadraticCurveTo(current.x, current.y, (current.x + next.x) / 2, (current.y + next.y) / 2);
@@ -801,14 +804,26 @@ function providerRows() {
     const warning = snapshot.warning || snapshot.error;
     const compactLines = visibleLines(snapshot).map(line => displayLine(snapshot, line));
     const errorText = [warning, ...compactLines.map(line => line.text || line.value || '')].filter(Boolean).join(' ');
+    const reauthAction = reauthActionFor(snapshot, errorText);
     return {
       snapshot,
       warning,
       compactLines,
-      canReauth: snapshot.providerId === 'claude-code' && /(auth|login|expired|not configured|signed out)/i.test(errorText),
+      canReauth: !!reauthAction,
+      reauthAction,
       displayName: snapshot.providerId === 'claude-code' ? 'Claude Code' : snapshot.displayName,
     };
   });
+}
+
+// A provider in an authentication-failure state gets a re-sign-in action that opens its own CLI.
+// Claude uses `claude auth login`; Antigravity uses the `agy` CLI the user is already signed in to.
+function reauthActionFor(snapshot, errorText) {
+  const authError = /(auth|login|expired|not configured|signed out|sign.?in)/i.test(errorText);
+  if (!authError) return null;
+  if (snapshot.providerId === 'claude-code') return { action: 'claude-login', label: 'Open Claude sign-in' };
+  if (snapshot.providerId === 'antigravity') return { action: 'antigravity-login', label: 'Run agy to sign in' };
+  return null;
 }
 
 // Everything that affects the markup EXCEPT the four things patchProviderValues writes: meter width,
@@ -862,11 +877,11 @@ function renderProvidersFinal() {
   }
   lastProvidersKey = key;
   $('#providers').innerHTML = rows.map(row => {
-    const { snapshot, warning, compactLines, canReauth, displayName } = row;
+    const { snapshot, warning, compactLines, canReauth, reauthAction, displayName } = row;
     const lines = compactLines.map((line, index) => renderMetric(line,
       Boolean(warning) || isPreResetSnapshot(snapshot, line), `${snapshot.providerId}::${index}`)).join('');
     const localHistory = renderLocalHistory(snapshot);
-    return `<article class="provider"><div class="provider-heading"><span class="provider-mark">${providerLogo(snapshot.providerId)}</span><div><span class="provider-name">${esc(displayName)}</span><span class="provider-plan">${esc(snapshot.plan || '')}</span></div>${warning ? '<span class="provider-warning" aria-label="Provider warning">!</span>' : ''}</div><div class="provider-card">${warning ? `<div class="error-line" title="${esc(warning)}">${esc(warning)}</div>` : ''}${canReauth ? '<button class="provider-action" data-provider-action="claude-login">Open Claude sign-in</button>' : ''}${lines || (!localHistory ? '<div class="empty-line">No live limits returned.</div>' : '')}${localHistory}</div></article>`;
+    return `<article class="provider"><div class="provider-heading"><span class="provider-mark">${providerLogo(snapshot.providerId)}</span><div><span class="provider-name">${esc(displayName)}</span><span class="provider-plan">${esc(snapshot.plan || '')}</span></div>${warning ? '<span class="provider-warning" aria-label="Provider warning">!</span>' : ''}</div><div class="provider-card">${warning ? `<div class="error-line" title="${esc(warning)}">${esc(warning)}</div>` : ''}${canReauth && reauthAction ? `<button class="provider-action" data-provider-action="${esc(reauthAction.action)}">${esc(reauthAction.label)}</button>` : ''}${lines || (!localHistory ? '<div class="empty-line">No live limits returned.</div>' : '')}${localHistory}</div></article>`;
   }).join('');
   sweepMetersIn();
 }
@@ -1703,6 +1718,40 @@ document.querySelectorAll('[data-page-back]').forEach(button => button.addEventL
   closeSettingsPage(button.closest('.page-view'));
 }));
 
+const copyLogsButton = $('#copy-logs-button');
+copyLogsButton?.addEventListener('click', async () => {
+  if (copyLogsButton.disabled) return;
+  copyLogsButton.disabled = true;
+  try {
+    const bundle = await withTimeout(
+      invoke('get_diagnostics_bundle'),
+      COMMAND_TIMEOUT_MS,
+      'The logs command did not respond.'
+    );
+    const text = typeof bundle === 'string' ? bundle : JSON.stringify(bundle, null, 2);
+    await copyTextToClipboard(text);
+    showStatus('Logs copied to clipboard.', STATUS_SHORT);
+  } catch (error) {
+    showStatus('Could not copy logs.', STATUS_LONG, error?.toString?.());
+  } finally {
+    copyLogsButton.disabled = false;
+  }
+});
+
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch (_) { /* fall through to the legacy path */ }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try { document.execCommand('copy'); } finally { textarea.remove(); }
+}
+
 const providerStatusTooltip = $('#provider-status-tooltip');
 function positionProviderStatusTooltip(clientX, clientY) {
   const gap = 12;
@@ -1751,14 +1800,21 @@ $('#customize-providers').addEventListener('focusout', event => {
 });
 
 $('#providers').addEventListener('click', async event => {
-  const button = event.target.closest('[data-provider-action="claude-login"]');
+  const button = event.target.closest('[data-provider-action]');
   if (!button) return;
+  const kind = button.dataset.providerAction;
+  if (kind !== 'claude-login' && kind !== 'antigravity-login') return;
   button.disabled = true;
   try {
-    await invoke('open_claude_login');
-    showStatus('Claude sign-in opened in a new terminal.');
+    if (kind === 'claude-login') {
+      await invoke('open_claude_login');
+      showStatus('Claude sign-in opened in a new terminal.');
+    } else {
+      await invoke('open_antigravity_login');
+      showStatus('Antigravity CLI opened in a new terminal. Finish sign-in there.');
+    }
   } catch (error) {
-    showStatus('Could not start Claude sign-in.', STATUS_LONG, error?.toString?.());
+    showStatus('Could not start provider sign-in.', STATUS_LONG, error?.toString?.());
   } finally {
     button.disabled = false;
   }
