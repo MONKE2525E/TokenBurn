@@ -428,6 +428,11 @@ public sealed class TaskbarOverlayController : IDisposable
         NativeMethods.GetWindowThreadProcessId(foreground, out var foregroundProcessId);
         if (foregroundProcessId == (uint)Environment.ProcessId) return false;
         if (!NativeMethods.IsWindowVisible(foreground) || NativeMethods.IsIconic(foreground)) return false;
+        // Shell/desktop windows (GetShellWindow, Progman, WorkerW) cover the whole monitor without
+        // being a fullscreen app. Clicking the desktop or pressing Win+D makes one of them the
+        // foreground window, which would otherwise hide the strip for no reason.
+        if (foreground == NativeMethods.GetShellWindow()) return false;
+        if (NativeMethods.GetWindowClassName(foreground) is "Progman" or "WorkerW") return false;
         if (!NativeMethods.GetWindowRect(foreground, out var windowRect)) return false;
         var window = new System.Drawing.Rectangle(
             windowRect.Left, windowRect.Top,
