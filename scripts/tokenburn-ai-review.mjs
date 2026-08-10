@@ -38,6 +38,10 @@ function redact(value) {
   return out.replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]+/gi, "$1REDACTED");
 }
 
+function sanitizeStateValue(value) {
+  return String(value || "").split("-->").join("").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").slice(0, 200);
+}
+
 async function github(pathname, init = {}) {
   const response = await fetch(pathname.startsWith("http") ? pathname : `${api}${pathname}`, {
     ...init,
@@ -238,7 +242,7 @@ async function main() {
       const raw = `${result?.stderr || ""}\n${result?.stdout || ""}`;
       const detail = redact(raw).replace(/\s+/g, " ").trim().slice(0, 400);
       console.error(`tokenburn review failed (${reason}): ${detail}`);
-      await updateState(number, stateComment, summary("failed", { reason }), { ...baseState, status: "failed", reason, detail: detail.slice(0, 200) });
+      await updateState(number, stateComment, summary("failed", { reason }), { ...baseState, status: "failed", reason, detail: sanitizeStateValue(detail) });
       process.exitCode = 1;
       return;
     }
