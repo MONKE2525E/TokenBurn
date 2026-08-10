@@ -285,7 +285,9 @@ function setOverlayOpen(element, open) {
 function closeHeaderPopovers() {
   setOverlayOpen($('#info-popover'), false);
   setOverlayOpen($('#metric-popover'), false);
-  setOverlayOpen($('#share-popover'), false);
+  // setShareMenu also resets shareMenuOpenedByPress, so a long-press release is never mistaken
+  // for a plain click after the menu was dismissed some other way.
+  setShareMenu(false);
   $('#metric-menu')?.setAttribute('aria-expanded', 'false');
 }
 
