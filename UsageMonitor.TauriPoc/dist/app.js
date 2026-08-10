@@ -346,7 +346,16 @@ function breakdownGroupedRows(rows) {
   const dayRows = Object.values(rows.reduce((map,row) => { const target = map[row.date] ||= { date:row.date, processed:0, costUsd:0, providers:{}, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.providers[row.providerId] = (target.providers[row.providerId] || 0) + (state.breakdownMetric === 'cost' ? Number(row.costUsd || 0) : row.processed || 0); return map; }, {}));
   const data = state.breakdownGrouping === 'model' ? modelRows : dayRows;
   const column = state.breakdownSort.column; const factor = state.breakdownSort.direction === 'asc' ? 1 : -1;
-  data.sort((a,b) => { const av = column === 'model' ? (a.modelId || a.providerName || '') : column === 'date' ? a.date : Number(a[column] || 0); const bv = column === 'model' ? (b.modelId || b.providerName || '') : column === 'date' ? b.date : Number(b[column] || 0); return typeof av === 'string' ? factor * av.localeCompare(bv) : factor * (av-bv); });
+  data.sort((a, b) => {
+    const sortValue = item => {
+      if (column === 'model') return item.modelId || item.providerName || '';
+      if (column === 'date') return item.date;
+      return Number(item[column] || 0);
+    };
+    const av = sortValue(a);
+    const bv = sortValue(b);
+    return typeof av === 'string' ? factor * av.localeCompare(bv) : factor * (av - bv);
+  });
   return { data, modelRows, dayRows };
 }
 
@@ -355,7 +364,13 @@ function breakdownBasisLabel(value) {
 }
 
 function breakdownDayQuality(row) {
-  return row.costBases.has('Unpriced') ? (row.costBases.size > 1 ? 'Partially priced' : 'Unpriced') : row.costBases.has('ProviderReported') ? (row.costBases.size > 1 ? 'Mixed pricing' : 'Provider reported') : 'Catalog estimated';
+  if (row.costBases.has('Unpriced')) {
+    return row.costBases.size > 1 ? 'Partially priced' : 'Unpriced';
+  }
+  if (row.costBases.has('ProviderReported')) {
+    return row.costBases.size > 1 ? 'Mixed pricing' : 'Provider reported';
+  }
+  return 'Catalog estimated';
 }
 
 // The usage page copies as dense text only: the same summary stats and ledger rows the page
@@ -2356,9 +2371,10 @@ function buildShareImage() {
   const rows = lastSpendRootRows;
   const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
   const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
-  const centerValue = state.metric === 'tokens' ? shareTokenCount(totalTokens)
-    : state.metric === 'cost' ? `$${compactNumber(totalCost)}`
-    : `$${(totalTokens > 0 ? totalCost / totalTokens * 1e6 : 0).toFixed(2)}`;
+  let centerValue;
+  if (state.metric === 'tokens') centerValue = shareTokenCount(totalTokens);
+  else if (state.metric === 'cost') centerValue = `$${compactNumber(totalCost)}`;
+  else centerValue = `$${(totalTokens > 0 ? totalCost / totalTokens * 1e6 : 0).toFixed(2)}`;
   const centerUnit = state.metric === 'tokens' ? 'tokens' : '';
   const margin = 32;
   const footerH = 40;
@@ -2439,9 +2455,10 @@ function buildShareImage() {
   ctx.moveTo(margin, SHARE_IMAGE_HEIGHT - footerH);
   ctx.lineTo(SHARE_IMAGE_WIDTH - margin, SHARE_IMAGE_HEIGHT - footerH);
   ctx.stroke();
-  const footer = state.metric === 'tokens' ? `Total ${shareTokenCount(totalTokens)} tokens`
-    : state.metric === 'cost' ? `Total $${totalCost.toFixed(2)}`
-    : `Total $${totalCost.toFixed(2)} · ${shareTokenCount(totalTokens)} tokens`;
+  let footer;
+  if (state.metric === 'tokens') footer = `Total ${shareTokenCount(totalTokens)} tokens`;
+  else if (state.metric === 'cost') footer = `Total $${totalCost.toFixed(2)}`;
+  else footer = `Total $${totalCost.toFixed(2)} · ${shareTokenCount(totalTokens)} tokens`;
   ctx.fillStyle = '#9ea0a8';
   ctx.font = '500 12px -apple-system,Segoe UI,sans-serif';
   ctx.fillText(footer, margin, SHARE_IMAGE_HEIGHT - 18);
