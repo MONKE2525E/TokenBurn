@@ -366,8 +366,8 @@ function breakdownShareText() {
   const cacheRate = input > 0 ? summary.cached / input : 0;
   const lines = [
     `TokenBurn · Usage · ${breakdownStart()} to ${dayKey(0)} (${breakdownDays()} days, local history only)`,
-    `Raw cost: ${formatCost(summary.cost)} (reported ${formatCost(summary.reportedCost)}, estimated ${formatCost(summary.modelPricedCost)}${summary.unpriced ? `, unpriced ${compactNumber(summary.unpriced)} tokens` : ''})`,
-    `Processed: ${compactNumber(summary.processed)} tokens · cached input ${compactNumber(summary.cached)} (${(cacheRate * 100).toFixed(1)}%) · uncached ${compactNumber(summary.uncached)} · cache creation ${compactNumber(summary.creation)} · output ${compactNumber(summary.output)}${summary.reasoning ? ` (${compactNumber(summary.reasoning)} reasoning)` : ''}`,
+    `Raw cost: ${formatCost(summary.cost)} (reported ${formatCost(summary.reportedCost)}, estimated ${formatCost(summary.modelPricedCost)}${summary.unpriced ? `, unpriced ${shareTokenCount(summary.unpriced)} tokens` : ''})`,
+    `Processed: ${shareTokenCount(summary.processed)} tokens · cached input ${shareTokenCount(summary.cached)} (${(cacheRate * 100).toFixed(1)}%) · uncached ${shareTokenCount(summary.uncached)} · cache creation ${shareTokenCount(summary.creation)} · output ${shareTokenCount(summary.output)}${summary.reasoning ? ` (${shareTokenCount(summary.reasoning)} reasoning)` : ''}`,
   ];
   if (summary.cacheSavings) lines.push(`Cache savings: ${formatCost(summary.cacheSavings)} (estimated with catalog rates)`);
   lines.push('');
@@ -382,16 +382,16 @@ function breakdownShareText() {
     data.forEach(row => {
       const modelLabel = row.modelId || `${row.providerName} aggregate`;
       const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed;
-      lines.push(`${modelLabel} | ${row.providerName} | ${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)} | ${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'} | ${compactNumber(row.processed)} | ${row.costBasis === 'Unpriced' || !row.processed ? '—' : formatCost(row.costUsd / row.processed * 1e6)} | ${breakdownBasisLabel(row.costBasis)}`);
+      lines.push(`${modelLabel} | ${row.providerName} | ${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)} | ${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'} | ${shareTokenCount(row.processed)} | ${row.costBasis === 'Unpriced' || !row.processed ? '—' : formatCost(row.costUsd / row.processed * 1e6)} | ${breakdownBasisLabel(row.costBasis)}`);
     });
   } else {
     const series = breakdownSeries(rows);
     lines.push(`By day (${metricLabel})`, ['Day', ...series.map(item => item.name), 'Total', 'Tokens', 'Pricing'].join(' | '));
     data.forEach(row => {
       const cells = [row.date,
-        ...series.map(item => state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)),
-        state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed),
-        compactNumber(row.processed), breakdownDayQuality(row)];
+        ...series.map(item => state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : shareTokenCount(row.providers[item.id] || 0)),
+        state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : shareTokenCount(row.processed),
+        shareTokenCount(row.processed), breakdownDayQuality(row)];
       lines.push(cells.join(' | '));
     });
   }
@@ -2326,10 +2326,16 @@ function compactShareText() {
   const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
   const lines = [`TokenBurn · ${periodRangeText()}`];
   lines.push(...rows.map(row => `${row.name} ${legendLabel(row)}`));
-  if (state.metric === 'tokens') lines.push(`Total ${compactNumber(totalTokens)} tokens`);
-  else if (state.metric === 'cost-mtok') lines.push(`Total $${totalCost.toFixed(2)} · ${compactNumber(totalTokens)} tokens`);
+  if (state.metric === 'tokens') lines.push(`Total ${shareTokenCount(totalTokens)} tokens`);
+  else if (state.metric === 'cost-mtok') lines.push(`Total $${totalCost.toFixed(2)} · ${shareTokenCount(totalTokens)} tokens`);
   else lines.push(`Total $${totalCost.toFixed(2)}`);
   return lines.join('\n');
+}
+
+// Token counts in copied text read better as whole numbers below 1K; compactNumber's two-decimal
+// fallback exists for cost figures like the ring center and would print "500.00 tokens".
+function shareTokenCount(number) {
+  return number >= 1e3 ? compactNumber(number) : String(Math.round(number || 0));
 }
 
 const SHARE_IMAGE_WIDTH = 800;
@@ -2347,7 +2353,7 @@ function buildShareImage() {
   const rows = lastSpendRootRows;
   const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
   const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
-  const centerValue = state.metric === 'tokens' ? compactNumber(totalTokens)
+  const centerValue = state.metric === 'tokens' ? shareTokenCount(totalTokens)
     : state.metric === 'cost' ? `$${compactNumber(totalCost)}`
     : `$${(totalTokens > 0 ? totalCost / totalTokens * 1e6 : 0).toFixed(2)}`;
   const centerUnit = state.metric === 'tokens' ? 'tokens' : '';
@@ -2430,9 +2436,9 @@ function buildShareImage() {
   ctx.moveTo(margin, SHARE_IMAGE_HEIGHT - footerH);
   ctx.lineTo(SHARE_IMAGE_WIDTH - margin, SHARE_IMAGE_HEIGHT - footerH);
   ctx.stroke();
-  const footer = state.metric === 'tokens' ? `Total ${compactNumber(totalTokens)} tokens`
+  const footer = state.metric === 'tokens' ? `Total ${shareTokenCount(totalTokens)} tokens`
     : state.metric === 'cost' ? `Total $${totalCost.toFixed(2)}`
-    : `Total $${totalCost.toFixed(2)} · ${compactNumber(totalTokens)} tokens`;
+    : `Total $${totalCost.toFixed(2)} · ${shareTokenCount(totalTokens)} tokens`;
   ctx.fillStyle = '#9ea0a8';
   ctx.font = '500 12px -apple-system,Segoe UI,sans-serif';
   ctx.fillText(footer, margin, SHARE_IMAGE_HEIGHT - 18);

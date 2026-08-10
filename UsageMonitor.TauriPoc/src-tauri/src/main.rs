@@ -280,8 +280,10 @@ fn dib_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
 }
 
 unsafe fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
-    let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len() + 1)
-        .map_err(|_| "GlobalAlloc failed".to_string())?;
+    // Exact size: clipboard consumers size binary formats via GlobalSize, and an extra
+    // uninitialized byte would be read as part of the DIB or PNG payload.
+    let handle =
+        GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|_| "GlobalAlloc failed".to_string())?;
     let locked = unsafe { GlobalLock(handle) };
     if locked.is_null() {
         let _ = GlobalFree(Some(handle));
@@ -1531,7 +1533,7 @@ mod tests {
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
     };
-    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 
     const MONITOR: LayoutRect = LayoutRect {
@@ -1750,6 +1752,7 @@ mod tests {
         let dib = dib_bytes(WIDTH, HEIGHT, &rgba);
         let text_bytes: Vec<u8> = "TokenBurn · test"
             .encode_utf16()
+            .chain(std::iter::once(0))
             .flat_map(|unit| unit.to_le_bytes())
             .collect();
         // A real 1x1 PNG so the read-back verifies the exact bytes a Chromium paste would decode.
@@ -1775,6 +1778,11 @@ mod tests {
             assert!(OpenClipboard(None).is_ok());
             let handle =
                 GetClipboardData(CF_UNICODETEXT.0 as u32).expect("text format must be present");
+            assert_eq!(
+                GlobalSize(HGLOBAL(handle.0)),
+                text_bytes.len(),
+                "the text allocation must be exactly the payload size, terminator included"
+            );
             let locked = GlobalLock(HGLOBAL(handle.0));
             assert!(!locked.is_null(), "text memory must lock");
             let copied = std::slice::from_raw_parts(locked.cast::<u8>(), text_bytes.len()).to_vec();
@@ -1791,6 +1799,11 @@ mod tests {
             );
 
             let handle = GetClipboardData(CF_DIB.0 as u32).expect("image format must be present");
+            assert_eq!(
+                GlobalSize(HGLOBAL(handle.0)),
+                dib.len(),
+                "the DIB allocation must be exactly the payload size"
+            );
             let locked = GlobalLock(HGLOBAL(handle.0));
             assert!(!locked.is_null(), "image memory must lock");
             let copied = std::slice::from_raw_parts(locked.cast::<u8>(), dib.len()).to_vec();
@@ -1798,6 +1811,11 @@ mod tests {
             assert_eq!(copied, dib, "the clipboard DIB must survive the round trip");
 
             let handle = GetClipboardData(png_format).expect("PNG format must be present");
+            assert_eq!(
+                GlobalSize(HGLOBAL(handle.0)),
+                png.len(),
+                "the PNG allocation must be exactly the payload size"
+            );
             let locked = GlobalLock(HGLOBAL(handle.0));
             assert!(!locked.is_null(), "PNG memory must lock");
             let copied = std::slice::from_raw_parts(locked.cast::<u8>(), png.len()).to_vec();

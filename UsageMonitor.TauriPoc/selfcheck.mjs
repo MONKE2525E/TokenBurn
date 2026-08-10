@@ -289,6 +289,8 @@ assert.match(styles, /\.share-menu \{ right: 44px;/, 'the share menu must stay a
 assert.match(source, /copyShareToClipboard\(null, canvas\)/, 'the image-only copy must omit the text placement');
 assert.match(source, /shareMenuOpenedByPress/, 'the share menu must open from a long press without firing the plain click copy');
 assert.match(source, /if \(shareMenuOpenedByPress\) \{\s*shareMenuOpenedByPress = false;\s*return;/, 'a long-press release must keep the share menu open instead of closing it');
+assert.match(source, /function shareTokenCount/, 'share texts must round token counts below 1K instead of printing 500.00');
+assert.match(source, /shareTokenCount\(summary\.unpriced\)/, 'unpriced token counts must use the rounded token formatter');
 assert.match(source, /const chunk = 0x4000;/, 'pixel chunking must stay under the apply() stack limit');
 assert.doesNotMatch(markup, /data-share-copy="breakdown"/, 'the usage page must keep its single text copy, no image menu');
 assert.match(source, /new ClipboardItem/, 'a web ClipboardItem fallback must remain for older binaries');
