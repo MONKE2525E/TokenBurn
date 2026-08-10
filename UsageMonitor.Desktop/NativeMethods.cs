@@ -127,6 +127,19 @@ internal static class NativeMethods
     internal static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr GetShellWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    internal static string? GetWindowClassName(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return null;
+        var builder = new System.Text.StringBuilder(256);
+        return GetClassName(hWnd, builder, builder.Capacity) > 0 ? builder.ToString() : null;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
