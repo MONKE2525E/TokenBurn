@@ -40,6 +40,7 @@ public sealed class TaskbarOverlayController : IDisposable
     private double _renderedScale;
     private double _renderedWidthDip;
     private bool _dragActive;
+    private bool _fullscreenActive;
     private string _dragMonitorId = string.Empty;
     private System.Drawing.Point _dragStartCursor;
     private System.Drawing.Rectangle _dragStartBounds;
@@ -252,6 +253,25 @@ public sealed class TaskbarOverlayController : IDisposable
             }
         }
 
+        // A fullscreen app covers the taskbar area of its monitor, but the strip is topmost and
+        // would float over the video/game in the corner. Hide it while the foreground window is
+        // fullscreen on the strip's monitor, and let the next reconcile show it again.
+        if (IsStripCoveredByFullscreen())
+        {
+            if (!_fullscreenActive)
+            {
+                _fullscreenActive = true;
+                LogState($"{reason}.fullscreen", "hide", System.Drawing.Rectangle.Empty, false, false, 0, _edgeOffsetDip);
+            }
+            _overlay.Hide();
+            return;
+        }
+        if (_fullscreenActive)
+        {
+            _fullscreenActive = false;
+            LogState($"{reason}.fullscreen-ended", "show", System.Drawing.Rectangle.Empty, false, false, 0, _edgeOffsetDip);
+        }
+
         var bounds = _placement.GetTaskbarBounds(_taskbarHandle);
         if (bounds.IsEmpty) return;
         var dpi = NativeMethods.GetDpiForWindow(_taskbarHandle);
@@ -396,6 +416,40 @@ public sealed class TaskbarOverlayController : IDisposable
         => monitorId.Equals(MonitorPlacementService.PrimaryMonitorId, StringComparison.OrdinalIgnoreCase) ||
            _placement.GetMonitors().Any(m => m.Id.Equals(monitorId, StringComparison.OrdinalIgnoreCase));
 
+    private bool IsStripCoveredByFullscreen()
+    {
+        if (_overlay is null || _taskbarHandle == IntPtr.Zero) return false;
+        var foreground = NativeMethods.GetForegroundWindow();
+        if (foreground == IntPtr.Zero || foreground == _overlay.Handle) return false;
+        NativeMethods.GetWindowThreadProcessId(foreground, out var foregroundProcessId);
+        if (foregroundProcessId == (uint)Environment.ProcessId) return false;
+        if (!NativeMethods.IsWindowVisible(foreground) || NativeMethods.IsIconic(foreground)) return false;
+        if (!NativeMethods.GetWindowRect(foreground, out var windowRect)) return false;
+        var window = new System.Drawing.Rectangle(
+            windowRect.Left, windowRect.Top,
+            windowRect.Right - windowRect.Left,
+            windowRect.Bottom - windowRect.Top);
+        if (window.IsEmpty) return false;
+
+        var stripMonitor = NativeMethods.MonitorFromWindow(_taskbarHandle, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        var foregroundMonitor = NativeMethods.MonitorFromWindow(foreground, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        if (stripMonitor == IntPtr.Zero || foregroundMonitor != stripMonitor) return false;
+
+        var info = new NativeMethods.MONITORINFO { Size = (uint)Marshal.SizeOf<NativeMethods.MONITORINFO>() };
+        if (!NativeMethods.GetMonitorInfo(foregroundMonitor, ref info)) return false;
+        var monitor = new System.Drawing.Rectangle(
+            info.Monitor.Left, info.Monitor.Top,
+            info.Monitor.Right - info.Monitor.Left,
+            info.Monitor.Bottom - info.Monitor.Top);
+        // Maximized windows stop at the working area; fullscreen windows cover the whole monitor
+        // including the taskbar band, which is exactly when the strip would overlap the app.
+        const int tolerance = 4;
+        return Math.Abs(window.Left - monitor.Left) <= tolerance &&
+               Math.Abs(window.Top - monitor.Top) <= tolerance &&
+               Math.Abs(window.Right - monitor.Right) <= tolerance &&
+               Math.Abs(window.Bottom - monitor.Bottom) <= tolerance;
+    }
+
     private void SetFallback(string message)
     {
         var wasAttached = IsAttached;
@@ -476,6 +530,7 @@ public sealed class TaskbarOverlayController : IDisposable
                 CalculatedPhysicalEdgeOffset = taskbarRight - intended.Right,
                 ForegroundHwnd = FormatHandle(foreground),
                 ForegroundProcess = foregroundProcess,
+                FullscreenActive = _fullscreenActive,
                 ZNeighborAbove = FormatHandle(above),
                 ZNeighborBelow = FormatHandle(below),
                 LayeredBitmapAlphaPixels = _overlay?.BitmapAlphaPixels ?? 0,
