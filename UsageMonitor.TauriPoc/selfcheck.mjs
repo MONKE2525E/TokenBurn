@@ -284,10 +284,12 @@ assert.match(source, /invoke\('copy_share', \{\s*payload: \{/, 'the native clipb
 assert.match(source, /pngBase64/, 'the share payload must include a PNG for Chromium paste targets');
 assert.match(source, /FileReader/, 'the PNG must be produced from the same canvas blob');
 assert.match(markup, /data-share-copy="image"/, 'the share menu must offer an image-only copy for text-first paste targets');
-assert.match(styles, /\.share-menu \{ position: absolute;/, 'the share menu must never take layout space inside the header (no forehead)');
-assert.match(styles, /\.share-menu \{ position: absolute;[\s\S]*?z-index: 4;/, 'the share menu must float above the dashboard content');
+assert.match(styles, /\.hint, \.metric-menu, \.share-menu \{/, 'the share menu must share the styled container group (background, border, shadow)');
+assert.match(styles, /\.share-menu \{ right: 44px;/, 'the share menu must stay anchored to the share button');
 assert.match(source, /copyShareToClipboard\(null, canvas\)/, 'the image-only copy must omit the text placement');
 assert.match(source, /shareMenuOpenedByPress/, 'the share menu must open from a long press without firing the plain click copy');
+assert.match(source, /if \(shareMenuOpenedByPress\) \{\s*shareMenuOpenedByPress = false;\s*return;/, 'a long-press release must keep the share menu open instead of closing it');
+assert.match(source, /const chunk = 0x4000;/, 'pixel chunking must stay under the apply() stack limit');
 assert.doesNotMatch(markup, /data-share-copy="breakdown"/, 'the usage page must keep its single text copy, no image menu');
 assert.match(source, /new ClipboardItem/, 'a web ClipboardItem fallback must remain for older binaries');
 assert.match(source, /state\.view === 'breakdown'/, 'the share button must dispatch on the current view');

@@ -1261,14 +1261,19 @@ shareButton.addEventListener('pointerdown', () => {
 shareButton.addEventListener('pointerup', () => clearTimeout(sharePressTimer));
 shareButton.addEventListener('pointerleave', () => clearTimeout(sharePressTimer));
 shareButton.addEventListener('click', async () => {
+  // A long press releases as a click. Keep the menu open instead of instantly closing it.
+  if (shareMenuOpenedByPress) {
+    shareMenuOpenedByPress = false;
+    return;
+  }
+  if ($('#share-popover').classList.contains('is-open')) {
+    setShareMenu(false);
+    return;
+  }
   closeHeaderPopovers();
   if (state.view === 'breakdown') {
     const ok = await copyTextToClipboard(breakdownShareText());
     showStatus(ok ? 'Copied usage breakdown' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
-    return;
-  }
-  if (shareMenuOpenedByPress) {
-    setShareMenu(false);
     return;
   }
   await copyCompactSummary();
@@ -2445,7 +2450,9 @@ async function copyShareToClipboard(text, canvas) {
   try {
     const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
     let binary = '';
-    const chunk = 0x8000;
+    // apply() with a very large argument list can exhaust the call stack on some engines; 16K
+    // elements per call is comfortably below the limits of every WebView2/WebKit build.
+    const chunk = 0x4000;
     for (let index = 0; index < pixels.length; index += chunk) {
       binary += String.fromCharCode.apply(null, pixels.subarray(index, index + chunk));
     }

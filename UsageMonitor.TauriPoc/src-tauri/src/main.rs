@@ -292,6 +292,24 @@ unsafe fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
     Ok(handle)
 }
 
+// Allocates every clipboard piece up front. A failure part-way must not leak the handles already
+// allocated, so any successful allocations are freed before the error is returned.
+fn alloc_global_pieces(pieces: &[(u32, Vec<u8>)]) -> Result<Vec<(u32, HGLOBAL)>, String> {
+    let mut placements = Vec::with_capacity(pieces.len());
+    for (format, bytes) in pieces {
+        match unsafe { alloc_global_bytes(bytes) } {
+            Ok(handle) => placements.push((*format, handle)),
+            Err(error) => {
+                for (_, handle) in &placements {
+                    let _ = unsafe { GlobalFree(Some(*handle)) };
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(placements)
+}
+
 #[tauri::command]
 fn copy_share(payload: ShareClipboardPayload) -> Result<(), String> {
     use base64::Engine;
@@ -315,25 +333,26 @@ fn copy_share(payload: ShareClipboardPayload) -> Result<(), String> {
         .decode(&payload.png_base64)
         .map_err(|_| "share image PNG is not valid base64")?;
 
-    // (clipboard format, allocated handle). Handles the clipboard accepts are owned by the system
+    // (clipboard format, payload bytes). Handles the clipboard accepts are owned by the system
     // once SetClipboardData succeeds; rejected ones must be freed by us. Text is optional: an
     // image-only copy skips CF_UNICODETEXT so text-first paste targets attach the chart.
-    let mut placements = Vec::with_capacity(3);
+    // CF_UNICODETEXT consumers read until a UTF-16 null terminator, so the text carries one.
+    let mut pieces = Vec::with_capacity(3);
     if let Some(text) = &payload.text {
         let text_bytes: Vec<u8> = text
             .encode_utf16()
+            .chain(std::iter::once(0))
             .flat_map(|unit| unit.to_le_bytes())
             .collect();
-        placements.push((CF_UNICODETEXT.0 as u32, unsafe {
-            alloc_global_bytes(&text_bytes)
-        }?));
+        pieces.push((CF_UNICODETEXT.0 as u32, text_bytes));
     }
     let dib = dib_bytes(payload.width, payload.height, &rgba);
-    placements.push((CF_DIB.0 as u32, unsafe { alloc_global_bytes(&dib) }?));
+    pieces.push((CF_DIB.0 as u32, dib));
     let png_format = png_clipboard_format();
     if png_format != 0 {
-        placements.push((png_format, unsafe { alloc_global_bytes(&png) }?));
+        pieces.push((png_format, png));
     }
+    let placements = alloc_global_pieces(&pieces)?;
 
     unsafe {
         if OpenClipboard(None).is_err() {
@@ -1764,10 +1783,11 @@ mod tests {
                 .chunks_exact(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect::<Vec<u16>>();
+            let units = units.strip_suffix(&[0u16]).unwrap_or(&units);
             assert_eq!(
-                String::from_utf16(&units).unwrap(),
+                String::from_utf16(units).unwrap(),
                 "TokenBurn · test",
-                "pasted text must survive the round trip"
+                "pasted text must survive the round trip (with a null terminator)"
             );
 
             let handle = GetClipboardData(CF_DIB.0 as u32).expect("image format must be present");
