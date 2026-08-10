@@ -28,6 +28,7 @@ public sealed class TauriPopupBridge : IDisposable
     private readonly Func<Task> _forceRefresh;
     private readonly Func<string> _getSettingsPageData;
     private readonly Func<string, bool> _applySettingsPageData;
+    private readonly Func<string> _getDiagnosticsBundle;
     private readonly Func<string, bool> _setSpendMetric;
     private readonly Action<bool> _setPopupVisibility;
     private Process? _process;
@@ -44,6 +45,7 @@ public sealed class TauriPopupBridge : IDisposable
         Func<Task> forceRefresh,
         Func<string> getSettingsPageData,
         Func<string, bool> applySettingsPageData,
+        Func<string> getDiagnosticsBundle,
         Func<string, bool> setSpendMetric,
         Action<bool> setPopupVisibility)
     {
@@ -54,6 +56,7 @@ public sealed class TauriPopupBridge : IDisposable
         _forceRefresh = forceRefresh ?? throw new ArgumentNullException(nameof(forceRefresh));
         _getSettingsPageData = getSettingsPageData ?? throw new ArgumentNullException(nameof(getSettingsPageData));
         _applySettingsPageData = applySettingsPageData ?? throw new ArgumentNullException(nameof(applySettingsPageData));
+        _getDiagnosticsBundle = getDiagnosticsBundle ?? throw new ArgumentNullException(nameof(getDiagnosticsBundle));
         _setSpendMetric = setSpendMetric ?? throw new ArgumentNullException(nameof(setSpendMetric));
         _setPopupVisibility = setPopupVisibility ?? throw new ArgumentNullException(nameof(setPopupVisibility));
     }
@@ -184,6 +187,12 @@ public sealed class TauriPopupBridge : IDisposable
                 var ids = _enabledProviderIds();
                 var body = JsonSerializer.SerializeToUtf8Bytes(ids);
                 await WriteJsonResponseAsync(stream, "200 OK", body).ConfigureAwait(false);
+                return;
+            }
+            if (string.Equals(path, "/diagnostics-bundle", StringComparison.OrdinalIgnoreCase))
+            {
+                var json = _getDiagnosticsBundle();
+                await WriteJsonResponseAsync(stream, "200 OK", Encoding.UTF8.GetBytes(json)).ConfigureAwait(false);
                 return;
             }
             if (string.Equals(path, "/refresh-status", StringComparison.OrdinalIgnoreCase))

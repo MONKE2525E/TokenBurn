@@ -74,6 +74,10 @@ public static class ModelPricingCatalog
     public static ModelPrice? TryResolve(string? providerId, string? model)
     {
         var normalized = Normalize(model);
+        // Free-routed models are free. This must beat the remote catalog's family matching: a
+        // "deepseek-v4-flash" entry would otherwise price its "-free" sibling.
+        if (normalized.Contains("-free", StringComparison.OrdinalIgnoreCase))
+            return new ModelPrice(0, 0, 0);
         var exactMatches = _remote.Where(entry => entry.Price is not null && ModelMatches(entry.ModelId, normalized)).ToArray();
         var matches = exactMatches.Length > 0
             ? exactMatches

@@ -92,7 +92,7 @@ public sealed class OpenCodeHistoryTests
             var breakdown = Assert.Single(history.Breakdown);
 
             Assert.Equal(20_285, Point(snapshot, new DateOnly(2026, 8, 7)).Tokens);
-            Assert.Equal("opencode-go", breakdown.ProviderId);
+            Assert.Equal(ProviderIds.OpenCode, breakdown.ProviderId);
             Assert.Equal("kimi-k3", breakdown.ModelId);
             Assert.Equal(17_906, breakdown.UncachedInputTokens);
             Assert.Equal(114, breakdown.OutputTokens);
@@ -146,7 +146,7 @@ public sealed class OpenCodeHistoryTests
     }
 
     [Fact]
-    public async Task NonzeroProviderCostTakesPrecedenceOverTheCatalogEstimate()
+    public async Task CatalogEstimateTakesPrecedenceOverPersistedLocalCost()
     {
         var root = NewRoot();
         try
@@ -160,8 +160,53 @@ public sealed class OpenCodeHistoryTests
                 new FixedModelCatalog("priced-model", new ModelPrice(100, 100, 100)));
             var breakdown = Assert.Single(snapshot.UsageHistory!.Breakdown);
 
-            Assert.Equal(1.23, Point(snapshot, new DateOnly(2026, 8, 7)).CostUsd, 6);
-            Assert.Equal(UsageCostBasis.ProviderReported, breakdown.CostBasis);
+            // OpenCode's persisted local cost is unreliable (it has been exactly half the market
+            // rate for some models), so a known catalog price wins over the persisted value.
+            Assert.Equal(100, Point(snapshot, new DateOnly(2026, 8, 7)).CostUsd, 6);
+            Assert.Equal(UsageCostBasis.CatalogEstimated, breakdown.CostBasis);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public async Task HalvedDeepseekLocalCostIsReplacedByTheCatalogRate()
+    {
+        var root = NewRoot();
+        try
+        {
+            var now = Local(2026, 8, 8, 12);
+            // Shape copied from real opencode-go/deepseek-v4-flash rows: the persisted cost is
+            // exactly half the market estimate for the same tokens.
+            var database = CreateDatabase(root,
+                Message(Local(2026, 8, 7, 17), "opencode-go", "deepseek-v4-flash", 0.000152012, 25_081,
+                    input: 1_104, cacheRead: 23_680, output: 104, reasoning: 193));
+            var catalog = new FixedModelCatalog("deepseek-v4-flash", new ModelPrice(.14, .0028, .28));
+
+            var snapshot = await Refresh(database, now, catalog);
+            var breakdown = Assert.Single(snapshot.UsageHistory!.Breakdown);
+
+            Assert.Equal(0.000304024, Point(snapshot, new DateOnly(2026, 8, 7)).CostUsd, 9);
+            Assert.Equal(UsageCostBasis.CatalogEstimated, breakdown.CostBasis);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public async Task FreeRoutedModelIsPricedAtZeroInsteadOfMatchingThePaidFamily()
+    {
+        var root = NewRoot();
+        try
+        {
+            var now = Local(2026, 8, 8, 12);
+            var database = CreateDatabase(root,
+                Message(Local(2026, 8, 7, 17), "opencode", "deepseek-v4-flash-free", 0, 10_000,
+                    input: 5_000, output: 5_000));
+
+            var snapshot = await Refresh(database, now);
+            var point = Point(snapshot, new DateOnly(2026, 8, 7));
+
+            // The -free sibling must not inherit the paid deepseek-v4-flash rate.
+            Assert.Equal(0, point.CostUsd, 6);
         }
         finally { DeleteRoot(root); }
     }

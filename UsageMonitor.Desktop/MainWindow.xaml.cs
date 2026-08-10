@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private ISecretStore? _secretStore;
     private CachedModelCatalog? _modelCatalog;
     private readonly ResetNotificationScheduler _resetNotifications = new();
+    private DateTimeOffset _sessionStartedAt = DateTimeOffset.UtcNow;
     private readonly System.Windows.Threading.DispatcherTimer _refreshTimer;
     private Task? _refreshTask;
     private bool _refreshInFlight;
@@ -49,7 +50,9 @@ public partial class MainWindow : Window
     // Keep the last successful provider envelope in memory so an auth or network failure cannot
     // erase a previously visible quota bar during the next five-minute refresh.
     private readonly Dictionary<string, UsageSnapshotData> _lastGoodSnapshots = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ResetRecoveryState> _resetRecovery = new(StringComparer.OrdinalIgnoreCase);
+    // Providers that already surfaced a re-authentication notification for the current failure
+    // episode. Cleared when the provider recovers so a future failure notifies again.
+    private readonly HashSet<string> _authFailureNotified = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<UsageSnapshotData> _latestSnapshots = Array.Empty<UsageSnapshotData>();
     private DateTimeOffset _nextRefreshAt = DateTimeOffset.Now;
     internal IUsageProviderCatalog? SnapshotCatalog { get; private set; }
@@ -93,61 +96,15 @@ public partial class MainWindow : Window
     private void RefreshTimerTick()
     {
         UpdateRefreshCountdown();
-        var dueResets = _resetNotifications.Tick(DateTimeOffset.UtcNow, notification =>
+        _resetNotifications.Tick(DateTimeOffset.UtcNow, notification =>
             _tray?.ShowQuotaNotification($"{notification.DisplayName} {notification.MetricLabel} reset."));
-        if (dueResets > 0 && !_refreshInFlight)
-        {
-            RefreshData(force: true);
-            return;
-        }
-        if (!_refreshInFlight && ShouldRecoverExpiredReset())
-        {
-            RefreshData(force: true);
-            return;
-        }
+        // A reset notification fires for user awareness; the quota data is refreshed by the
+        // scheduled stale-while-revalidate cycle. A forced refresh here used to re-run every
+        // provider's full network + history work on each reset boundary and immediately after
+        // startup, which is where the multi-second forced refreshes and the CPU spikes came from.
         if (!_refreshInFlight && DateTimeOffset.Now >= _nextRefreshAt)
             RefreshData();
     }
-
-    private bool ShouldRecoverExpiredReset()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var due = new List<(string Key, DateTimeOffset ResetAt)>();
-        foreach (var snapshot in _latestSnapshots)
-        {
-            // A provider warning means these are cached limits, not a confirmed post-reset
-            // response. Retrying on every expired cached timestamp creates a refresh loop when
-            // the provider is rate-limited or its OAuth session is temporarily unavailable.
-            if (!string.IsNullOrWhiteSpace(snapshot.Warning) || !string.IsNullOrWhiteSpace(snapshot.Error))
-                continue;
-
-            foreach (var metric in snapshot.Lines.OfType<ProgressMetricData>())
-            {
-                if (metric.ResetsAt is not { } resetAt || resetAt > now || snapshot.FetchedAt < resetAt) continue;
-                due.Add(($"{snapshot.ProviderId}:{metric.Label}", resetAt));
-            }
-        }
-
-        var shouldRefresh = false;
-        foreach (var (key, resetAt) in due)
-        {
-            if (!_resetRecovery.TryGetValue(key, out var state) || state.ResetAt != resetAt)
-                state = new ResetRecoveryState(resetAt, now, 0);
-            if (now >= state.NextAttemptAt)
-            {
-                state = state with
-                {
-                    Attempts = state.Attempts + 1,
-                    NextAttemptAt = now.AddSeconds(Math.Min(60, 5 * Math.Pow(2, Math.Min(state.Attempts, 4))))
-                };
-                shouldRefresh = true;
-            }
-            _resetRecovery[key] = state;
-        }
-        return shouldRefresh;
-    }
-
-    private sealed record ResetRecoveryState(DateTimeOffset ResetAt, DateTimeOffset NextAttemptAt, int Attempts);
 
     private void UpdateRefreshCountdown()
     {
@@ -202,7 +159,13 @@ public partial class MainWindow : Window
         _cache = new JsonFileUsageCache(logger: logger);
         _secretStore = new CredentialManagerSecretStore(logger: logger);
         _snapshotSource = new CoreUsageSnapshotSource(catalog, _cache,
-            new ProviderContext { Secrets = _secretStore, Logger = logger, ModelCatalog = _modelCatalog });
+            new ProviderContext
+            {
+                Secrets = _secretStore,
+                Logger = logger,
+                ModelCatalog = _modelCatalog,
+                CacheDirectory = UsageMonitorPaths.Current.CacheDirectory
+            });
         ApplySettings(_settings);
         StartRefreshLoop();
     }
@@ -504,26 +467,30 @@ public partial class MainWindow : Window
         }
     }
 
-    public async void RefreshData(bool force = false)
-        => await RefreshDataAsync(force);
+    public async void RefreshData(bool force = false, string? reason = null)
+        => await RefreshDataAsync(force, reason);
 
-    internal Task RefreshDataAsync(bool force = false)
+    internal Task RefreshDataAsync(bool force = false, string? reason = null)
     {
         if (_refreshTask is { IsCompleted: false }) return _refreshTask;
-        _refreshTask = RefreshDataCoreAsync(force);
+        _refreshTask = RefreshDataCoreAsync(force, reason);
         return _refreshTask;
     }
 
-    private async Task RefreshDataCoreAsync(bool force)
+    private async Task RefreshDataCoreAsync(bool force, string? reason)
     {
         _refreshInFlight = true;
         RefreshButton.IsEnabled = false;
         UpdateRefreshCountdown();
+        var stopwatch = Stopwatch.StartNew();
+        new FileDiagnosticsLogger().Info("Provider refresh started",
+            new Dictionary<string, object?> { ["force"] = force, ["reason"] = reason });
         try
         {
             var snapshots = _snapshotSource is null
                 ? Array.Empty<UsageSnapshotData>()
                 : await _snapshotSource.GetSnapshotsAsync(null, force);
+            var snapshotFetchMs = stopwatch.ElapsedMilliseconds;
             var effectiveSnapshots = snapshots.Select(snapshot =>
             {
                 if (snapshot.Error is null)
@@ -537,8 +504,20 @@ public partial class MainWindow : Window
                     var warning = string.IsNullOrWhiteSpace(snapshot.Error)
                         ? "Refresh failed. Showing the last good limits."
                         : snapshot.Error;
+                    // Carry the error badge next to the last good bars. The taskbar filter treats
+                    // an errored snapshot with no badge as a placeholder and drops the provider
+                    // until the next clean refresh; that is exactly the reported "Antigravity
+                    // disappears after a manual refresh" bug.
+                    var lines = lastGood.Lines;
+                    if (!lines.Any(line => line is BadgeMetricData badge &&
+                        badge.Label.Equals(MetricLine.ErrorBadgeLabel, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        lines = lines.Append(new BadgeMetricData(MetricLine.ErrorBadgeLabel, snapshot.Error, "#EF4444"))
+                            .ToArray();
+                    }
                     return lastGood with
                     {
+                        Lines = lines,
                         Error = snapshot.Error,
                         ErrorCategory = snapshot.ErrorCategory,
                         Warning = warning,
@@ -551,16 +530,7 @@ public partial class MainWindow : Window
             _latestSnapshots = effectiveSnapshots;
             _resetNotifications.Observe(effectiveSnapshots, _settings.NotificationsEnabled,
                 _settings.NotificationProviderIds, DateTimeOffset.UtcNow);
-            foreach (var key in _resetRecovery.Keys.ToArray())
-            {
-                var separator = key.IndexOf(':');
-                var provider = separator < 0 ? key : key[..separator];
-                var label = separator < 0 ? string.Empty : key[(separator + 1)..];
-                var fresh = effectiveSnapshots.FirstOrDefault(x => x.ProviderId.Equals(provider, StringComparison.OrdinalIgnoreCase))?.Lines
-                    .OfType<ProgressMetricData>().FirstOrDefault(x => x.Label.Equals(label, StringComparison.OrdinalIgnoreCase));
-                if (fresh?.ResetsAt is { } reset && reset > DateTimeOffset.UtcNow)
-                    _resetRecovery.Remove(key);
-            }
+            NotifyAuthFailures(effectiveSnapshots);
             var enabledProviders = DashboardData.ActiveProviders.Where(provider => IsProviderEnabled(provider.Id)).ToList();
             var refreshedCards = new List<ProviderCardDisplay>(enabledProviders.Count);
             foreach (var provider in enabledProviders)
@@ -597,8 +567,12 @@ public partial class MainWindow : Window
                 : Visibility.Collapsed;
             UpdateRefreshCountdown();
             var statusMetrics = BuildStatusMetrics(enabledSnapshots);
+            var taskbarStopwatch = Stopwatch.StartNew();
             _tray?.UpdateMetrics(statusMetrics);
             _taskbar?.UpdateMetrics(statusMetrics);
+            var taskbarMs = taskbarStopwatch.ElapsedMilliseconds;
+            LogProviderResults(effectiveSnapshots, stopwatch.ElapsedMilliseconds, statusMetrics.Count,
+                snapshotFetchMs, taskbarMs);
         }
         catch (Exception ex)
         {
@@ -606,12 +580,60 @@ public partial class MainWindow : Window
             _nextRefreshAt = DateTimeOffset.Now.AddMinutes(1);
             UpdateRefreshCountdown();
             _tray?.ShowFallbackNotification("Provider refresh failed. Check the local diagnostics log.");
-            new FileDiagnosticsLogger().Warning("Desktop refresh failed", exception: ex);
+            new FileDiagnosticsLogger().Warning("Desktop refresh failed",
+                new Dictionary<string, object?> { ["force"] = force, ["reason"] = reason, ["elapsedMs"] = stopwatch.ElapsedMilliseconds }, ex);
         }
         finally
         {
             _refreshInFlight = false;
             RefreshButton.IsEnabled = true;
+        }
+    }
+
+    private static void LogProviderResults(IReadOnlyList<UsageSnapshotData> snapshots, long elapsedMs, int taskbarMetrics,
+        long snapshotFetchMs, long taskbarUpdateMs)
+    {
+        new FileDiagnosticsLogger().Info("Provider refresh completed",
+            new Dictionary<string, object?>
+            {
+                ["elapsedMs"] = elapsedMs,
+                ["snapshotFetchMs"] = snapshotFetchMs,
+                ["taskbarUpdateMs"] = taskbarUpdateMs,
+                ["taskbarMetrics"] = taskbarMetrics,
+                ["providers"] = snapshots.Select(snapshot => new Dictionary<string, object?>
+                {
+                    ["providerId"] = snapshot.ProviderId,
+                    ["errorCategory"] = snapshot.ErrorCategory,
+                    ["hasError"] = !string.IsNullOrWhiteSpace(snapshot.Error),
+                    ["hasWarning"] = !string.IsNullOrWhiteSpace(snapshot.Warning),
+                    ["metricCount"] = snapshot.Lines.Count,
+                    ["errorBadgeLines"] = snapshot.Lines.OfType<BadgeMetricData>()
+                        .Count(badge => badge.Label.Equals(MetricLine.ErrorBadgeLabel, StringComparison.OrdinalIgnoreCase)),
+                    ["taskbarConfigured"] = TaskbarMetricFilter.IsConfigured(snapshot),
+                    ["historyPoints"] = snapshot.UsageHistory?.Points.Count ?? 0
+                }).ToArray()
+            });
+    }
+
+    private void NotifyAuthFailures(IReadOnlyList<UsageSnapshotData> snapshots)
+    {
+        foreach (var snapshot in snapshots)
+        {
+            var isEnabled = IsProviderEnabled(snapshot.ProviderId);
+            var isAuthFailure = snapshot.ErrorCategory is not null &&
+                (snapshot.ErrorCategory.Equals(nameof(ProviderErrorCategory.Authentication), StringComparison.OrdinalIgnoreCase) ||
+                 snapshot.ErrorCategory.Equals(nameof(ProviderErrorCategory.Authorization), StringComparison.OrdinalIgnoreCase));
+            if (isEnabled && isAuthFailure)
+            {
+                // Surface a re-authentication prompt once per failure episode; the taskbar keeps
+                // showing the last-known-good quota so the provider never disappears.
+                if (_authFailureNotified.Add(snapshot.ProviderId))
+                    _tray?.ShowAuthNotification($"{snapshot.DisplayName} needs re-authentication. {snapshot.Error ?? "Run the provider's login command and refresh."}");
+            }
+            else if (isEnabled)
+            {
+                _authFailureNotified.Remove(snapshot.ProviderId);
+            }
         }
     }
 
@@ -766,6 +788,11 @@ public partial class MainWindow : Window
             hasError &&
             Regex.IsMatch(snapshot.Error ?? string.Empty, "auth|login|expired|signed out|not configured",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var canRepairAntigravity = provider.DisplayName.Equals("Antigravity", StringComparison.OrdinalIgnoreCase) &&
+            hasError &&
+            Regex.IsMatch(snapshot.Error ?? string.Empty, "sign.?in|expired|auth|login",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var hasAction = canRepairClaude || canRepairAntigravity;
         return card with
         {
             ProviderId = provider.Id,
@@ -774,36 +801,53 @@ public partial class MainWindow : Window
             LogoGeometry = WidgetWindow.GetProviderGeometry(provider.Id),
             AlwaysMetrics = always,
             OnDemandMetrics = onDemand,
-            HasAction = canRepairClaude,
-            ActionLabel = canRepairClaude ? "Open Claude sign-in" : string.Empty
+            HasAction = hasAction,
+            ActionLabel = canRepairClaude
+                ? "Open Claude sign-in"
+                : canRepairAntigravity
+                    ? "Run agy to sign in"
+                    : string.Empty
         };
     }
 
     private void ProviderAction_OnClick(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: ProviderCardDisplay card } ||
-            !card.Provider.Equals("Claude Code", StringComparison.OrdinalIgnoreCase)) return;
+        if (sender is not FrameworkElement { DataContext: ProviderCardDisplay card }) return;
 
         try
         {
-            // Let Claude Code own its browser/device flow. TokenBurn never handles or copies
-            // the OAuth response, and the separate console makes the action explicit on Windows.
-            var loginProcess = Process.Start(ClaudeLoginCommand.CreateStartInfo());
-            LastUpdatedText.Text = "Claude sign-in opened. Finish it, then TokenBurn will refresh.";
-            if (loginProcess is not null)
+            if (card.Provider.Equals("Claude Code", StringComparison.OrdinalIgnoreCase))
             {
-                loginProcess.EnableRaisingEvents = true;
-                loginProcess.Exited += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    if (!_refreshInFlight) RefreshData(force: true);
-                }), System.Windows.Threading.DispatcherPriority.Background);
+                // Let Claude Code own its browser/device flow. TokenBurn never handles or copies
+                // the OAuth response, and the separate console makes the action explicit on Windows.
+                var loginProcess = Process.Start(ClaudeLoginCommand.CreateStartInfo());
+                LastUpdatedText.Text = "Claude sign-in opened. Finish it, then TokenBurn will refresh.";
+                AttachRefreshOnExit(loginProcess);
+            }
+            else if (card.Provider.Equals("Antigravity", StringComparison.OrdinalIgnoreCase))
+            {
+                // Launch the Antigravity CLI so the user can complete the browser sign-in flow in
+                // its own console. TokenBurn never touches the OAuth response.
+                var loginProcess = Process.Start(AntigravityLoginCommand.CreateStartInfo());
+                LastUpdatedText.Text = "Antigravity CLI opened. Finish sign-in, then TokenBurn will refresh.";
+                AttachRefreshOnExit(loginProcess);
             }
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
-            System.Windows.MessageBox.Show("Claude Code could not be launched. Run `claude auth login` in a terminal, then refresh TokenBurn.",
-                "Claude Code sign-in", MessageBoxButton.OK, MessageBoxImage.Information);
+            System.Windows.MessageBox.Show("The provider CLI could not be launched. Run it in a terminal, then refresh TokenBurn.",
+                "Provider sign-in", MessageBoxButton.OK, MessageBoxImage.Information);
         }
+    }
+
+    private void AttachRefreshOnExit(Process? process)
+    {
+        if (process is null) return;
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!_refreshInFlight) RefreshData(force: true, reason: "post-login");
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     private bool IsStarred(MetricDisplay metric)
@@ -1014,7 +1058,7 @@ public partial class MainWindow : Window
     }
 
     public void ShowUpdateStatus() => System.Windows.MessageBox.Show("The update channel is not configured for this unsigned development build. No network request was made. Install a signed release when a feed is available.", "TokenBurn updates", MessageBoxButton.OK, MessageBoxImage.Information);
-    private void RefreshButton_OnClick(object sender, RoutedEventArgs e) => RefreshData(force: true);
+    private void RefreshButton_OnClick(object sender, RoutedEventArgs e) => RefreshData();
     private void SettingsButton_OnClick(object sender, RoutedEventArgs e) => ShowSettings();
 
     private void OptionsButton_OnClick(object sender, RoutedEventArgs e)
@@ -1090,6 +1134,115 @@ public partial class MainWindow : Window
             metricNames = CustomizableMetricNames
         };
         return JsonSerializer.Serialize(payload, SettingsPageJsonOptions);
+    }
+
+    /// <summary>
+    /// Builds a redacted, self-contained diagnostics snapshot for the Settings "Copy logs" button.
+    /// Everything is already scrubbed by the file logger or the settings surface; provider data is
+    /// limited to status metadata and counts, never prompts, bodies, or credentials.
+    /// </summary>
+    internal string BuildDiagnosticsBundleJson()
+    {
+        var snapshotsByProvider = _latestSnapshots.ToDictionary(snapshot => snapshot.ProviderId,
+            StringComparer.OrdinalIgnoreCase);
+        var providers = DashboardData.Providers.Select(provider =>
+        {
+            snapshotsByProvider.TryGetValue(provider.Id, out var snapshot);
+            return new
+            {
+                id = provider.Id,
+                displayName = provider.DisplayName,
+                enabled = IsProviderEnabled(provider.Id),
+                error = snapshot?.Error,
+                errorCategory = snapshot?.ErrorCategory,
+                warning = snapshot?.Warning,
+                fetchedAt = snapshot?.FetchedAt,
+                metricCount = snapshot?.Lines.Count ?? 0,
+                historyPoints = snapshot?.UsageHistory?.Points.Count ?? 0,
+                historyCostUsd = snapshot?.UsageHistory?.TotalCostUsd ?? 0,
+                unknownModels = snapshot?.UsageHistory?.UnknownModels
+            };
+        }).ToArray();
+        var claude = SnapshotCatalog?.Find(ProviderIds.ClaudeCode) as ClaudeProvider;
+        var payload = new
+        {
+            generatedAt = DateTimeOffset.UtcNow,
+            sessionStartedAt = _sessionStartedAt,
+            logTail = ReadDiagnosticsLogTail(),
+            refresh = new
+            {
+                nextRefreshAt = _nextRefreshAt,
+                inFlight = _refreshInFlight
+            },
+            settings = _settings,
+            providers,
+            claudeRateLimitedUntil = claude?.RateLimitedUntil,
+            pricingCatalogFile = DescribeFile(Path.Combine(UsageMonitorPaths.Current.PricingDirectory, "model-catalog.json")),
+            cache = DescribeCacheDirectory()
+        };
+        return JsonSerializer.Serialize(payload, SettingsPageJsonOptions);
+    }
+
+    private static IReadOnlyList<object?> ReadDiagnosticsLogTail(int maxLines = 600)
+    {
+        try
+        {
+            var path = UsageMonitorPaths.Current.DiagnosticsLogFile;
+            if (!File.Exists(path)) return [];
+            var lines = File.ReadAllLines(path);
+            var tail = lines.Length > maxLines ? lines[^maxLines..] : lines;
+            var entries = new List<object?>(tail.Length);
+            foreach (var line in tail)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    if (document.RootElement.ValueKind == JsonValueKind.Object)
+                        entries.Add(document.RootElement.Clone());
+                }
+                catch (JsonException)
+                {
+                    entries.Add(new { raw = SensitiveDataRedactor.Redact(line) });
+                }
+            }
+            return entries;
+        }
+        catch (IOException) { return []; }
+        catch (UnauthorizedAccessException) { return []; }
+    }
+
+    private static object? DescribeCacheDirectory()
+    {
+        try
+        {
+            var directory = UsageMonitorPaths.Current.CacheDirectory;
+            if (!Directory.Exists(directory)) return null;
+            var files = Directory.EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly)
+                .Select(path =>
+                {
+                    var info = new FileInfo(path);
+                    return new { name = info.Name, bytes = info.Length, lastWriteUtc = info.LastWriteTimeUtc };
+                })
+                .OrderByDescending(file => file.lastWriteUtc)
+                .Take(20)
+                .ToArray();
+            return new { fileCount = files.Length, files };
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private static object? DescribeFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var info = new FileInfo(path);
+            return new { name = info.Name, bytes = info.Length, lastWriteUtc = info.LastWriteTimeUtc };
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
     }
 
     /// <summary>Must be called on the UI thread; the desktop control server marshals via Dispatcher.</summary>
@@ -1271,7 +1424,7 @@ internal sealed class SettingsDialog : Window
             Background = System.Windows.Media.Brushes.Transparent,
             BorderBrush = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["PanelStrokeBrush"],
             ContextMenu = notificationMenu,
-            ToolTip = "Choose which providers can send reset notifications"
+            ToolTip = "Choose which quota resets you want to be notified about"
         };
         _notificationProviders.Click += (_, _) =>
         {
@@ -1297,7 +1450,7 @@ internal sealed class SettingsDialog : Window
         panel.Children.Add(LabeledControl("Reset times", _resetTimes));
         panel.Children.Add(new TextBlock { Text = "NOTIFICATIONS", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, 14, 0, 2) });
         panel.Children.Add(_alerts);
-        panel.Children.Add(LabeledControl("Providers", _notificationProviders));
+        panel.Children.Add(LabeledControl("Reset Notifications", _notificationProviders));
         panel.Children.Add(new TextBlock { Text = "The app watches each selected reset timer locally, so alerts do not wait for the next five-minute refresh.", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, -2, 0, 8) });
         panel.Children.Add(new TextBlock { Text = "PRIVACY", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = (System.Windows.Media.Brush)System.Windows.Application.Current.Resources["TextMutedBrush"], Margin = new Thickness(0, 14, 0, 2) });
         panel.Children.Add(_hideFromScreenShare);

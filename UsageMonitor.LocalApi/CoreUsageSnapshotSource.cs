@@ -1,4 +1,6 @@
 using UsageMonitor.Core;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 
 namespace UsageMonitor.LocalApi;
@@ -12,6 +14,13 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     private readonly IUsageProviderCatalog _catalog;
     private readonly IUsageCache? _cache;
     private readonly ProviderContext _context;
+    // Most recent authentication/authorization failure per provider, recorded by the background
+    // stale refresh so the UI can surface "needs re-authentication" on top of the last-good cached
+    // bars instead of looking healthy forever. Static so the desktop source and the loopback API
+    // host (which each construct their own CoreUsageSnapshotSource) observe the same failures.
+    private static readonly ConcurrentDictionary<string, (ProviderSnapshot Snapshot, DateTimeOffset At)> _lastAuthFailures =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan AuthFailureVisibilityWindow = TimeSpan.FromMinutes(10);
 
     public CoreUsageSnapshotSource(IUsageProviderCatalog catalog, IUsageCache? cache = null,
         ProviderContext? context = null)
@@ -50,87 +59,123 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         CancellationToken cancellationToken)
     {
         var key = $"provider:{provider.Descriptor.Id}";
-        ProviderSnapshot? snapshot;
-        if (force || _cache is null)
+        var stopwatch = Stopwatch.StartNew();
+        var servedFrom = "network";
+        try
         {
-            snapshot = await RefreshAsync(provider, force, cancellationToken).ConfigureAwait(false);
-            var usedFallbackCache = false;
-            if (snapshot is null && _cache is not null)
+            ProviderSnapshot? snapshot;
+            if (force || _cache is null)
             {
-                snapshot = await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false);
-                if (snapshot is { } cachedSnapshot && IsUsableCachedSnapshot(cachedSnapshot))
+                snapshot = await RefreshAsync(provider, force, cancellationToken).ConfigureAwait(false);
+                var usedFallbackCache = false;
+                if (snapshot is null && _cache is not null)
                 {
-                    // A failed forced refresh used to return this cache entry as if it were fresh.
-                    // Preserve the value, but mark it stale so the UI does not treat an expired
-                    // pre-reset timestamp as a confirmed live quota or start a retry loop.
-                    snapshot = cachedSnapshot with { Warning = "Refresh failed. Showing cached values." };
-                    usedFallbackCache = true;
+                    snapshot = await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false);
+                    if (snapshot is { } cachedSnapshot && IsUsableCachedSnapshot(cachedSnapshot))
+                    {
+                        // A failed forced refresh used to return this cache entry as if it were fresh.
+                        // Preserve the value, but mark it stale so the UI does not treat an expired
+                        // pre-reset timestamp as a confirmed live quota or start a retry loop.
+                        snapshot = cachedSnapshot with { Warning = "Refresh failed. Showing cached values." };
+                        usedFallbackCache = true;
+                        servedFrom = "cache-fallback";
+                    }
                 }
-            }
-            if (snapshot is { } refreshedSnapshot && !IsUsableCachedSnapshot(refreshedSnapshot) && _cache is not null)
-            {
-                // A manual refresh must never blank a last-good dashboard. Keep the cached
-                // limits visible, but preserve authentication failures as actionable errors.
-                var cached = await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false);
-                if (cached is { } cachedSnapshot && IsUsableCachedSnapshot(cachedSnapshot))
+                if (snapshot is { } refreshedSnapshot && !IsUsableCachedSnapshot(refreshedSnapshot) && _cache is not null)
                 {
-                    var warning = refreshedSnapshot.Lines.FirstOrDefault(line => line.IsError)?.Text
-                        ?? refreshedSnapshot.Warning
-                        ?? "Refresh failed. Showing cached values.";
-                    snapshot = WithRefreshFailure(cachedSnapshot, refreshedSnapshot, warning);
+                    // A manual refresh must never blank a last-good dashboard. Keep the cached
+                    // limits visible, but preserve authentication failures as actionable errors.
+                    var cached = await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false);
+                    if (cached is { } cachedSnapshot && IsUsableCachedSnapshot(cachedSnapshot))
+                    {
+                        var warning = refreshedSnapshot.Lines.FirstOrDefault(line => line.IsError)?.Text
+                            ?? refreshedSnapshot.Warning
+                            ?? "Refresh failed. Showing cached values.";
+                        snapshot = WithRefreshFailure(cachedSnapshot, refreshedSnapshot, warning);
+                        servedFrom = usedFallbackCache ? "cache-fallback" : "cache-repaired";
+                    }
                 }
-            }
-            if (snapshot is not null && IsUsableCachedSnapshot(snapshot) && !usedFallbackCache && _cache is not null)
-                await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            var result = await _cache.GetAsync(key,
-                ct => RefreshAndCacheAsync(provider, key, ct), cancellationToken).ConfigureAwait(false);
-            snapshot = result.Value;
-            if (snapshot?.ErrorCategory == ProviderErrorCategory.RateLimited)
-            {
-                // The cache coordinator has already started the one permitted stale refresh.
-                // Retrying synchronously here turns a provider 429 into two requests per API
-                // read, which is enough to keep Claude throttled indefinitely. Keep the explicit
-                // rate-limit badge visible and let the background attempt replace it only after a
-                // successful response.
-                return Convert(snapshot);
-            }
-            if (snapshot?.ErrorCategory is not null || snapshot is { } cachedSnapshot && !IsUsableCachedSnapshot(cachedSnapshot))
-            {
-                // Older versions could have persisted an error envelope. Do not keep serving that
-                // fossilized failure for five minutes; retry once and only cache a successful value.
-                var cached = snapshot;
-                var refreshed = await RefreshAsync(provider, false, cancellationToken).ConfigureAwait(false);
-                if (refreshed is not null && IsUsableCachedSnapshot(refreshed))
-                {
-                    snapshot = refreshed;
+                if (snapshot is not null && IsUsableCachedSnapshot(snapshot) && !usedFallbackCache && _cache is not null)
                     await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
-                }
-                else if (cached is { } staleSnapshot && IsUsableCachedSnapshot(staleSnapshot))
-                {
-                    var warning = refreshed?.Lines.FirstOrDefault(line => line.IsError)?.Text
-                        ?? refreshed?.Warning
-                        ?? "Refresh failed. Showing cached values.";
-                    snapshot = refreshed is null
-                        ? staleSnapshot with { Warning = warning }
-                        : WithRefreshFailure(staleSnapshot, refreshed, warning);
-                }
-                else
-                {
-                    snapshot = refreshed;
-                }
             }
-        }
-
-        return snapshot is null
-            ? new UsageSnapshotData(provider.Descriptor.Id, provider.Descriptor.DisplayName, null, [], DateTimeOffset.UtcNow)
+            else
             {
-                Error = "Provider refresh failed.",
-                ErrorCategory = ProviderErrorCategory.Other.ToString()
+                var result = await _cache.GetAsync(key,
+                    ct => RefreshAndCacheAsync(provider, key, ct), cancellationToken).ConfigureAwait(false);
+                snapshot = result.Value;
+                servedFrom = result.IsFromCache ? "cache" : "network";
+                if (snapshot?.ErrorCategory == ProviderErrorCategory.RateLimited)
+                {
+                    // The cache coordinator has already started the one permitted stale refresh.
+                    // Retrying synchronously here turns a provider 429 into two requests per API
+                    // read, which is enough to keep Claude throttled indefinitely. Keep the explicit
+                    // rate-limit badge visible and let the background attempt replace it only after a
+                    // successful response.
+                    return Convert(snapshot);
+                }
+                if (snapshot?.ErrorCategory is not null || snapshot is { } cachedSnapshot && !IsUsableCachedSnapshot(cachedSnapshot))
+                {
+                    // Older versions could have persisted an error envelope. Do not keep serving that
+                    // fossilized failure for five minutes; retry once and only cache a successful value.
+                    var cached = snapshot;
+                    var refreshed = await RefreshAsync(provider, false, cancellationToken).ConfigureAwait(false);
+                    servedFrom = "network";
+                    if (refreshed is not null && IsUsableCachedSnapshot(refreshed))
+                    {
+                        snapshot = refreshed;
+                        await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
+                    }
+                    else if (cached is { } staleSnapshot && IsUsableCachedSnapshot(staleSnapshot))
+                    {
+                        var warning = refreshed?.Lines.FirstOrDefault(line => line.IsError)?.Text
+                            ?? refreshed?.Warning
+                            ?? "Refresh failed. Showing cached values.";
+                        snapshot = refreshed is null
+                            ? staleSnapshot with { Warning = warning }
+                            : WithRefreshFailure(staleSnapshot, refreshed, warning);
+                        servedFrom = "cache-repaired";
+                    }
+                    else
+                    {
+                        snapshot = refreshed;
+                    }
+                }
             }
-            : Convert(snapshot);
+
+            // Surface a recent authentication failure on top of the last-good cached bars so the
+            // dashboard shows the provider needs re-authentication instead of looking healthy
+            // forever. The failure is recorded by the background stale refresh; the bars are kept
+            // so the taskbar quota never disappears.
+            if (snapshot is not null && IsUsableCachedSnapshot(snapshot) &&
+                _lastAuthFailures.TryGetValue(provider.Descriptor.Id, out var failure) &&
+                DateTimeOffset.UtcNow - failure.At <= AuthFailureVisibilityWindow)
+            {
+                var warning = failure.Snapshot.Lines.FirstOrDefault(line => line.IsError)?.Text
+                    ?? failure.Snapshot.Warning
+                    ?? "Sign-in expired. Re-authenticate to restore live quota.";
+                snapshot = WithRefreshFailure(snapshot, failure.Snapshot, warning);
+                servedFrom = "cache-auth-stale";
+            }
+
+            return snapshot is null
+                ? new UsageSnapshotData(provider.Descriptor.Id, provider.Descriptor.DisplayName, null, [], DateTimeOffset.UtcNow)
+                {
+                    Error = "Provider refresh failed.",
+                    ErrorCategory = ProviderErrorCategory.Other.ToString()
+                }
+                : Convert(snapshot);
+        }
+        finally
+        {
+            _context.Logger?.Info("Provider read completed",
+                new Dictionary<string, object?>
+                {
+                    ["providerId"] = provider.Descriptor.Id,
+                    ["force"] = force,
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                    ["servedFrom"] = servedFrom
+                });
+        }
     }
 
     private async Task<ProviderSnapshot?> RefreshAndCacheAsync(IUsageProvider provider, string key,
@@ -148,7 +193,15 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         try
         {
             var context = _context with { Now = DateTimeOffset.UtcNow, ForceRefresh = force };
-            return await provider.RefreshAsync(context, cancellationToken).ConfigureAwait(false);
+            var snapshot = await provider.RefreshAsync(context, cancellationToken).ConfigureAwait(false);
+            if (snapshot is not null)
+            {
+                if (IsAuthFailure(snapshot))
+                    _lastAuthFailures[provider.Descriptor.Id] = (snapshot, DateTimeOffset.UtcNow);
+                else if (snapshot.ErrorCategory is null)
+                    _lastAuthFailures.TryRemove(provider.Descriptor.Id, out _);
+            }
+            return snapshot;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -194,6 +247,9 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         snapshot.ErrorCategory is null &&
         (!snapshot.ProviderId.Equals("claude-code", StringComparison.OrdinalIgnoreCase) ||
          snapshot.Lines.Any(line => line.Type == MetricLineType.Progress));
+
+    private static bool IsAuthFailure(ProviderSnapshot snapshot) =>
+        snapshot.ErrorCategory is ProviderErrorCategory.Authentication or ProviderErrorCategory.Authorization;
 
     private static ProviderSnapshot WithRefreshFailure(ProviderSnapshot cached,
         ProviderSnapshot failure, string message) => cached with

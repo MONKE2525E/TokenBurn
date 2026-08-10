@@ -61,6 +61,17 @@ public sealed class OpenCodeProvider : IUsageProvider
                 lines.Add(MetricLine.Badge("Status", "No hosted OpenCode usage in local logs.", "#A3A3A3", state: MetricState.Unknown));
             }
 
+            context.Logger?.Info("OpenCode history scanned",
+                new Dictionary<string, object?>
+                {
+                    ["databasePaths"] = scan.DatabasePaths.Count,
+                    ["rows"] = scan.Rows.Count,
+                    ["hasGoCredential"] = scan.HasGoCredential,
+                    ["historyPoints"] = history.Points.Count,
+                    ["historyCostUsd"] = history.TotalCostUsd,
+                    ["unknownModels"] = history.UnknownModels.Count
+                });
+
             return Task.FromResult(ProviderSnapshot.Success(Provider, lines,
                 scan.HasGoCredential || goRows.Length > 0 ? "Go" : null, context.Now, history));
         }
@@ -137,8 +148,16 @@ public sealed class OpenCodeProvider : IUsageProvider
         };
     }
 
-    private static string DisplayProvider(string providerId) =>
-        string.IsNullOrWhiteSpace(providerId) ? "unknown" : providerId;
+    private static string DisplayProvider(string providerId)
+    {
+        if (string.IsNullOrWhiteSpace(providerId)) return "unknown";
+        // The opencode-go hosted gateway and the open-source opencode runtime are the same
+        // product. Keep one canonical provider identity in the breakdown so the dashboard does
+        // not render two "OpenCode" series.
+        return providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase)
+            ? ProviderIds.OpenCode
+            : providerId;
+    }
 
     private static string FormatModel(string providerId, string? modelId)
     {
@@ -148,16 +167,26 @@ public sealed class OpenCodeProvider : IUsageProvider
 
     private static OpenCodePricedUsage Price(OpenCodeUsageRow row, IModelCatalog? catalog)
     {
-        if (row.CostUsd > 0)
-            return new OpenCodePricedUsage(row, row.CostUsd, UsageCostBasis.ProviderReported,
-                PricingBasis.ProviderCredits, false, 0);
-
+        // OpenCode persists its own per-message cost, but for some models (notably
+        // opencode-go/deepseek-v4-flash) that local estimate is exactly half the current market
+        // rate, under-reporting spend by 2x against the OpenCode billing dashboard. Prefer the
+        // model catalog so costs match the bill; keep the persisted cost only when the model has
+        // no known price.
         var pricing = row.ModelId is null
             ? null
             : catalog?.ResolvePrice(row.ProviderId, row.ModelId) ??
               ModelPricingCatalog.TryResolve(row.ProviderId, row.ModelId);
-        if (pricing is null)
+        var hasComponentTokens = row.InputTokens > 0 || row.CacheReadTokens > 0 ||
+                                 row.CacheWriteTokens > 0 || row.OutputTokens > 0 || row.ReasoningTokens > 0;
+        if (pricing is null || !hasComponentTokens)
+        {
+            // Without token components there is nothing to price, so a persisted cost is the
+            // only meaningful value.
+            if (row.CostUsd > 0)
+                return new OpenCodePricedUsage(row, row.CostUsd, UsageCostBasis.ProviderReported,
+                    PricingBasis.ProviderCredits, false, 0);
             return new OpenCodePricedUsage(row, 0, UsageCostBasis.Unpriced, PricingBasis.Unknown, true, 0);
+        }
 
         var estimatedCost = pricing.Estimate(row.InputTokens, row.CacheReadTokens,
             row.OutputTokens + row.ReasoningTokens, row.CacheWriteTokens);

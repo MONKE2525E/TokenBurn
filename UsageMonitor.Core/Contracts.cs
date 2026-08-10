@@ -9,6 +9,8 @@ public sealed record ProviderContext
     public IDiagnosticsLogger? Logger { get; init; }
     public IModelCatalog? ModelCatalog { get; init; }
     public string? ConfigDirectory { get; init; }
+    /// <summary>Directory used to persist incremental history indexes. Null disables incremental history.</summary>
+    public string? CacheDirectory { get; init; }
     public bool ForceRefresh { get; init; }
 }
 
