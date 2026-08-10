@@ -13,7 +13,6 @@ public static class ProviderSecretKeys
 {
     public const string OpenRouterApiKey = "providers/openrouter/api-key";
     public const string ZaiApiKey = "providers/z-ai/api-key";
-    public const string GrokApiKey = "providers/grok/api-key";
     public const string DevinApiKey = "providers/devin/api-key";
 }
 

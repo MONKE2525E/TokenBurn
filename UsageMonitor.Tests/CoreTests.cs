@@ -151,6 +151,46 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task RecentAuthFailureSurfacesOnCachedReadKeepingLastGoodBars()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N"));
+        using var cache = new JsonFileUsageCache(root);
+        var descriptor = new ProviderDescriptor("antigravity", "Antigravity");
+        var lastGood = ProviderSnapshot.Success(descriptor,
+            [MetricLine.Progress("Session", 55, 100, MetricKind.Percent, DateTimeOffset.UtcNow.AddHours(1))],
+            "Pro", DateTimeOffset.UtcNow);
+        await cache.WriteAsync("provider:antigravity", lastGood, lastGood.RefreshedAt);
+
+        var provider = new SwitchableProvider(descriptor, ProviderSnapshot.Error(descriptor,
+            "Antigravity sign-in expired. Open Antigravity or Gemini CLI and sign in again.",
+            ProviderErrorCategory.Authentication));
+        var source = new CoreUsageSnapshotSource(new UsageProviderCatalog([provider]), cache);
+
+        // A forced refresh records the auth failure and surfaces it while keeping the bars.
+        var forced = Assert.Single(await source.GetSnapshotsAsync("antigravity", force: true));
+        Assert.Equal("Authentication", forced.ErrorCategory);
+        Assert.Equal(55, forced.Lines.OfType<ProgressMetricData>().Single().Used);
+
+        // A later cached read still carries the failure over the last-good bars instead of
+        // pretending the provider is healthy.
+        var cached = Assert.Single(await source.GetSnapshotsAsync("antigravity", force: false));
+        Assert.Equal("Authentication", cached.ErrorCategory);
+        Assert.NotNull(cached.Warning);
+        Assert.Equal(55, cached.Lines.OfType<ProgressMetricData>().Single().Used);
+        Assert.Contains(cached.Lines.OfType<BadgeMetricData>(), badge =>
+            badge.Label == "Error");
+
+        // After the provider recovers, the failure is cleared and cached reads are healthy again.
+        provider.Snapshot = ProviderSnapshot.Success(descriptor,
+            [MetricLine.Progress("Session", 10, 100, MetricKind.Percent, DateTimeOffset.UtcNow.AddHours(1))],
+            "Pro", DateTimeOffset.UtcNow);
+        _ = Assert.Single(await source.GetSnapshotsAsync("antigravity", force: true));
+        var recovered = Assert.Single(await source.GetSnapshotsAsync("antigravity", force: false));
+        Assert.Null(recovered.Error);
+        Assert.Equal(10, recovered.Lines.OfType<ProgressMetricData>().Single().Used);
+    }
+
+    [Fact]
     public void RedactorRemovesSecretsAndEmailAddresses()
     {
         var text = SensitiveDataRedactor.Redact("email developer@example.invalid token=abc123 account_id=acct_123 Authorization: Bearer xyz C:\\Users\\developer\\.codex");
@@ -306,5 +346,14 @@ public sealed class CoreTests
 
         public Task<ProviderSnapshot> RefreshAsync(ProviderContext context,
             CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
+    }
+
+    private sealed class SwitchableProvider(ProviderDescriptor descriptor, ProviderSnapshot initial) : IUsageProvider
+    {
+        public ProviderSnapshot Snapshot = initial;
+        public ProviderDescriptor Descriptor => descriptor;
+
+        public Task<ProviderSnapshot> RefreshAsync(ProviderContext context,
+            CancellationToken cancellationToken = default) => Task.FromResult(Snapshot);
     }
 }

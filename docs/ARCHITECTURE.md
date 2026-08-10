@@ -40,7 +40,7 @@ not the supported runtime fallback.
 | Settings and Customize reached from the dashboard, tray menu, or jump list | Tauri in-popup pages |
 | Popup HWND, placement, focus, dismissal, resize, and screen-share privacy | Rust/Tauri process |
 | Notification-area icon and tray menu | .NET `TrayIconService` using `NotifyIcon`, with a WPF tray menu and a WinForms fallback menu |
-| Visible taskbar status strip HWND and Explorer interaction | .NET `NativeTaskbarOverlay` in `TaskbarOverlayController` |
+| Visible taskbar status strip HWND and Explorer interaction (auto-hides while another app is fullscreen on the strip's monitor) | .NET `NativeTaskbarOverlay` in `TaskbarOverlayController` |
 | Taskbar strip visual | A WPF `WidgetWindow` rendered offscreen to a bitmap, then displayed by the native layered HWND |
 | Provider collection, refresh scheduling, stale-while-revalidate behavior, pricing, and cache | .NET `UsageMonitor.Desktop` plus `UsageMonitor.Core` |
 | Loopback usage API | .NET `UsageMonitor.LocalApi` on `127.0.0.1:6736` |

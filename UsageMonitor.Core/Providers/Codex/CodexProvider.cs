@@ -42,22 +42,39 @@ public sealed class CodexProvider : IUsageProvider
             var mapped = CodexUsageMapper.Map(response, context.Now);
             var lines = mapped.Lines.ToList();
             var home = Path.GetDirectoryName(state.Path) ?? string.Empty;
-            var history = new CodexLogUsageScanner(_files, context.ModelCatalog ?? _catalog).Scan(home, context.Now.AddDays(-90));
+            var history = ScanHistory(home, context.Now.AddDays(-90), context);
             return ProviderSnapshot.Success(Provider, lines, mapped.Plan, context.Now, history);
         }
-        catch (CodexAuthenticationException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Authentication, state.Path, context.Now); }
-        catch (CodexRequestException ex) { return ErrorWithHistory(ex.Message, ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network, state.Path, context.Now); }
-        catch (CodexParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, state.Path, context.Now); }
-        catch (HttpRequestException) { return ErrorWithHistory("Codex connection failed.", ProviderErrorCategory.Network, state.Path, context.Now); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Codex request timed out.", ProviderErrorCategory.Network, state.Path, context.Now); }
+        catch (CodexAuthenticationException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Authentication, state.Path, context.Now, context); }
+        catch (CodexRequestException ex) { return ErrorWithHistory(ex.Message, ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network, state.Path, context.Now, context); }
+        catch (CodexParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, state.Path, context.Now, context); }
+        catch (HttpRequestException) { return ErrorWithHistory("Codex connection failed.", ProviderErrorCategory.Network, state.Path, context.Now, context); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Codex request timed out.", ProviderErrorCategory.Network, state.Path, context.Now, context); }
     }
 
-    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, string path, DateTimeOffset now)
+    private ProviderUsageHistory ScanHistory(string home, DateTimeOffset since, ProviderContext context)
+    {
+        var catalog = context.ModelCatalog ?? _catalog;
+        return new CodexLogUsageScanner(_files, catalog).Scan(home, since, context.CacheDirectory, report =>
+            context.Logger?.Info("Codex history scanned",
+                new Dictionary<string, object?>
+                {
+                    ["filesDiscovered"] = report.FilesDiscovered,
+                    ["filesChanged"] = report.FilesChanged,
+                    ["filesUnchanged"] = report.FilesUnchanged,
+                    ["rowsRead"] = report.RowsRead,
+                    ["scanMs"] = report.Milliseconds,
+                    ["oldestRecord"] = report.OldestRecord,
+                    ["newestRecord"] = report.NewestRecord
+                }));
+    }
+
+    private ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category, string path, DateTimeOffset now, ProviderContext context)
     {
         var home = Path.GetDirectoryName(path) ?? string.Empty;
         return ProviderSnapshot.Error(Provider, message, category) with
         {
-            UsageHistory = new CodexLogUsageScanner(_files, _catalog).Scan(home, now.AddDays(-90))
+            UsageHistory = ScanHistory(home, now.AddDays(-90), context)
         };
     }
 

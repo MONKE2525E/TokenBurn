@@ -103,6 +103,12 @@ public sealed class TrayIconService : IDisposable
         _appNotifications.ShowQuotaAlert(message);
     }
 
+    public void ShowAuthNotification(string message)
+    {
+        if (_disposed) return;
+        _appNotifications.ShowAuthAlert(message);
+    }
+
     private void OnTaskbarStateChanged(object? sender, TaskbarStateChangedEventArgs e)
     {
         // Embedded Explorer placement is unsupported. If it falls back to the visible taskbar-edge
@@ -159,7 +165,7 @@ public sealed class TrayIconService : IDisposable
                     var cursor = Forms.Cursor.Position;
                     var actions = new TrayMenuActions(
                         OpenDashboard: () => _dashboard.ShowFromTray(cursor, useWidgetAvoidRect: false),
-                        Refresh: () => _dashboard.RefreshData(force: true),
+                        Refresh: () => _dashboard.RefreshData(),
                         Settings: () => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false),
                         Customize: () => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false),
                         CheckForUpdates: _dashboard.ShowUpdateStatus,
@@ -214,7 +220,7 @@ public sealed class TrayIconService : IDisposable
                 menu.Dispose();
             };
             menu.Items.Add("Open dashboard", null, (_, _) => _dashboard.ShowFromTray(cursor, useWidgetAvoidRect: false));
-            menu.Items.Add("Refresh now", null, (_, _) => _dashboard.RefreshData(force: true));
+            menu.Items.Add("Refresh now", null, (_, _) => _dashboard.RefreshData());
             menu.Items.Add("Settings", null, (_, _) => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false));
             menu.Items.Add("Customize", null, (_, _) => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false));
             menu.Items.Add("Check for updates", null, (_, _) => _dashboard.ShowUpdateStatus());

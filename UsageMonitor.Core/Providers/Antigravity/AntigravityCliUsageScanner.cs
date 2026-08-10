@@ -65,8 +65,10 @@ public sealed class AntigravityCliUsageScanner
         }
 
         var priced = rows.Select(row => Price(row, catalog)).ToArray();
+        // Bucket by the Windows local calendar day so the dashboard's local "Today" selector
+        // matches. UTC bucketing pushes evening usage into tomorrow's date.
         var points = priced
-            .GroupBy(row => DateOnly.FromDateTime(row.Row.Timestamp.UtcDateTime))
+            .GroupBy(row => DateOnly.FromDateTime(row.Row.Timestamp.LocalDateTime))
             .OrderBy(group => group.Key)
             .Select(group =>
             {
@@ -75,7 +77,7 @@ public sealed class AntigravityCliUsageScanner
             })
             .ToArray();
         var breakdown = priced
-            .GroupBy(row => new { Date = DateOnly.FromDateTime(row.Row.Timestamp.UtcDateTime), row.Row.ModelId, row.CostBasis })
+            .GroupBy(row => new { Date = DateOnly.FromDateTime(row.Row.Timestamp.LocalDateTime), row.Row.ModelId, row.CostBasis })
             .OrderBy(group => group.Key.Date)
             .ThenBy(group => group.Key.ModelId, StringComparer.OrdinalIgnoreCase)
             .Select(group => new UsageBreakdownPoint(group.Key.Date, ProviderIds.Antigravity, group.Key.ModelId,
