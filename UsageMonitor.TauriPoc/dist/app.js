@@ -1250,7 +1250,7 @@ async function copyCompactChartImage() {
 // A plain click copies the summary with the chart. A long press opens the copy menu: chat apps
 // that paste text first would otherwise drop the image, so an image-only copy matches how a
 // Snipping Tool screenshot pastes everywhere.
-shareButton.addEventListener('pointerdown', () => {
+shareButton?.addEventListener('pointerdown', () => {
   if (state.view === 'breakdown') return;
   clearTimeout(sharePressTimer);
   sharePressTimer = window.setTimeout(() => {
@@ -1258,15 +1258,15 @@ shareButton.addEventListener('pointerdown', () => {
     setShareMenu(true);
   }, 480);
 });
-shareButton.addEventListener('pointerup', () => clearTimeout(sharePressTimer));
-shareButton.addEventListener('pointerleave', () => clearTimeout(sharePressTimer));
-shareButton.addEventListener('click', async () => {
+shareButton?.addEventListener('pointerup', () => clearTimeout(sharePressTimer));
+shareButton?.addEventListener('pointerleave', () => clearTimeout(sharePressTimer));
+shareButton?.addEventListener('click', async () => {
   // A long press releases as a click. Keep the menu open instead of instantly closing it.
   if (shareMenuOpenedByPress) {
     shareMenuOpenedByPress = false;
     return;
   }
-  if ($('#share-popover').classList.contains('is-open')) {
+  if ($('#share-popover')?.classList.contains('is-open')) {
     setShareMenu(false);
     return;
   }
