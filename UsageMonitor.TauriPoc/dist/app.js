@@ -1262,6 +1262,7 @@ shareButton?.addEventListener('pointerdown', () => {
 });
 shareButton?.addEventListener('pointerup', () => clearTimeout(sharePressTimer));
 shareButton?.addEventListener('pointerleave', () => clearTimeout(sharePressTimer));
+shareButton?.addEventListener('pointercancel', () => clearTimeout(sharePressTimer));
 shareButton?.addEventListener('click', async () => {
   // A long press releases as a click. Keep the menu open instead of instantly closing it.
   if (shareMenuOpenedByPress) {

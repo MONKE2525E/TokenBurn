@@ -377,7 +377,9 @@ fn copy_share(payload: ShareClipboardPayload) -> Result<(), String> {
     let dib = dib_bytes(payload.width, payload.height, &rgba);
     pieces.push((CF_DIB.0 as u32, dib));
     let png_format = png_clipboard_format();
-    if png_format != 0 {
+    // An empty PNG (frontend failed to encode) must not fail the whole copy: text and DIB are
+    // still valid, so skip the PNG placement instead of erroring on the empty allocation.
+    if png_format != 0 && !png.is_empty() {
         pieces.push((png_format, png));
     }
     let placements = alloc_global_pieces(&pieces)?;
