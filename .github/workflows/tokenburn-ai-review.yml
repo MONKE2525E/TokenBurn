@@ -26,19 +26,19 @@ jobs:
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
     steps:
       - name: Checkout trusted base repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22.x
       - name: Install pinned Open Code Review
         run: npm install --global @alibaba-group/open-code-review@1.7.1
       - name: Connect to private review gateway when configured
         if: env.TAILSCALE_AUTHKEY != ''
-        uses: tailscale/github-action@v2
+        uses: tailscale/github-action@v4
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         with:
