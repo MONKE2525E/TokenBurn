@@ -279,18 +279,23 @@ fn dib_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     bytes
 }
 
-unsafe fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
+fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
+    if bytes.is_empty() {
+        return Err("cannot allocate an empty clipboard payload".into());
+    }
     // Exact size: clipboard consumers size binary formats via GlobalSize, and an extra
     // uninitialized byte would be read as part of the DIB or PNG payload.
-    let handle =
-        GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|_| "GlobalAlloc failed".to_string())?;
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
+        .map_err(|_| "GlobalAlloc failed".to_string())?;
     let locked = unsafe { GlobalLock(handle) };
     if locked.is_null() {
-        let _ = GlobalFree(Some(handle));
+        let _ = unsafe { GlobalFree(Some(handle)) };
         return Err("GlobalLock failed".to_string());
     }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len());
-    let _ = GlobalUnlock(handle);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len());
+    }
+    let _ = unsafe { GlobalUnlock(handle) };
     Ok(handle)
 }
 
@@ -299,7 +304,7 @@ unsafe fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
 fn alloc_global_pieces(pieces: &[(u32, Vec<u8>)]) -> Result<Vec<(u32, HGLOBAL)>, String> {
     let mut placements = Vec::with_capacity(pieces.len());
     for (format, bytes) in pieces {
-        match unsafe { alloc_global_bytes(bytes) } {
+        match alloc_global_bytes(bytes) {
             Ok(handle) => placements.push((*format, handle)),
             Err(error) => {
                 for (_, handle) in &placements {
@@ -310,6 +315,27 @@ fn alloc_global_pieces(pieces: &[(u32, Vec<u8>)]) -> Result<Vec<(u32, HGLOBAL)>,
         }
     }
     Ok(placements)
+}
+
+// Opens the clipboard once and places every format. Returns which placements the system accepted;
+// the caller frees rejected handles. A narrow helper so the unsafe block only wraps the FFI calls,
+// not the surrounding ownership and error logic.
+fn place_clipboard_data(placements: &[(u32, HGLOBAL)]) -> Result<Vec<bool>, String> {
+    let mut accepted = vec![false; placements.len()];
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return Err("could not open the Windows clipboard".into());
+        }
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return Err("could not empty the Windows clipboard".into());
+        }
+        for (index, (format, handle)) in placements.iter().enumerate() {
+            accepted[index] = SetClipboardData(*format, Some(HANDLE(handle.0))).is_ok();
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(accepted)
 }
 
 #[tauri::command]
@@ -356,34 +382,21 @@ fn copy_share(payload: ShareClipboardPayload) -> Result<(), String> {
     }
     let placements = alloc_global_pieces(&pieces)?;
 
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            for (_, handle) in &placements {
-                let _ = GlobalFree(Some(*handle));
-            }
-            return Err("could not open the Windows clipboard".into());
+    // Handles the clipboard accepts are owned by the system; rejected ones are freed here.
+    let accepted = place_clipboard_data(&placements).map_err(|error| {
+        for (_, handle) in &placements {
+            let _ = unsafe { GlobalFree(Some(*handle)) };
         }
-        if EmptyClipboard().is_err() {
-            let _ = CloseClipboard();
-            for (_, handle) in &placements {
-                let _ = GlobalFree(Some(*handle));
-            }
-            return Err("could not empty the Windows clipboard".into());
-        }
-        let mut accepted = vec![false; placements.len()];
-        for (index, (format, handle)) in placements.iter().enumerate() {
-            accepted[index] = SetClipboardData(*format, Some(HANDLE(handle.0))).is_ok();
-        }
-        let _ = CloseClipboard();
-        let all_accepted = accepted.iter().all(|ok| *ok);
+        error
+    })?;
+    let all_accepted = accepted.iter().all(|ok| *ok);
+    if !all_accepted {
         for (index, (_, handle)) in placements.iter().enumerate() {
             if !accepted[index] {
-                let _ = GlobalFree(Some(*handle));
+                let _ = unsafe { GlobalFree(Some(*handle)) };
             }
         }
-        if !all_accepted {
-            return Err("the clipboard rejected part of the share payload".into());
-        }
+        return Err("the clipboard rejected part of the share payload".into());
     }
     Ok(())
 }
@@ -1740,8 +1753,11 @@ mod tests {
     }
 
     // Writes a real text + bitmap payload to the system clipboard and reads it back through the
-    // same formats a paste target would use. This replaces the dev machine's clipboard content.
+    // same formats a paste target would use. Ignored by default: it replaces the developer's
+    // clipboard content and can race desktop apps that write to the clipboard mid-test. Run
+    // explicitly with `cargo test -- --ignored` when clipboard integration changes.
     #[test]
+    #[ignore = "mutates the real system clipboard; run with -- --ignored"]
     fn share_clipboard_round_trip() {
         const WIDTH: u32 = 2;
         const HEIGHT: u32 = 2;
@@ -1762,9 +1778,9 @@ mod tests {
         let png_format = png_clipboard_format();
         assert_ne!(png_format, 0, "the PNG clipboard format must register");
 
-        let text_handle = unsafe { alloc_global_bytes(&text_bytes) }.unwrap();
-        let dib_handle = unsafe { alloc_global_bytes(&dib) }.unwrap();
-        let png_handle = unsafe { alloc_global_bytes(&png) }.unwrap();
+        let text_handle = alloc_global_bytes(&text_bytes).unwrap();
+        let dib_handle = alloc_global_bytes(&dib).unwrap();
+        let png_handle = alloc_global_bytes(&png).unwrap();
         unsafe {
             assert!(OpenClipboard(None).is_ok());
             assert!(EmptyClipboard().is_ok());
@@ -1829,8 +1845,8 @@ mod tests {
         // the text. Kept in the same test as the full round trip because the system clipboard is
         // process-global and these tests would otherwise race each other's clipboard writes.
         let image_only_dib = dib_bytes(2, 2, &rgba);
-        let dib_handle = unsafe { alloc_global_bytes(&image_only_dib) }.unwrap();
-        let png_handle = unsafe { alloc_global_bytes(&png) }.unwrap();
+        let dib_handle = alloc_global_bytes(&image_only_dib).unwrap();
+        let png_handle = alloc_global_bytes(&png).unwrap();
         unsafe {
             assert!(OpenClipboard(None).is_ok());
             assert!(EmptyClipboard().is_ok());
