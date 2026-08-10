@@ -1904,7 +1904,13 @@ async function copyTextToClipboard(text) {
   textarea.style.opacity = '0';
   document.body.appendChild(textarea);
   textarea.select();
-  try { return document.execCommand('copy'); } finally { textarea.remove(); }
+  try {
+    return document.execCommand('copy');
+  } catch (_) {
+    return false;
+  } finally {
+    textarea.remove();
+  }
 }
 
 const providerStatusTooltip = $('#provider-status-tooltip');
