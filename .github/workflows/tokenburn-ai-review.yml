@@ -20,6 +20,10 @@ jobs:
     if: github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && (github.event.comment.body == '/tokenburn-review' || startsWith(github.event.comment.body, '/tokenburn-review ')))
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Job-level scope is required because the Tailscale step's condition is evaluated
+      # before step-level environment variables exist.
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
     steps:
       - name: Checkout trusted base repository
         uses: actions/checkout@v4
@@ -39,6 +43,19 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+      - name: Verify review gateway reachability
+        env:
+          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          CLIPROXY_URL: ${{ secrets.CLIPROXY_URL }}
+        run: |
+          for u in "${CLIPROXY_URL%/}" "http://verenu-cliproxy.tail1e2217.ts.net:8317/v1" "http://100.67.234.20:8317/v1"; do
+            [ -z "${u}" ] && continue
+            rm -f /tmp/models.json
+            code=$(curl -s -o /tmp/models.json -w '%{http_code}' --max-time 8 -H "Authorization: Bearer ${CLIPROXY_API_KEY}" "${u}/models" || true)
+            echo "probe ${u} -> ${code}"
+            cat /tmp/models.json 2>/dev/null | head -c 200 || true
+            echo ""
+          done
       - name: Run TokenBurn AI review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -29,6 +29,19 @@ function required(name) {
   return value;
 }
 
+function redact(value) {
+  const apiKey = process.env.CLIPROXY_API_KEY || "";
+  const githubToken = process.env.GITHUB_TOKEN || "";
+  let out = String(value || "");
+  if (apiKey) out = out.split(apiKey).join("REDACTED");
+  if (githubToken) out = out.split(githubToken).join("REDACTED");
+  return out.replace(/(Bearer\s+)[A-Za-z0-9._\-+/=]+/gi, "$1REDACTED");
+}
+
+function sanitizeStateValue(value) {
+  return String(value || "").split("-->").join("").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").slice(0, 200);
+}
+
 async function github(pathname, init = {}) {
   const response = await fetch(pathname.startsWith("http") ? pathname : `${api}${pathname}`, {
     ...init,
@@ -225,7 +238,11 @@ async function main() {
       if (!/quota|rate[ -]?limit|429|model.{0,40}(?:not found|unavailable)/i.test(output)) break;
     }
     if (!result || result.code !== 0) {
-      await updateState(number, stateComment, summary("failed", { reason: result?.previewFailed ? "preview_failed" : "review_failed" }), { ...baseState, status: "failed", reason: result?.previewFailed ? "preview_failed" : "review_failed" });
+      const reason = result?.previewFailed ? "preview_failed" : "review_failed";
+      const raw = `${result?.stderr || ""}\n${result?.stdout || ""}`;
+      const detail = redact(raw).replace(/\s+/g, " ").trim().slice(0, 400);
+      console.error(`tokenburn review failed (${reason}): ${detail}`);
+      await updateState(number, stateComment, summary("failed", { reason }), { ...baseState, status: "failed", reason, detail: sanitizeStateValue(detail) });
       process.exitCode = 1;
       return;
     }
