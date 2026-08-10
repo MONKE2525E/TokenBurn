@@ -341,8 +341,13 @@ function breakdownSummary(rows) {
 
 // The ledger aggregation the breakdown table renders. Shared with the share copy so pasting the
 // text always mirrors exactly what the page shows for the current grouping and sort.
+function mergedCostBasis(costBases) {
+  if (costBases.size === 1) return [...costBases][0];
+  return costBases.has('Unpriced') ? 'PartiallyPriced' : 'Mixed';
+}
+
 function breakdownGroupedRows(rows) {
-  const modelRows = Object.values(rows.reduce((map,row) => { const key = `${row.providerId}|${row.modelId || ''}`; const target = map[key] ||= { ...row, processed:0, costUsd:0, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.costBasis = target.costBases.size === 1 ? [...target.costBases][0] : target.costBases.has('Unpriced') ? 'PartiallyPriced' : 'Mixed'; return map; }, {}));
+  const modelRows = Object.values(rows.reduce((map,row) => { const key = `${row.providerId}|${row.modelId || ''}`; const target = map[key] ||= { ...row, processed:0, costUsd:0, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.costBasis = mergedCostBasis(target.costBases); return map; }, {}));
   const dayRows = Object.values(rows.reduce((map,row) => { const target = map[row.date] ||= { date:row.date, processed:0, costUsd:0, providers:{}, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.providers[row.providerId] = (target.providers[row.providerId] || 0) + (state.breakdownMetric === 'cost' ? Number(row.costUsd || 0) : row.processed || 0); return map; }, {}));
   const data = state.breakdownGrouping === 'model' ? modelRows : dayRows;
   const column = state.breakdownSort.column; const factor = state.breakdownSort.direction === 'asc' ? 1 : -1;
@@ -500,7 +505,7 @@ function formatCost(value) {
 function renderBreakdown() {
   const root = $('#breakdown'); if (!root) return; const rows = breakdownRows(); const summary = breakdownSummary(rows); const series = breakdownSeries(rows);
   const input = summary.cached + summary.uncached + summary.creation; const cacheRate = input > 0 ? summary.cached / input : 0;
-  const { data, modelRows, dayRows } = breakdownGroupedRows(rows);
+  const { data } = breakdownGroupedRows(rows);
   const head = state.breakdownGrouping === 'model'
     ? '<tr><th><button data-breakdown-sort="model">Model</button></th><th>Provider</th><th class="num"><button data-breakdown-sort="costUsd">Cost</button></th><th class="num">Share</th><th class="num"><button data-breakdown-sort="processed">Tokens</button></th><th class="num">$/MTok</th><th>Pricing</th></tr>'
     : `<tr><th><button data-breakdown-sort="date">Day</button></th>${series.map(item => `<th class="num">${esc(item.name)}</th>`).join('')}<th class="num">Total</th><th class="num">Tokens</th><th>Pricing</th></tr>`;
@@ -1975,7 +1980,11 @@ $('#providers').addEventListener('click', async event => {
       showStatus('Antigravity CLI opened in a new terminal. Finish sign-in there.');
     }
   } catch (error) {
-    showStatus('Could not start provider sign-in.', STATUS_LONG, error?.toString?.());
+    // The native command's error is already a clean, actionable sentence ("Claude Code was not
+    // found on PATH. Install it, then try again."). Show it directly instead of burying it in a
+    // title tooltip behind a generic headline.
+    const message = error?.message || 'Could not start provider sign-in.';
+    showStatus(message, STATUS_LONG);
   } finally {
     button.disabled = false;
   }
