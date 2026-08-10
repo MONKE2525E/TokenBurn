@@ -79,9 +79,9 @@ context.window.addEventListener = noop;
 context.__TAURI__ = undefined;
 
 vm.createContext(context);
-vm.runInContext(`${source}\nglobalThis.__selfCheck = { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, state };`, context, { filename: 'app.js' });
+vm.runInContext(`${source}\nglobalThis.__selfCheck = { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, setLastSpendRootRows: (rows) => { lastSpendRootRows = rows; }, compactShareText, breakdownShareText, periodRangeText, formatShareDate, dayKey, state };`, context, { filename: 'app.js' });
 
-const { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, state } = context.__selfCheck;
+const { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, setLastSpendRootRows, compactShareText, breakdownShareText, periodRangeText, formatShareDate, dayKey, state } = context.__selfCheck;
 assert.ok(typeof providersStructureKey === 'function', 'providersStructureKey should be defined');
 assert.ok(typeof providerRows === 'function', 'providerRows should be defined');
 
@@ -231,5 +231,65 @@ assert.deepEqual(
   'notification picker must exclude unavailable or unknown providers');
 assert.match(source, /ArrowDown.*ArrowUp.*Home.*End/, 'notification picker needs keyboard navigation');
 assert.match(styles, /notification-provider-menu::?-webkit-scrollbar/, 'notification picker needs custom scrollbar styling');
+
+// 11. Share copy on the compact view: text names the period and carries the displayed rows.
+state.period = '30';
+state.metric = 'cost';
+setLastSpendRootRows([
+  { id: 'claude-code', name: 'Claude', cost: 12.34, tokens: 123456, value: 12.34, color: '#da7756', isAggregate: false },
+  { id: 'codex', name: 'Codex', cost: 4.56, tokens: 65432, value: 4.56, color: '#3d82f6', isAggregate: false },
+]);
+const compactText = compactShareText();
+assert.match(compactText, /^TokenBurn · .*Last 30 Days/, 'compact share text must name the selected period');
+assert.match(compactText, /Claude \$12\.34/, 'compact share text must include each provider value');
+assert.match(compactText, /Total \$16\.90/, 'compact share text must include the period total');
+assert.equal(compactText.split('\n').length, 4, 'compact share text must be header + rows + total');
+state.period = 'today';
+assert.match(periodRangeText(), /^Today · /, 'the today range must be labelled Today');
+state.period = 'yesterday';
+assert.match(periodRangeText(), /^Yesterday · /, 'the yesterday range must be labelled Yesterday');
+state.period = '30';
+assert.match(periodRangeText(), /· Last 30 Days$/, 'the 30-day range must be labelled Last 30 Days');
+assert.match(formatShareDate('2026-08-10'), /^Aug 10, 2026$/, 'share dates must render as friendly dates');
+
+// 12. Share copy on the usage page: dense text from the same ledger aggregation the page renders.
+state.snapshots = [snapshot({
+  usageHistory: {
+    breakdown: [{
+      date: dayKey(1), providerId: 'codex', modelId: 'gpt-5-codex',
+      uncachedInputTokens: 1000, cachedInputTokens: 2000, cacheCreationTokens: 500,
+      outputTokens: 800, reasoningTokens: 100, costUsd: 1.25,
+      costBasis: 'ProviderReported', pricingBasis: 'Provider', estimated: false, cacheSavingsUsd: 0.4,
+    }],
+  },
+})];
+state.breakdownPeriod = '30';
+state.breakdownMetric = 'cost';
+state.breakdownGrouping = 'model';
+state.breakdownSort = { column: 'costUsd', direction: 'desc' };
+const breakdownText = breakdownShareText();
+assert.match(breakdownText, /^TokenBurn · Usage · /, 'breakdown share text must open with the page header');
+assert.match(breakdownText, /Raw cost: \$1\.25 \(reported \$1\.25, estimated \$0\.00\)/, 'breakdown share text must include the cost quality split');
+assert.match(breakdownText, /Processed: 4\.4K tokens · cached input 2\.0K \(57\.1%\)/, 'breakdown share text must include the token split');
+assert.match(breakdownText, /Cache savings: \$0\.40/, 'breakdown share text must include cache savings');
+assert.match(breakdownText, /gpt-5-codex \| Codex \| \$1\.25 \| 100\.0% \| 4\.4K \| \$284 \| Provider reported/, 'breakdown share text must mirror the model ledger row');
+state.breakdownGrouping = 'day';
+assert.match(breakdownShareText(), /^By day \(cost\)\nDay \| Codex \| Total \| Tokens \| Pricing/m, 'day grouping must copy the per-day ledger');
+assert.doesNotMatch(breakdownShareText(), /ClipboardItem/, 'the usage page must copy text only, without an image path');
+
+// 13. The compact share path must prefer the native atomic clipboard command, with a web
+// ClipboardItem fallback for older binaries.
+assert.match(source, /invoke\('copy_share'/, 'the compact share copy must call the native atomic clipboard command');
+assert.match(source, /invoke\('copy_share', \{\s*payload: \{/, 'the native clipboard command must receive its struct under the payload key');
+assert.match(source, /pngBase64/, 'the share payload must include a PNG for Chromium paste targets');
+assert.match(source, /FileReader/, 'the PNG must be produced from the same canvas blob');
+assert.match(markup, /data-share-copy="image"/, 'the share menu must offer an image-only copy for text-first paste targets');
+assert.match(styles, /\.share-menu \{ position: absolute;/, 'the share menu must never take layout space inside the header (no forehead)');
+assert.match(styles, /\.share-menu \{ position: absolute;[\s\S]*?z-index: 4;/, 'the share menu must float above the dashboard content');
+assert.match(source, /copyShareToClipboard\(null, canvas\)/, 'the image-only copy must omit the text placement');
+assert.match(source, /shareMenuOpenedByPress/, 'the share menu must open from a long press without firing the plain click copy');
+assert.doesNotMatch(markup, /data-share-copy="breakdown"/, 'the usage page must keep its single text copy, no image menu');
+assert.match(source, /new ClipboardItem/, 'a web ClipboardItem fallback must remain for older binaries');
+assert.match(source, /state\.view === 'breakdown'/, 'the share button must dispatch on the current view');
 
 console.log('popup render and breakdown navigation self-check: all assertions passed');
