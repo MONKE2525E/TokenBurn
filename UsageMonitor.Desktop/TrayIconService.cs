@@ -72,29 +72,38 @@ public sealed class TrayIconService : IDisposable
     private void RefreshTooltip()
     {
         if (_notifyIcon is null) return;
-        var values = _metrics.ToList();
+        _notifyIcon.Text = BuildTooltip(_metrics, _app.Settings.ResetTimeDisplay);
+    }
+
+    /// <summary>Pure tray-tooltip text builder: provider values joined with their reset windows,
+    /// truncated to the 63-char tray tooltip limit. Kept internal so the format is testable
+    /// without a notification icon.</summary>
+    internal static string BuildTooltip(IReadOnlyList<MetricDisplay> values, string resetDisplay)
+    {
         var tooltip = values.Count == 0
             ? "TokenBurn | no provider data yet"
             : "TokenBurn | " + string.Join(" | ", values.Select(v =>
             {
                 var reset = v.ResetAt is { } resetAt
-                    ? $" ({ResetTimeFormatter.FormatSurface(resetAt, _app.Settings.ResetTimeDisplay)})"
+                    ? $" ({ResetTimeFormatter.FormatSurface(resetAt, resetDisplay)})"
                     : string.Empty;
                 return $"{v.Provider} {v.Value}{reset}";
             }));
-        if (tooltip.Length > 63) tooltip = tooltip[..60] + "...";
-        _notifyIcon.Text = tooltip;
+        return tooltip.Length > 63 ? tooltip[..60] + "..." : tooltip;
     }
 
     public void ShowFallbackNotification(string message)
     {
-        // The old WinForms balloon was an unbranded second notification system. It could show
-        // after a failed popup launch or refresh and looked unrelated to TokenBurn. Preserve the
-        // diagnostic detail locally instead of surfacing a generic shell balloon.
-        new FileDiagnosticsLogger().Info("Shell fallback notification suppressed", new Dictionary<string, object?>
+        // User-initiated actions (popup start, settings, refresh) must not fail silently. The old
+        // WinForms balloon was an unbranded second notification system, so the detail goes through
+        // the same branded Windows App SDK pipeline as the quota/auth alerts instead. The
+        // diagnostic line is kept for the log so the same message can be correlated with the
+        // failing operation.
+        FileDiagnosticsLogger.Default.Info("Shell fallback notification raised", new Dictionary<string, object?>
         {
             ["message"] = message
         });
+        _appNotifications.ShowFallbackAlert(message);
     }
 
     public void ShowQuotaNotification(string message)
@@ -113,12 +122,15 @@ public sealed class TrayIconService : IDisposable
     {
         // Embedded Explorer placement is unsupported. If it falls back to the visible taskbar-edge
         // window, tell the user once so they understand the mode they are seeing. De-duplicate shell
-        // watchdog chatter, while still surfacing a fresh failure after a later reconnect.
+        // watchdog chatter, while still surfacing a fresh failure after a later reconnect. These
+        // transitions are log-only: the watchdog re-attaches on its own, so a toast here would
+        // fire on every Explorer shell restart without giving the user anything to do.
         var shouldNotify = _app.Settings.StatusSurface == StatusSurfaceMode.TaskbarWidget && !e.Attached;
         if (shouldNotify && !string.Equals(_lastTaskbarNotice, e.Message, StringComparison.Ordinal))
         {
             _lastTaskbarNotice = e.Message;
-            ShowFallbackNotification(e.Message);
+            FileDiagnosticsLogger.Default.Info("Taskbar strip state changed",
+                new Dictionary<string, object?> { ["message"] = e.Message });
         }
         else if (e.Attached)
         {
@@ -139,15 +151,25 @@ public sealed class TrayIconService : IDisposable
             var anchor = NativeMethods.GetCursorPos(out var cursor)
                 ? new System.Drawing.Point(cursor.X, cursor.Y)
                 : Forms.Cursor.Position;
-            if (_dashboard.TryToggleTauriPopup(anchor, useWidgetAvoidRect: false))
-            {
+            _ = ToggleDashboardAsync(anchor);
+        }));
+    }
+
+    private async Task ToggleDashboardAsync(System.Drawing.Point anchor)
+    {
+        try
+        {
+            if (await _dashboard.TryToggleTauriPopupAsync(anchor, useWidgetAvoidRect: false).ConfigureAwait(true))
                 return;
-            }
             if (_dashboard.IsVisible && _dashboard.WindowState == WindowState.Normal)
                 _dashboard.WindowState = WindowState.Minimized;
             else
-                _dashboard.ShowFromTray(anchor, useWidgetAvoidRect: false);
-        }));
+                await _dashboard.ShowFromTrayAsync(anchor, useWidgetAvoidRect: false).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            FileDiagnosticsLogger.Default.Warning("The tray toggle could not open the popup", exception: exception);
+        }
     }
 
     private void ShowTrayMenu()
@@ -194,7 +216,7 @@ public sealed class TrayIconService : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    new FileDiagnosticsLogger().Warning("Tray menu could not be opened", exception: ex);
+                    FileDiagnosticsLogger.Default.Warning("Tray menu could not be opened", exception: ex);
                     ShowBasicFallbackMenu(Forms.Cursor.Position);
                 }
             }), DispatcherPriority.Input);
@@ -230,7 +252,7 @@ public sealed class TrayIconService : IDisposable
         }
         catch (Exception fallbackException)
         {
-            new FileDiagnosticsLogger().Warning("Tray fallback menu could not be opened", exception: fallbackException);
+            FileDiagnosticsLogger.Default.Warning("Tray fallback menu could not be opened", exception: fallbackException);
         }
     }
 

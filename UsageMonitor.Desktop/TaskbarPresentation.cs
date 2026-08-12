@@ -6,11 +6,6 @@ namespace UsageMonitor.Desktop;
 /// <summary>Presentation rules that are specific to the compact taskbar surface.</summary>
 internal static class TaskbarMetricFilter
 {
-    public static IReadOnlyList<UsageSnapshotData> SelectConfigured(IEnumerable<UsageSnapshotData>? snapshots)
-        => (snapshots ?? [])
-            .Where(IsConfigured)
-            .ToArray();
-
     public static bool IsConfigured(UsageSnapshotData snapshot)
     {
         if (snapshot.Lines.Count == 0) return false;
@@ -57,33 +52,24 @@ internal static class MetricVisibility
     }
 }
 
-internal readonly record struct TaskbarLayoutDecision(
-    double AvailableWidthDip,
-    double RequestedWidthDip,
-    bool CompactValues,
-    double Scale)
+internal readonly record struct TaskbarLayoutDecision(double AvailableWidthDip)
 {
+    // The overlay controller asks for the width budget only; the renderer applies its own
+    // compaction once it knows the budget.
     public static TaskbarLayoutDecision Calculate(
-        double requestedWidthDip,
         double taskbarLengthDip,
         double reservedEdgeDip = 180,
         double sideMarginDip = 8)
     {
-        var requested = Math.Max(40, requestedWidthDip);
         var available = Math.Max(40, taskbarLengthDip - reservedEdgeDip - sideMarginDip);
-        var compact = requested > available;
-        var scale = compact ? Math.Clamp(available / requested, 0.55, 1) : 1;
-        return new TaskbarLayoutDecision(available, requested, compact, scale);
+        return new TaskbarLayoutDecision(available);
     }
 }
 
 internal readonly record struct TaskbarStripPlacementResult(
     System.Drawing.Rectangle Bounds,
     double EdgeOffsetDip,
-    bool ResetPersistedOffset,
-    bool Vertical,
-    double Scale,
-    int PhysicalEdgeOffset)
+    bool ResetPersistedOffset)
 {
     public bool IsSane(System.Drawing.Rectangle taskbar)
         => Bounds.Width >= 40 && Bounds.Height >= 26 &&
@@ -122,7 +108,7 @@ internal static class TaskbarStripPlacement
         double reservedEdgeDip = SafeMarginDip)
     {
         if (taskbar.Width <= 0 || taskbar.Height <= 0)
-            return new TaskbarStripPlacementResult(System.Drawing.Rectangle.Empty, DefaultEdgeOffsetDip, true, false, 1, 0);
+            return new TaskbarStripPlacementResult(System.Drawing.Rectangle.Empty, DefaultEdgeOffsetDip, true);
 
         var scale = double.IsFinite(dpi) && dpi > 0 ? dpi / 96.0 : 1;
         var vertical = taskbar.Width < taskbar.Height;
@@ -167,7 +153,7 @@ internal static class TaskbarStripPlacement
         var width = vertical ? Math.Min(taskbar.Width, crossAxisSize) : dimension;
         var height = vertical ? dimension : crossAxisSize;
         var bounds = new System.Drawing.Rectangle(x, y, width, height);
-        return new TaskbarStripPlacementResult(bounds, edgeOffsetPixels / scale, reset, vertical, scale, edgeOffsetPixels);
+        return new TaskbarStripPlacementResult(bounds, edgeOffsetPixels / scale, reset);
     }
 
     public static double CalculateDraggedEdgeOffset(

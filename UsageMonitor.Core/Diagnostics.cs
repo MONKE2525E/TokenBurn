@@ -5,6 +5,37 @@ using System.Text.RegularExpressions;
 
 namespace UsageMonitor.Core;
 
+/// <summary>
+/// Safe version metadata for diagnostics surfaces. Never includes paths, credentials, or commit
+/// hashes beyond the assembly's own informational version.
+/// </summary>
+public static class ProductInfo
+{
+    public static string Version { get; } = ReadVersion();
+
+    private static string ReadVersion()
+    {
+        try
+        {
+            var assembly = typeof(ProductInfo).Assembly;
+            var informational = assembly
+                .GetCustomAttributes(false)
+                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+                .FirstOrDefault()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(informational))
+            {
+                var plus = informational.IndexOf('+');
+                return plus > 0 ? informational[..plus] : informational;
+            }
+            return assembly.GetName().Version?.ToString() ?? "0.0.0";
+        }
+        catch
+        {
+            return "0.0.0";
+        }
+    }
+}
+
 public sealed class NullDiagnosticsLogger : IDiagnosticsLogger
 {
     public static NullDiagnosticsLogger Instance { get; } = new();
@@ -96,9 +127,57 @@ public static partial class SensitiveDataRedactor
     private static partial Regex KeyValueRegex();
 }
 
+/// <summary>
+/// Decorates an <see cref="IDiagnosticsLogger"/> by appending a correlation identifier to the
+/// data of every entry. Keeps refresh orchestration traceable end-to-end without touching every
+/// provider call site, and never mutates the caller's original data dictionary.
+/// </summary>
+public sealed class CorrelatingDiagnosticsLogger : IDiagnosticsLogger
+{
+    private readonly IDiagnosticsLogger _inner;
+    private readonly string _refreshId;
+
+    public CorrelatingDiagnosticsLogger(IDiagnosticsLogger inner, string refreshId)
+    {
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        _refreshId = string.IsNullOrWhiteSpace(refreshId) ? Guid.NewGuid().ToString("N")[..8] : refreshId;
+    }
+
+    public static IDiagnosticsLogger? Wrap(IDiagnosticsLogger? inner, string? refreshId)
+        => inner is null || string.IsNullOrWhiteSpace(refreshId)
+            ? inner
+            : new CorrelatingDiagnosticsLogger(inner, refreshId);
+
+    public void Debug(string message, IReadOnlyDictionary<string, object?>? data = null)
+        => _inner.Debug(message, WithRefreshId(data));
+    public void Info(string message, IReadOnlyDictionary<string, object?>? data = null)
+        => _inner.Info(message, WithRefreshId(data));
+    public void Warning(string message, IReadOnlyDictionary<string, object?>? data = null, Exception? exception = null)
+        => _inner.Warning(message, WithRefreshId(data), exception);
+    public void Error(string message, IReadOnlyDictionary<string, object?>? data = null, Exception? exception = null)
+        => _inner.Error(message, WithRefreshId(data), exception);
+
+    private IReadOnlyDictionary<string, object?> WithRefreshId(IReadOnlyDictionary<string, object?>? data)
+    {
+        if (data is null)
+            return new Dictionary<string, object?> { ["refreshId"] = _refreshId };
+        if (data.TryGetValue("refreshId", out var existing) && existing is string { Length: > 0 })
+            return data;
+        var merged = new Dictionary<string, object?>(data, StringComparer.Ordinal) { ["refreshId"] = _refreshId };
+        return merged;
+    }
+}
+
 /// <summary>Line-delimited JSON logger with deterministic redaction and bounded message size.</summary>
 public sealed class FileDiagnosticsLogger : IDiagnosticsLogger, IDisposable
 {
+    /// <summary>
+    /// Shared process-wide file logger for the standard diagnostics log. One instance keeps a
+    /// single rotation state and avoids re-creating the logger (and its path checks) per entry.
+    /// Call sites that need a custom path or cap construct their own instance.
+    /// </summary>
+    public static FileDiagnosticsLogger Default { get; } = new();
+
     private readonly string _path;
     private readonly object _sync = new();
     private readonly long _maxBytes;

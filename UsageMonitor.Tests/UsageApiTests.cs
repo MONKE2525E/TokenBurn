@@ -127,9 +127,12 @@ public sealed class UsageApiTests
         private readonly IReadOnlyList<UsageSnapshotData> _snapshots = snapshots;
         public IReadOnlySet<string> KnownProviderIds { get; } = new HashSet<string>(["codex", "claude-code"], StringComparer.OrdinalIgnoreCase);
         public bool LastForce { get; private set; }
-        public Task<IReadOnlyList<UsageSnapshotData>> GetSnapshotsAsync(string? providerId, bool force, CancellationToken cancellationToken = default)
+        public string? LastRefreshId { get; private set; }
+        public Task<IReadOnlyList<UsageSnapshotData>> GetSnapshotsAsync(string? providerId, bool force,
+            CancellationToken cancellationToken = default, string? refreshId = null)
         {
             LastForce = force;
+            LastRefreshId = refreshId;
             return Task.FromResult<IReadOnlyList<UsageSnapshotData>>(providerId is null
                 ? _snapshots
                 : _snapshots.Where(x => string.Equals(x.ProviderId, providerId, StringComparison.OrdinalIgnoreCase)).ToArray());
