@@ -136,17 +136,33 @@ public sealed class AntigravityCliUsageScanner
     private IReadOnlyList<string> DiscoverDatabases()
     {
         var configured = _dataDirectoryOverride()?.Trim();
-        var directory = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(_userProfile(), ".gemini", "antigravity-cli", "conversations")
-            : Path.Combine(Environment.ExpandEnvironmentVariables(configured), "conversations");
-        if (!Directory.Exists(directory)) return Array.Empty<string>();
-        try
+        var cliRoot = Path.Combine(_userProfile(), ".gemini");
+        // The agy CLI's server reads conversations from `.gemini/antigravity/conversations` on
+        // current Windows builds (observed in the CLI's own log), while older layouts and the
+        // `AGY_DATA_DIR` override use `.gemini/antigravity-cli/conversations`. Use the first
+        // candidate that actually contains databases: conversation rows carry no message identity,
+        // so scanning two layouts that both contain data could double-count the same sessions.
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(configured))
+            candidates.Add(Path.Combine(Environment.ExpandEnvironmentVariables(configured), "conversations"));
+        candidates.Add(Path.Combine(cliRoot, "antigravity", "conversations"));
+        candidates.Add(Path.Combine(cliRoot, "antigravity-cli", "conversations"));
+
+        foreach (var directory in candidates)
         {
-            return Directory.EnumerateFiles(directory, "*.db", SearchOption.TopDirectoryOnly)
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+            if (!Directory.Exists(directory)) continue;
+            try
+            {
+                var databases = Directory.EnumerateFiles(directory, "*.db", SearchOption.TopDirectoryOnly)
+                    .Select(Path.GetFullPath)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                if (databases.Length > 0) return databases;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
-        catch (IOException) { return Array.Empty<string>(); }
-        catch (UnauthorizedAccessException) { return Array.Empty<string>(); }
+        return Array.Empty<string>();
     }
 
     private static bool TryGetNestedVarint(byte[] data, int[] path, out ulong value, int index = 0)
