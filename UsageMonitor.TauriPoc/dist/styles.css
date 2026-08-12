@@ -111,9 +111,10 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .icon-button:disabled { cursor: default; opacity: .5; }
 .copy-icon { font-size: 18px; }
 .header-actions { margin-left: auto; display: flex; gap: 4px; }
-.hint, .metric-menu { position: absolute; z-index: 4; top: 45px; background: var(--frost-menu); border: 1px solid rgba(255,255,255,.28); border-radius: 10px; box-shadow: 0 10px 26px #0008; padding: 8px 10px; color: var(--muted); font-size: 12px; transform-origin: top left; }
+.hint, .metric-menu, .share-menu { position: absolute; z-index: 4; top: 45px; background: var(--frost-menu); border: 1px solid rgba(255,255,255,.28); border-radius: 10px; box-shadow: 0 10px 26px #0008; padding: 8px 10px; color: var(--muted); font-size: 12px; transform-origin: top left; }
 /* Anchored under the metric button it belongs to. */
 .metric-menu { left: 18px; display: grid; gap: 3px; min-width: 172px; padding: 9px; }
+.share-menu { right: 44px; display: grid; gap: 3px; min-width: 178px; padding: 9px; transform-origin: top right; }
 /* Anchored under the info button, not under the metric button next to it. The left edge is set
    from the button's real position in app.js, because the metric title before it changes width. */
 .hint { left: 18px; right: 18px; }
@@ -121,8 +122,9 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .menu-indicator { width: 7px; height: 7px; margin-inline: auto; border-radius: 50%; background: var(--blue); opacity: 0; transform: scale(.55); transition: opacity var(--dur-micro) var(--ease-out), transform var(--dur-micro) var(--ease-out); }
 .menu-indicator.is-on { opacity: 1; transform: scale(1); }
 .menu-action-indicator { width: 5px; height: 5px; background: var(--muted); opacity: .55; transform: none; }
-.metric-menu button:hover, .metric-menu button.selected { background: #3b3b3d; transition-duration: var(--dur-micro); }
-.metric-menu button:active { background: #454548; transition-duration: 80ms; }
+.share-menu button { text-align: left; padding: 9px 11px; background: transparent; border-radius: 9px; display: grid; grid-template-columns: 14px 1fr; align-items: center; gap: 6px; transition: background 140ms ease, color 140ms ease; }
+.metric-menu button:hover, .metric-menu button.selected, .share-menu button:hover { background: #3b3b3d; transition-duration: var(--dur-micro); }
+.metric-menu button:active, .share-menu button:active { background: #454548; transition-duration: 80ms; }
 
 /* The native shell owns outer-window geometry. This only transitions the content swap, keeping
    WebView layout work cheap while the popup widens around it. */
