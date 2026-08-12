@@ -26,6 +26,8 @@ public sealed class LoopbackSecurityTests
     [InlineData("10.0.0.8", false)]
     [InlineData("tauri.localhost", false)]
     [InlineData("127.0.0.1:6736:extra", false)]
+    [InlineData("[::1]evil.example", false)]
+    [InlineData("[::1]evil.example:6736", false)]
     public void HostGateAcceptsOnlyExactLoopbackHostNames(string? host, bool allowed)
     {
         Assert.Equal(allowed, LoopbackRequestGate.IsAllowedHost(host));

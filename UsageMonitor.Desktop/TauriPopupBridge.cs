@@ -215,12 +215,13 @@ public sealed class TauriPopupBridge : IDisposable
             var method = requestLine?.ElementAtOrDefault(0) ?? "GET";
             var path = requestLine?.ElementAtOrDefault(1);
             var headerEnd = request.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            var headerSection = headerEnd >= 0 ? request[..headerEnd] : request;
             var requestBody = headerEnd >= 0 ? request[(headerEnd + 4)..] : string.Empty;
 
             if (!ControlGateAllows(method, path,
-                ParseHeader(request, "Host"),
-                ParseHeader(request, "Origin"),
-                ParseHeader(request, LoopbackRequestGate.NativeClientMarkerHeader)))
+                ParseHeader(headerSection, "Host"),
+                ParseHeader(headerSection, "Origin"),
+                ParseHeader(headerSection, LoopbackRequestGate.NativeClientMarkerHeader)))
             {
                 await WriteControlResponseAsync(stream, "403 Forbidden").ConfigureAwait(false);
                 return;
