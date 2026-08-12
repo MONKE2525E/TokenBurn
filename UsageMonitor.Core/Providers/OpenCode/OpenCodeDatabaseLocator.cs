@@ -24,6 +24,9 @@ public sealed class OpenCodeDatabaseLocator : IOpenCodeDatabaseLocator
     private readonly Func<string?> _localAppData;
     private readonly Func<string?> _activeDatabasePath;
     private readonly bool _includeDefaultLocations;
+    private readonly TimeSpan _discoveryTtl;
+    private DateTimeOffset _discoveryExpiresAt;
+    private OpenCodeDatabaseDiscovery? _cachedDiscovery;
 
     public OpenCodeDatabaseLocator(
         Func<string?>? dataDirectoryOverride = null,
@@ -31,7 +34,8 @@ public sealed class OpenCodeDatabaseLocator : IOpenCodeDatabaseLocator
         Func<string>? userProfile = null,
         Func<string?>? localAppData = null,
         Func<string?>? activeDatabasePath = null,
-        bool includeDefaultLocations = true)
+        bool includeDefaultLocations = true,
+        TimeSpan? discoveryTtl = null)
     {
         _dataDirectoryOverride = dataDirectoryOverride ?? (() => Environment.GetEnvironmentVariable("OPENCODE_DATA_DIR"));
         _xdgDataHome = xdgDataHome ?? (() => Environment.GetEnvironmentVariable("XDG_DATA_HOME"));
@@ -39,9 +43,33 @@ public sealed class OpenCodeDatabaseLocator : IOpenCodeDatabaseLocator
         _localAppData = localAppData ?? (() => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
         _activeDatabasePath = activeDatabasePath ?? FindActiveDatabasePath;
         _includeDefaultLocations = includeDefaultLocations;
+        // Resolving the active database spawns the opencode CLI (`opencode db path`), a Node
+        // process that is far too heavy to launch on every five-minute refresh. The path is
+        // stable between OpenCode releases, so cache it and only re-resolve once the cached
+        // paths are gone or the TTL expires.
+        _discoveryTtl = discoveryTtl ?? TimeSpan.FromMinutes(10);
     }
 
     public OpenCodeDatabaseDiscovery Discover()
+    {
+        if (_cachedDiscovery is { } cached && !IsExpired(cached))
+            return cached;
+
+        var discovery = DiscoverCore();
+        _cachedDiscovery = discovery;
+        _discoveryExpiresAt = DateTimeOffset.UtcNow + _discoveryTtl;
+        return discovery;
+    }
+
+    private bool IsExpired(OpenCodeDatabaseDiscovery cached)
+    {
+        if (DateTimeOffset.UtcNow >= _discoveryExpiresAt) return true;
+        // The cached paths are only useful while at least one database still exists. Re-resolve
+        // early when OpenCode moved or recreated its data directory.
+        return cached.DatabasePaths.All(path => !File.Exists(path));
+    }
+
+    private OpenCodeDatabaseDiscovery DiscoverCore()
     {
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var explicitDirectory = Trim(_dataDirectoryOverride());

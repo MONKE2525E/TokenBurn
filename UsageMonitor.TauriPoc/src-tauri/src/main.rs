@@ -14,7 +14,13 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, State,
     WebviewWindow, WindowEvent,
 };
-use windows::core::HSTRING;
+use windows::core::{w, HSTRING};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, GA_ROOT, HWND_TOPMOST,
@@ -38,6 +44,7 @@ static BREAKDOWN_GEOMETRY_ANIMATING: AtomicBool = AtomicBool::new(false);
 static POPUP_MOTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static POPUP_MOTION_REDUCED: AtomicBool = AtomicBool::new(false);
 static POPUP_ANCHOR_BOTTOM: AtomicBool = AtomicBool::new(true);
+static VISIBILITY_NOTIFY: std::sync::OnceLock<mpsc::Sender<String>> = std::sync::OnceLock::new();
 
 #[derive(Clone, Copy, Debug)]
 struct PhysicalWindowBounds {
@@ -170,8 +177,12 @@ fn anchored_resize_x(
     monitor_left: i32,
     monitor_right: i32,
 ) -> i32 {
+    // A clamp with min > max panics. Narrow monitors (RDP sessions, 640px VMs) or a huge
+    // breakdown width can make `right_limit - target_width` land left of `left_limit`; the
+    // widened range keeps the output bounded instead of crashing the popup on those displays.
     let left_limit = monitor_left + 8;
     let right_limit = monitor_right - 8;
+    let max_x = (right_limit - target_width).max(left_limit);
     let current_right = current_x + current_width;
     let left_gap = (current_x - left_limit).abs();
     let right_gap = (right_limit - current_right).abs();
@@ -180,7 +191,7 @@ fn anchored_resize_x(
     } else {
         current_right - target_width
     };
-    anchored_x.clamp(left_limit, right_limit - target_width)
+    anchored_x.clamp(left_limit, max_x)
 }
 
 #[derive(Default)]
@@ -188,13 +199,29 @@ struct AppState {
     refresh_in_flight: Mutex<bool>,
 }
 
+// One HTTP client for the whole popup. Connection pools are shared across every command, so the
+// per-invocation `reqwest::Client::new()` from before did not cost much individually but kept
+// discarding warm connections and re-doing TLS/socket setup for nothing.
+static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+}
+
+// Recovers from a poisoned lock instead of failing every later request. The only work done while
+// holding `refresh_in_flight` is a bool store, so a panic (e.g. a cancelled task unwind) must not
+// wedge the refresh path forever.
+fn refresh_in_flight(state: &AppState) -> std::sync::MutexGuard<'_, bool> {
+    state
+        .refresh_in_flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[tauri::command]
 async fn fetch_usage(force: bool, state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     {
-        let mut in_flight = state
-            .refresh_in_flight
-            .lock()
-            .map_err(|_| "refresh lock poisoned")?;
+        let mut in_flight = refresh_in_flight(&state);
         if *in_flight {
             return Err("A refresh is already in progress.".to_string());
         }
@@ -207,8 +234,9 @@ async fn fetch_usage(force: bool, state: State<'_, AppState>) -> Result<Vec<Valu
         } else {
             "/v1/usage"
         };
-        let response = reqwest::Client::new()
+        let response = http_client()
             .get(format!("{API_BASE}{suffix}"))
+            .header(NATIVE_MARKER_HEADER, NATIVE_MARKER_VALUE)
             // The desktop API starts alongside the popup. A connection attempted during that
             // small startup race must fail and let the frontend retry, not leave the popup in
             // "Refreshing..." forever with synthetic empty provider cards.
@@ -226,15 +254,203 @@ async fn fetch_usage(force: bool, state: State<'_, AppState>) -> Result<Vec<Valu
     }
     .await;
 
-    if let Ok(mut in_flight) = state.refresh_in_flight.lock() {
-        *in_flight = false;
-    }
+    // Clearing must use the same poisoned-lock recovery as acquisition; a plain lock() here
+    // would wedge the refresh path forever if a panic ever left the mutex poisoned.
+    let mut in_flight = refresh_in_flight(&state);
+    *in_flight = false;
     result
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareClipboardPayload {
+    // null when only the chart image is wanted (paste targets that drop images when text is
+    // present, e.g. some chat composers).
+    text: Option<String>,
+    width: u32,
+    height: u32,
+    rgba_base64: String,
+    png_base64: String,
+}
+
+// Chromium-family apps (ChatGPT, Edge, browser pastes) read image data from the registered "PNG"
+// clipboard format, not CF_DIB. Register it once and write the PNG alongside the text and DIB so
+// browser paste targets receive the chart instead of an empty upload box.
+static PNG_CLIPBOARD_FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+fn png_clipboard_format() -> u32 {
+    *PNG_CLIPBOARD_FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("PNG")) })
+}
+
+// The popup shares a chart image plus text in one atomic clipboard write: CF_UNICODETEXT for plain
+// editors and assistant chats, CF_DIB (32bpp BI_RGB) for image targets. The image arrives as raw
+// RGBA bytes from the WebView canvas so no image-decoding dependency is needed. Windows expects a
+// bottom-up DIB, so the header marks the rows as already top-down with a negative height.
+fn dib_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(40 + rgba.len());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&(width as i32).to_le_bytes());
+    bytes.extend_from_slice(&(-(height as i32)).to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&(rgba.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    for pixel in rgba.chunks_exact(4) {
+        bytes.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    bytes
+}
+
+fn alloc_global_bytes(bytes: &[u8]) -> Result<HGLOBAL, String> {
+    if bytes.is_empty() {
+        return Err("cannot allocate an empty clipboard payload".into());
+    }
+    // Exact size: clipboard consumers size binary formats via GlobalSize, and an extra
+    // uninitialized byte would be read as part of the DIB or PNG payload.
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
+        .map_err(|_| "GlobalAlloc failed".to_string())?;
+    let locked = unsafe { GlobalLock(handle) };
+    if locked.is_null() {
+        let _ = unsafe { GlobalFree(Some(handle)) };
+        return Err("GlobalLock failed".to_string());
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len());
+    }
+    let _ = unsafe { GlobalUnlock(handle) };
+    Ok(handle)
+}
+
+// Allocates every clipboard piece up front. A failure part-way must not leak the handles already
+// allocated, so any successful allocations are freed before the error is returned.
+fn alloc_global_pieces(pieces: &[(u32, Vec<u8>)]) -> Result<Vec<(u32, HGLOBAL)>, String> {
+    let mut placements = Vec::with_capacity(pieces.len());
+    for (format, bytes) in pieces {
+        match alloc_global_bytes(bytes) {
+            Ok(handle) => placements.push((*format, handle)),
+            Err(error) => {
+                for (_, handle) in &placements {
+                    let _ = unsafe { GlobalFree(Some(*handle)) };
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(placements)
+}
+
+// Opens the clipboard once and places every format. Returns which placements the system accepted;
+// the caller frees rejected handles. A narrow helper so the unsafe block only wraps the FFI calls,
+// not the surrounding ownership and error logic.
+fn place_clipboard_data(placements: &[(u32, HGLOBAL)]) -> Result<Vec<bool>, String> {
+    // OpenClipboard blocks while another process owns the clipboard (clipboard managers, Office,
+    // screen readers). Retry briefly instead of failing the copy at the first sign of contention;
+    // the retries run on a background thread, so they cannot stall the UI.
+    let mut opened = false;
+    for _ in 0..20 {
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !opened {
+        return Err("could not open the Windows clipboard".into());
+    }
+    let mut accepted = vec![false; placements.len()];
+    unsafe {
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return Err("could not empty the Windows clipboard".into());
+        }
+        for (index, (format, handle)) in placements.iter().enumerate() {
+            accepted[index] = SetClipboardData(*format, Some(HANDLE(handle.0))).is_ok();
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(accepted)
+}
+
+#[tauri::command]
+async fn copy_share(payload: ShareClipboardPayload) -> Result<(), String> {
+    // The share payload can be a 4096x4096 RGBA frame (64 MB) and the clipboard handshake can
+    // wait on other processes, so the whole operation runs off the Tauri main thread. A sync
+    // command here froze every popup animation, show/hide, and focus handler during a copy.
+    tauri::async_runtime::spawn_blocking(move || copy_share_blocking(payload))
+        .await
+        .map_err(|error| format!("the share worker failed: {error}"))?
+}
+
+fn copy_share_blocking(payload: ShareClipboardPayload) -> Result<(), String> {
+    use base64::Engine;
+    if payload.width == 0 || payload.height == 0 || payload.width > 4096 || payload.height > 4096 {
+        return Err("share image dimensions are invalid".into());
+    }
+    let expected = (payload.width as usize)
+        .checked_mul(payload.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("share image dimensions overflow")?;
+    let rgba = base64::engine::general_purpose::STANDARD
+        .decode(&payload.rgba_base64)
+        .map_err(|_| "share image data is not valid base64")?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "share image size mismatch: expected {expected} bytes, got {}",
+            rgba.len()
+        ));
+    }
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(&payload.png_base64)
+        .map_err(|_| "share image PNG is not valid base64")?;
+
+    // (clipboard format, payload bytes). Handles the clipboard accepts are owned by the system
+    // once SetClipboardData succeeds; rejected ones must be freed by us. Text is optional: an
+    // image-only copy skips CF_UNICODETEXT so text-first paste targets attach the chart.
+    // CF_UNICODETEXT consumers read until a UTF-16 null terminator, so the text carries one.
+    let mut pieces = Vec::with_capacity(3);
+    if let Some(text) = &payload.text {
+        let text_bytes: Vec<u8> = text
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        pieces.push((CF_UNICODETEXT.0 as u32, text_bytes));
+    }
+    let dib = dib_bytes(payload.width, payload.height, &rgba);
+    pieces.push((CF_DIB.0 as u32, dib));
+    let png_format = png_clipboard_format();
+    // An empty PNG (frontend failed to encode) must not fail the whole copy: text and DIB are
+    // still valid, so skip the PNG placement instead of erroring on the empty allocation.
+    if png_format != 0 && !png.is_empty() {
+        pieces.push((png_format, png));
+    }
+    let placements = alloc_global_pieces(&pieces)?;
+
+    // Handles the clipboard accepts are owned by the system; rejected ones are freed here.
+    let accepted = place_clipboard_data(&placements).map_err(|error| {
+        for (_, handle) in &placements {
+            let _ = unsafe { GlobalFree(Some(*handle)) };
+        }
+        error
+    })?;
+    let all_accepted = accepted.iter().all(|ok| *ok);
+    if !all_accepted {
+        for (index, (_, handle)) in placements.iter().enumerate() {
+            if !accepted[index] {
+                let _ = unsafe { GlobalFree(Some(*handle)) };
+            }
+        }
+        return Err("the clipboard rejected part of the share payload".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn fetch_enabled_providers() -> Result<Vec<String>, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .get("http://127.0.0.1:6738/providers")
         .timeout(Duration::from_secs(3))
         .send()
@@ -254,8 +470,9 @@ async fn fetch_enabled_providers() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 async fn request_desktop_refresh() -> Result<(), String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post("http://127.0.0.1:6738/refresh")
+        .header(NATIVE_MARKER_HEADER, NATIVE_MARKER_VALUE)
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -417,7 +634,7 @@ async fn set_breakdown_mode(
 
 #[tauri::command]
 async fn fetch_refresh_status() -> Result<Value, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .get("http://127.0.0.1:6738/refresh-status")
         .timeout(Duration::from_millis(900))
         .send()
@@ -464,7 +681,10 @@ fn open_claude_login() -> Result<(), String> {
             .arg("auth")
             .arg("login")
             .spawn()
-            .map_err(|error| format!("Could not start Claude sign-in: {error}"))?;
+            // The OS error is implementation detail (file names, error codes). The user action
+            // is the same either way: the terminal did not come up, so sign in from a terminal
+            // they already have open.
+            .map_err(|_| "Could not start a terminal for Claude sign-in. Sign in by running `claude auth login` in a terminal you have open.".to_string())?;
         Ok(())
     }
     #[cfg(not(windows))]
@@ -474,8 +694,49 @@ fn open_claude_login() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_antigravity_login() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::env;
+        use std::os::windows::process::CommandExt;
+
+        // The Antigravity CLI ships through npm as an `agy.cmd` shim. Open it in its own console so
+        // the user can complete the browser sign-in flow, then finish in the CLI.
+        let mut candidates = Vec::new();
+        if let Ok(app_data) = env::var("APPDATA") {
+            candidates.push(std::path::PathBuf::from(app_data).join("npm\\agy.cmd"));
+        }
+        if let Ok(output) = Command::new("where.exe").arg("agy.cmd").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            candidates.extend(stdout.lines().map(std::path::PathBuf::from));
+        }
+        let script = candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| {
+                "The Antigravity CLI (agy) was not found on PATH. Install it, then try again."
+                    .to_string()
+            })?;
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+        Command::new("cmd.exe")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .arg("/c")
+            .arg(script)
+            .spawn()
+            // See open_claude_login: the OS error is implementation detail; the user action is
+            // to finish the sign-in from a terminal they already have open.
+            .map_err(|_| "Could not start a terminal for Antigravity sign-in. Finish signing in by running `agy` in a terminal you have open.".to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Antigravity sign-in is only available on Windows in this build.".to_string())
+    }
+}
+
+#[tauri::command]
 async fn get_settings_data() -> Result<Value, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .get("http://127.0.0.1:6738/settings-data")
         .timeout(Duration::from_millis(900))
         .send()
@@ -495,8 +756,9 @@ async fn get_settings_data() -> Result<Value, String> {
 
 #[tauri::command]
 async fn apply_settings_data(settings: Value) -> Result<(), String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post("http://127.0.0.1:6738/settings-data")
+        .header(NATIVE_MARKER_HEADER, NATIVE_MARKER_VALUE)
         .timeout(Duration::from_millis(900))
         .json(&settings)
         .send()
@@ -513,8 +775,9 @@ async fn apply_settings_data(settings: Value) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_spend_metric(metric: String) -> Result<(), String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post("http://127.0.0.1:6738/spend-metric")
+        .header(NATIVE_MARKER_HEADER, NATIVE_MARKER_VALUE)
         .body(metric)
         .send()
         .await
@@ -526,6 +789,26 @@ async fn set_spend_metric(metric: String) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn get_diagnostics_bundle() -> Result<Value, String> {
+    let response = http_client()
+        .get("http://127.0.0.1:6738/diagnostics-bundle")
+        .timeout(Duration::from_millis(2000))
+        .send()
+        .await
+        .map_err(|error| format!("The desktop diagnostics surface is unavailable: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "The desktop diagnostics surface returned HTTP {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("The desktop diagnostics surface returned invalid JSON: {error}"))
 }
 
 #[tauri::command]
@@ -563,6 +846,10 @@ fn set_popup_motion_reduced(reduced: bool) {
 }
 
 fn hide_popup_window(window: &WebviewWindow) -> Result<(), String> {
+    // An intentional hide ends any reveal in progress. If the deferred reveal-clear (see
+    // show_popup_at_once) is skipped because the intent moved on, clearing here keeps the flag
+    // from suppressing focus-loss hides forever after a show interrupted by a hide.
+    REVEALING.store(false, Ordering::SeqCst);
     window.hide().map_err(|error| error.to_string())?;
     native_visibility(window, false);
     notify_desktop_visibility("/popup-hidden");
@@ -629,20 +916,39 @@ fn request_popup_close(window: &WebviewWindow, intent: u64, focus_dismiss: bool)
 }
 
 fn notify_desktop_visibility(path: &'static str) {
-    use std::io::Write;
-    use std::net::TcpStream;
+    // Popup visibility notifications must arrive at the desktop host in order, or a later
+    // /popup-hidden can land before an earlier /popup-shown and leave the strip's z-order wrong.
+    // The notifier thread also owns the blocking connect/write: show/hide previously did the
+    // connect_timeout on whatever thread called in — the Tauri main thread during a taskbar
+    // click — so a slow loopback connect visibly stalled the popup open/close.
+    let _ = visibility_notifier().send(path.to_string());
+}
 
-    // Keep popup visibility notifications ordered. Spawning one detached thread per event let a
-    // later /popup-hidden arrive before an earlier /popup-shown, leaving the desktop host in the
-    // wrong z-order state after a taskbar click.
-    let Ok(mut stream) = TcpStream::connect_timeout(
-        &"127.0.0.1:6738".parse().expect("valid loopback address"),
-        Duration::from_millis(120),
-    ) else {
-        return;
-    };
-    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    let _ = stream.write_all(request.as_bytes());
+fn visibility_notifier() -> mpsc::Sender<String> {
+    VISIBILITY_NOTIFY
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                use std::net::TcpStream;
+                while let Ok(path) = receiver.recv() {
+                    // A desktop host still starting must not queue up: if this one connect fails,
+                    // the desktop host's own polling will pick the state up shortly.
+                    let Ok(mut stream) = TcpStream::connect_timeout(
+                        &"127.0.0.1:6738".parse().expect("valid loopback address"),
+                        Duration::from_millis(120),
+                    ) else {
+                        continue;
+                    };
+                    let request = format!(
+                        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{NATIVE_MARKER_HEADER}: {NATIVE_MARKER_VALUE}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(request.as_bytes());
+                }
+            });
+            sender
+        })
+        .clone()
 }
 
 fn native_visibility(window: &WebviewWindow, visible: bool) {
@@ -702,6 +1008,78 @@ fn query_string(path: &str, key: &str) -> Option<String> {
         let (name, value) = pair.split_once('=')?;
         (name == key).then(|| value.to_string())
     })
+}
+
+// The control channel is loopback-only, but any webpage can still reach 127.0.0.1 from the user's
+// browser. Browser requests (fetch, WebSocket handshakes, form posts) always carry an Origin
+// header, so an exact allowlist check rejects foreign webpages. A Host check defeats DNS
+// rebinding, where an attacker's domain resolves to 127.0.0.1: the Host header is then the
+// attacker's domain and the server must refuse it. Native clients send no Origin and a loopback
+// Host, so they are unaffected. Keep this list in sync with LoopbackRequestGate in the .NET side.
+const ALLOWED_ORIGINS: [&str; 4] = [
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:1420",
+];
+const ALLOWED_HOSTS: [&str; 4] = ["127.0.0.1", "localhost", "[::1]", "::1"];
+// Header sent by same-user native clients (the WPF shell, this process) on side-effectful
+// requests. Not a secret; it only distinguishes browser-context requests, which cannot attach it
+// without a CORS preflight the origin gate rejects, from native clients.
+const NATIVE_MARKER_HEADER: &str = "X-TokenBurn-Client";
+const NATIVE_MARKER_VALUE: &str = "1";
+
+fn is_allowed_marker(marker: Option<&str>) -> bool {
+    marker.is_some_and(|value| value.trim().eq_ignore_ascii_case(NATIVE_MARKER_VALUE))
+}
+
+fn is_allowed_origin(origin: Option<&str>) -> bool {
+    origin.map_or(true, |value| {
+        ALLOWED_ORIGINS
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(value))
+    })
+}
+
+fn is_allowed_host(host: Option<&str>) -> bool {
+    let Some(value) = host else {
+        // HTTP/1.0 clients omit the Host header; native callers keep working.
+        return true;
+    };
+    let candidate = value.trim();
+    if candidate.starts_with('[') {
+        let Some(end) = candidate.find(']') else {
+            return false;
+        };
+        ALLOWED_HOSTS
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&candidate[..=end]))
+    } else {
+        // A bracketed IPv6 host is handled above; a bare "::1" (or any multi-colon value) is
+        // only acceptable if it is exactly a known loopback host, never a split-and-prefix match.
+        let host_only = candidate.split(':').next().unwrap_or(candidate);
+        if candidate.matches(':').count() > 1 {
+            ALLOWED_HOSTS
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(candidate))
+        } else {
+            ALLOWED_HOSTS
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(host_only))
+        }
+    }
+}
+
+fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -846,26 +1224,76 @@ fn unix_now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn write_control_response(mut stream: TcpStream, status: &str) {
+fn write_control_response(stream: &mut TcpStream, status: &str) {
     let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn handle_control_connection(mut stream: TcpStream, app: &AppHandle) {
+/// Reads one bounded control request. A client that connects and never sends must not stall the
+/// accept loop, so the read is bounded; a request whose first line has no path is malformed and
+/// answered with a 400 here so the dispatch layer only ever sees real paths. The Origin, Host,
+/// and native-marker headers are returned alongside so the caller can apply the loopback gate.
+fn read_control_request(
+    stream: &mut TcpStream,
+) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
     let mut buffer = [0u8; 4096];
-    let Ok(read) = stream.read(&mut buffer) else {
-        return;
-    };
+    let read = stream.read(&mut buffer).ok()?;
     let request = String::from_utf8_lossy(&buffer[..read]);
-    let Some(path) = request
+    let path = request
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-    else {
+        .and_then(|line| line.split_whitespace().nth(1));
+    if path.is_none() {
         write_control_response(stream, "400 Bad Request");
+    }
+    let origin = request_header(&request, "Origin").map(str::to_string);
+    let host = request_header(&request, "Host").map(str::to_string);
+    let marker = request_header(&request, "X-TokenBurn-Client").map(str::to_string);
+    path.map(|path| (path.to_string(), origin, host, marker))
+}
+
+/// Serves one control connection. The dispatch closure runs the actual /show /hide /toggle work
+/// (which needs the real app handle); keeping it a parameter makes the whole read/respond contract
+/// testable with a plain socket pair.
+fn handle_control_stream<F>(stream: &mut TcpStream, dispatch: F)
+where
+    F: FnOnce(&str),
+{
+    let Some((path, origin, host, marker)) = read_control_request(stream) else {
+        // A stalled or truncated request gets no answer; the connection times out on its own.
         return;
     };
+    if !is_allowed_origin(origin.as_deref()) || !is_allowed_host(host.as_deref()) {
+        write_control_response(stream, "403 Forbidden");
+        return;
+    }
+    let side_effect =
+        path.starts_with("/show") || path.starts_with("/hide") || path.starts_with("/toggle");
+    if side_effect && origin.is_none() && !is_allowed_marker(marker.as_deref()) {
+        // A native client normally sends no Origin, so the origin gate above cannot tell it from
+        // an <img>/<script> GET issued by a hostile webpage, which also sends no Origin. The
+        // native marker header is the discriminator: browsers cannot attach it without a CORS
+        // preflight, which the origin gate rejects for foreign origins.
+        write_control_response(stream, "403 Forbidden");
+        return;
+    }
+    let status = if side_effect {
+        dispatch(&path);
+        "204 No Content"
+    } else {
+        "404 Not Found"
+    };
+    write_control_response(stream, status);
+}
 
+fn handle_control_connection(mut stream: TcpStream, app: &AppHandle) {
+    handle_control_stream(&mut stream, |path| dispatch_control_command(path, app));
+}
+
+fn dispatch_control_command(path: &str, app: &AppHandle) {
     if path.starts_with("/show") {
         let x = query_coordinate(path, "x").unwrap_or(0.0);
         let y = query_coordinate(path, "y").unwrap_or(0.0);
@@ -881,21 +1309,18 @@ fn handle_control_connection(mut stream: TcpStream, app: &AppHandle) {
                 if let Some(page) = page {
                     // The popup may be shown for the first time by this request. Delay the
                     // navigation event until the webview has had a chance to attach its listener.
-                    let page_window = window.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_millis(90));
-                        let script = match page.as_str() {
-                            "settings" => "window.dispatchEvent(new CustomEvent('usage-monitor-open-page', { detail: 'settings' }));",
-                            "customize" => "window.dispatchEvent(new CustomEvent('usage-monitor-open-page', { detail: 'customize' }));",
-                            _ => return,
-                        };
-                        let _ = page_window.eval(script);
-                        let _ = page_window.emit("open-page", page);
-                    });
+                    // The Tauri 'open-page' event is the only channel used: the page listens for
+                    // it directly, and the window CSP forbids eval-style script injection.
+                    if page == "settings" || page == "customize" {
+                        let page_window = window.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(90));
+                            let _ = page_window.emit("open-page", page);
+                        });
+                    }
                 }
             }
         });
-        write_control_response(stream, "204 No Content");
         return;
     }
 
@@ -907,7 +1332,6 @@ fn handle_control_connection(mut stream: TcpStream, app: &AppHandle) {
                 request_popup_close(&window, intent, false);
             }
         });
-        write_control_response(stream, "204 No Content");
         return;
     }
 
@@ -919,11 +1343,34 @@ fn handle_control_connection(mut stream: TcpStream, app: &AppHandle) {
         let _ = app.clone().run_on_main_thread(move || {
             toggle_popup(&app, x, y, avoid);
         });
-        write_control_response(stream, "204 No Content");
-        return;
     }
+}
 
-    write_control_response(stream, "404 Not Found");
+// Concurrent control-connection handlers. Each handler thread lives only as long as one bounded
+// read (500 ms) plus the request dispatch, so a client flood cannot grow threads without bound.
+const MAX_CONTROL_CONNECTIONS: u16 = 16;
+static CONTROL_CONNECTION_ACTIVE: Mutex<u16> = Mutex::new(0);
+static CONTROL_CONNECTION_SLOT: std::sync::Condvar = std::sync::Condvar::new();
+
+fn acquire_control_slot() {
+    let mut active = CONTROL_CONNECTION_ACTIVE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while *active >= MAX_CONTROL_CONNECTIONS {
+        active = CONTROL_CONNECTION_SLOT
+            .wait(active)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    *active += 1;
+}
+
+fn release_control_slot() {
+    let mut active = CONTROL_CONNECTION_ACTIVE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *active = active.saturating_sub(1);
+    drop(active);
+    CONTROL_CONNECTION_SLOT.notify_one();
 }
 
 fn start_control_server(app: AppHandle) {
@@ -932,7 +1379,16 @@ fn start_control_server(app: AppHandle) {
             return;
         };
         for stream in listener.incoming().flatten() {
-            handle_control_connection(stream, &app);
+            // Acquiring before spawning bounds the handler thread count; each permit is held at
+            // most ~500 ms by a stalled client because of the read timeout.
+            acquire_control_slot();
+            // Handle each connection on its own thread: the channel is a control surface, and a
+            // slow or stalled client must never block the taskbar/tray show-toggle commands.
+            let app = app.clone();
+            std::thread::spawn(move || {
+                handle_control_connection(stream, &app);
+                release_control_slot();
+            });
         }
     });
 }
@@ -1113,9 +1569,16 @@ fn show_popup_at_once(
             });
         });
     }
-    std::thread::spawn(|| {
+    // The reveal guard must not outlive its own show. The clear used to be unconditional 300 ms
+    // after show: a second show within that window (taskbar click while the popup is settling)
+    // had its REVEALING flag cleared by the first show's stale timer, so a focus loss in between
+    // hid the popup mid-reveal. Only clear when the intent that set the flag is still current.
+    let reveal_intent = intent;
+    std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
-        REVEALING.store(false, Ordering::SeqCst);
+        if POPUP_INTENT_GENERATION.load(Ordering::SeqCst) == reveal_intent {
+            REVEALING.store(false, Ordering::SeqCst);
+        }
     });
 }
 
@@ -1182,10 +1645,13 @@ fn main() {
             fetch_refresh_status,
             hide_popup,
             open_claude_login,
+            open_antigravity_login,
             get_settings_data,
             apply_settings_data,
+            get_diagnostics_bundle,
             set_spend_metric,
-            set_screen_share_privacy
+            set_screen_share_privacy,
+            copy_share
         ])
         .setup(move |app| {
             start_control_server(app.handle().clone());
@@ -1306,10 +1772,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        anchored_resize_x, animated_window_bounds, calculate_popup_position, popup_motion_y,
-        popup_size_for_monitor, resolve_anchor, second_instance_activation_target, LayoutRect,
-        PhysicalWindowBounds,
+        alloc_global_bytes, anchored_resize_x, animated_window_bounds, calculate_popup_position,
+        copy_share_blocking, dib_bytes, handle_control_stream, is_allowed_host, is_allowed_origin,
+        png_clipboard_format, popup_motion_y, popup_size_for_monitor, read_control_request,
+        resolve_anchor, second_instance_activation_target, LayoutRect, PhysicalWindowBounds,
+        ShareClipboardPayload,
     };
+    use base64::Engine;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 
     const MONITOR: LayoutRect = LayoutRect {
         left: 0.0,
@@ -1459,6 +1937,428 @@ mod tests {
     }
 
     #[test]
+    fn breakdown_expand_on_a_narrow_monitor_never_panics_and_stays_bounded() {
+        // A 640x480 RDP/VM session: the 920px breakdown target is wider than the whole monitor.
+        // clamp() with min > max used to panic here and take the popup down with it.
+        assert_eq!(anchored_resize_x(8, 320, 920, 0, 640), 8);
+        assert_eq!(anchored_resize_x(600, 40, 920, 0, 640), 8);
+        // A target that exactly fits the monitor still clamps inside the 8px margins on both
+        // sides: right-anchored at the edge, and a mid-screen popup.
+        assert_eq!(anchored_resize_x(632, 8, 624, 0, 640), 8);
+        let middle = anchored_resize_x(320, 320, 624, 0, 640);
+        assert!(
+            (8..=16).contains(&middle),
+            "middle anchor clamps near the left limit, got {middle}"
+        );
+    }
+
+    #[test]
+    fn breakdown_expand_is_bounded_on_a_narrow_high_dpi_monitor() {
+        // 800 logical px wide at 125% DPI = 1000 physical px; the 920-logical breakdown becomes
+        // 1150 physical px, wider than the monitor. Must clamp without panicking.
+        assert_eq!(anchored_resize_x(700, 300, 1150, 0, 1000), 8);
+        assert_eq!(anchored_resize_x(300, 700, 1150, 0, 1000), 8);
+    }
+
+    #[test]
+    fn breakdown_expand_keeps_a_multi_monitor_left_anchor() {
+        // A monitor left of the primary has negative coordinates; anchoring must respect them.
+        assert_eq!(anchored_resize_x(-2552, 320, 920, -2560, 0), -2552);
+        // Near the left edge the right anchor would push past the monitor's right margin, so the
+        // result clamps to keep the breakdown inside the monitor.
+        assert_eq!(anchored_resize_x(-232, 320, 920, -2560, 0), -928);
+    }
+
+    #[test]
+    fn stalled_control_client_does_not_block_later_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Mirror the production accept loop: one thread per connection, bounded read inside.
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    handle_control_stream(&mut stream, |_| {});
+                });
+            }
+        });
+        // A stalled client connects first and sends nothing.
+        let stalled = TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        // A legitimate request must be answered promptly while the stalled one is still pending.
+        let started = Instant::now();
+        let mut second = TcpStream::connect(address).unwrap();
+        second
+            .write_all(
+                b"GET /show?x=10&y=20 HTTP/1.1\r\nHost: localhost\r\nX-TokenBurn-Client: 1\r\n\r\n",
+            )
+            .unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        second.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "the second request must be served, got: {response}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "a stalled client must not delay later requests (took {:?})",
+            started.elapsed()
+        );
+        drop(stalled);
+    }
+
+    #[test]
+    fn malformed_control_request_is_rejected_with_400() {
+        let (mut client, mut server) = connected_control_pair();
+        std::thread::spawn(move || handle_control_stream(&mut server, |_| {}));
+        client
+            .write_all(b"PING\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "a request line with no path must be rejected, got: {response}"
+        );
+    }
+
+    #[test]
+    fn unknown_control_request_is_rejected_with_404() {
+        let (mut client, mut server) = connected_control_pair();
+        std::thread::spawn(move || handle_control_stream(&mut server, |_| {}));
+        client
+            .write_all(b"GET /no-such-command HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "an unknown path must be rejected, got: {response}"
+        );
+    }
+
+    #[test]
+    fn oversized_control_request_read_is_bounded() {
+        let (mut client, mut server) = connected_control_pair();
+        // More than the 4096-byte read buffer. The handler must read at most its bound, parse
+        // from what it saw, and not hang or panic on the remaining bytes.
+        let flood = format!("GET /show?x=1&y={} HTTP/1.1\r\n", "A".repeat(5000));
+        client.write_all(flood.as_bytes()).unwrap();
+        let (path, _, _, _) = read_control_request(&mut server)
+            .expect("the first bounded chunk must still parse a path");
+        assert!(
+            path.len() <= 4096,
+            "the parsed path must come from the bounded read, got {} bytes",
+            path.len()
+        );
+    }
+
+    #[test]
+    fn control_commands_reach_the_dispatcher_in_order() {
+        let dispatched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut client, mut server) = connected_control_pair();
+        let paths = dispatched.clone();
+        std::thread::spawn(move || {
+            handle_control_stream(&mut server, move |path| {
+                paths.lock().unwrap().push(path.to_string());
+            });
+        });
+        client
+            .write_all(
+                b"GET /show?x=1&y=2 HTTP/1.1\r\nHost: localhost\r\nX-TokenBurn-Client: 1\r\n\r\n",
+            )
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 204"));
+        assert_eq!(
+            *dispatched.lock().unwrap(),
+            vec!["/show?x=1&y=2".to_string()],
+            "the parsed path must reach the dispatcher"
+        );
+    }
+
+    #[test]
+    fn stalled_control_request_read_times_out() {
+        let (_client, mut server) = connected_control_pair();
+        let started = Instant::now();
+        let request = read_control_request(&mut server);
+        assert_eq!(request, None, "a stalled read must yield no request");
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "the read timeout must actually bound the stall (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn control_gate_blocks_foreign_origins_and_hosts() {
+        let allowed = [
+            (
+                "GET /show HTTP/1.1\r\nHost: 127.0.0.1:6737\r\nX-TokenBurn-Client: 1\r\n\r\n",
+                true,
+            ),
+            (
+                "GET /show HTTP/1.1\r\nHost: localhost\r\nOrigin: tauri://localhost\r\n\r\n",
+                true,
+            ),
+            (
+                "GET /show HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:1420\r\n\r\n",
+                true,
+            ),
+            // A plain native client (no Origin) must keep working when it carries the marker.
+            (
+                "GET /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-TokenBurn-Client: 1\r\n\r\n",
+                true,
+            ),
+            // A webpage must not drive the popup.
+            (
+                "GET /show HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\n\r\n",
+                false,
+            ),
+            // An <img>/<script> GET from a hostile webpage sends no Origin and no marker.
+            ("GET /show HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", false),
+            // A native client with the wrong marker value is not a native client.
+            (
+                "GET /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-TokenBurn-Client: 0\r\n\r\n",
+                false,
+            ),
+            // DNS rebinding sends the attacker's domain as the Host, marker or not.
+            (
+                "GET /show HTTP/1.1\r\nHost: evil.example\r\nX-TokenBurn-Client: 1\r\n\r\n",
+                false,
+            ),
+            (
+                "GET /show HTTP/1.1\r\nHost: 10.0.0.8\r\nOrigin: tauri://localhost\r\n\r\n",
+                false,
+            ),
+        ];
+        for (request, expected) in allowed {
+            let (mut client, mut server) = connected_control_pair();
+            let dispatched = std::sync::Arc::new(std::sync::Mutex::new(false));
+            let flag = dispatched.clone();
+            std::thread::spawn(move || {
+                handle_control_stream(&mut server, move |_| *flag.lock().unwrap() = true);
+            });
+            client.write_all(request.as_bytes()).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            if expected {
+                assert!(
+                    response.starts_with("HTTP/1.1 204"),
+                    "request {request:?} must be served, got: {response}"
+                );
+                assert!(
+                    *dispatched.lock().unwrap(),
+                    "request {request:?} must reach the dispatcher"
+                );
+            } else {
+                assert!(
+                    response.starts_with("HTTP/1.1 403"),
+                    "request {request:?} must be rejected, got: {response}"
+                );
+                assert!(
+                    !*dispatched.lock().unwrap(),
+                    "request {request:?} must not reach the dispatcher"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn control_gate_helpers_accept_only_exact_values() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:6737",
+            "localhost",
+            "LOCALHOST:6737",
+            "[::1]",
+            "[::1]:6737",
+            "::1",
+        ] {
+            assert!(is_allowed_host(Some(host)), "host {host} must be allowed");
+        }
+        for host in [
+            "evil.example",
+            "10.0.0.8",
+            "127.0.0.1.evil.example",
+            "127.0.0.1:6737:extra",
+            "[::1",
+            "tauri.localhost",
+        ] {
+            assert!(!is_allowed_host(Some(host)), "host {host} must be rejected");
+        }
+        assert!(is_allowed_host(None), "a missing Host must be accepted");
+
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+            "http://localhost:1420",
+        ] {
+            assert!(
+                is_allowed_origin(Some(origin)),
+                "origin {origin} must be allowed"
+            );
+        }
+        for origin in [
+            "https://evil.example",
+            "tauri://localhost.evil.example",
+            "http://127.0.0.1:6736",
+            "",
+        ] {
+            assert!(
+                !is_allowed_origin(Some(origin)),
+                "origin {origin} must be rejected"
+            );
+        }
+        assert!(is_allowed_origin(None), "a missing Origin must be accepted");
+    }
+
+    fn connected_control_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    fn share_payload(width: u32, height: u32) -> ShareClipboardPayload {
+        let rgba = vec![0u8, 0, 0, 255].repeat((width * height) as usize);
+        ShareClipboardPayload {
+            text: Some("TokenBurn".to_string()),
+            width,
+            height,
+            rgba_base64: base64::engine::general_purpose::STANDARD.encode(&rgba),
+            png_base64: base64::engine::general_purpose::STANDARD.encode(&[1, 2, 3, 4]),
+        }
+    }
+
+    #[test]
+    fn share_copy_rejects_zero_or_oversized_dimensions_before_touching_the_clipboard() {
+        assert!(copy_share_blocking(share_payload(0, 10)).is_err());
+        assert!(copy_share_blocking(share_payload(10, 0)).is_err());
+        assert!(copy_share_blocking(share_payload(4097, 1)).is_err());
+        assert!(copy_share_blocking(share_payload(1, 4097)).is_err());
+    }
+
+    #[test]
+    fn share_copy_rejects_payloads_that_do_not_match_the_declared_dimensions() {
+        let mut payload = share_payload(2, 2);
+        payload.rgba_base64 = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 5]);
+        assert!(copy_share_blocking(payload).is_err());
+    }
+
+    #[test]
+    fn share_copy_rejects_invalid_base64() {
+        let mut payload = share_payload(2, 2);
+        payload.rgba_base64 = "not-base64!!!".to_string();
+        assert!(copy_share_blocking(payload).is_err());
+        let mut payload = share_payload(2, 2);
+        payload.png_base64 = "also-not-base64!!!".to_string();
+        assert!(copy_share_blocking(payload).is_err());
+    }
+
+    #[test]
+    fn share_copy_rejects_empty_global_allocations() {
+        assert!(alloc_global_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn dib_bytes_are_exactly_40_header_bytes_plus_bgrx_pixels() {
+        let rgba = [255u8, 0, 0, 255, 0, 255, 0, 255];
+        let dib = dib_bytes(2, 1, &rgba);
+        assert_eq!(dib.len(), 40 + rgba.len());
+        assert_eq!(&dib[0..4], &40u32.to_le_bytes());
+        assert_eq!(&dib[4..8], &2i32.to_le_bytes());
+        // Negative height marks the rows top-down, which is what the canvas produced.
+        assert_eq!(&dib[8..12], &(-1i32).to_le_bytes());
+        assert_eq!(&dib[12..14], &1u16.to_le_bytes());
+        assert_eq!(&dib[14..16], &32u16.to_le_bytes());
+        // Pixel 0 is red [255,0,0,255] and becomes BGRX [0,0,255,255]; pixel 1 green becomes
+        // [0,255,0,255]. The RGBA→BGR swap is what Windows/Chromium paste targets expect.
+        assert_eq!(&dib[40..44], &[0, 0, 255, 255]);
+        assert_eq!(&dib[44..48], &[0, 255, 0, 255]);
+    }
+
+    // Clipboard contention: another process keeps the clipboard in constant flux (open, write,
+    // close, repeat), which is the real-world busy state (clipboard managers, screen readers).
+    // The copy must either win a slot or fail cleanly, always within a bounded time — never
+    // hang. Note: modern Windows allows concurrent OpenClipboard across processes, so a plain
+    // "held open" holder does not block; churning the clipboard is what exercises the retry path.
+    // Ignored by default: it mutates the real system clipboard.
+    #[test]
+    #[ignore = "mutates the real system clipboard; run with -- --ignored"]
+    fn share_copy_stays_bounded_while_the_clipboard_churns() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("share_copy_clipboard_holder_child")
+            .arg("--ignored")
+            .env("TOKENBURN_CLIPBOARD_HOLDER", "1")
+            .spawn()
+            .expect("the test binary must spawn its clipboard-holder child");
+        // Give the child time to start churning.
+        std::thread::sleep(Duration::from_millis(800));
+        let started = Instant::now();
+        let placements = [(CF_UNICODETEXT.0 as u32, alloc_global_bytes(b"x\0").unwrap())];
+        let result = super::place_clipboard_data(&placements);
+        let _ = unsafe { GlobalFree(Some(HGLOBAL(placements[0].1 .0))) };
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the copy must finish within the retry bound (took {elapsed:?})"
+        );
+        // Either the copy won a contention-free moment (Ok) or the retries were exhausted (Err);
+        // both are correct as long as the loop terminated on time.
+        if let Err(error) = &result {
+            assert!(
+                error.contains("clipboard"),
+                "a rejected copy must name the clipboard, got: {error}"
+            );
+        }
+        let _ = child.wait();
+    }
+
+    // Helper process for the clipboard-contention test: opens, writes, and closes the clipboard
+    // in a tight loop for a few seconds. A no-op when run normally; only the parent test spawns
+    // it with the marker env var.
+    #[test]
+    #[ignore = "internal clipboard-holder helper; run with -- --ignored"]
+    fn share_copy_clipboard_holder_child() {
+        if std::env::var_os("TOKENBURN_CLIPBOARD_HOLDER").is_none() {
+            return;
+        }
+        let payload = alloc_global_bytes(b"churn").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            unsafe {
+                if OpenClipboard(None).is_ok() {
+                    let _ = EmptyClipboard();
+                    let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(payload.0)));
+                    let _ = CloseClipboard();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = unsafe { GlobalFree(Some(HGLOBAL(payload.0))) };
+    }
+
+    #[test]
     fn breakdown_motion_squashes_while_preserving_the_bottom_edge() {
         let start = PhysicalWindowBounds {
             x: 1592,
@@ -1512,5 +2412,119 @@ mod tests {
             second_instance_activation_target(&["--hosted".to_string()]),
             "main"
         );
+    }
+
+    // Writes a real text + bitmap payload to the system clipboard and reads it back through the
+    // same formats a paste target would use. Ignored by default: it replaces the developer's
+    // clipboard content and can race desktop apps that write to the clipboard mid-test. Run
+    // explicitly with `cargo test -- --ignored` when clipboard integration changes.
+    #[test]
+    #[ignore = "mutates the real system clipboard; run with -- --ignored"]
+    fn share_clipboard_round_trip() {
+        const WIDTH: u32 = 2;
+        const HEIGHT: u32 = 2;
+        let rgba = [
+            255u8, 0, 0, 255, 0, 0, 255, 255, //
+            0, 255, 0, 255, 255, 255, 0, 255,
+        ];
+        let dib = dib_bytes(WIDTH, HEIGHT, &rgba);
+        let text_bytes: Vec<u8> = "TokenBurn · test"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        // A real 1x1 PNG so the read-back verifies the exact bytes a Chromium paste would decode.
+        let png: Vec<u8> = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+        let png_format = png_clipboard_format();
+        assert_ne!(png_format, 0, "the PNG clipboard format must register");
+
+        let text_handle = alloc_global_bytes(&text_bytes).unwrap();
+        let dib_handle = alloc_global_bytes(&dib).unwrap();
+        let png_handle = alloc_global_bytes(&png).unwrap();
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            assert!(EmptyClipboard().is_ok());
+            assert!(SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(text_handle.0))).is_ok());
+            assert!(SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(dib_handle.0))).is_ok());
+            assert!(SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_ok());
+            let _ = CloseClipboard();
+        }
+
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            let handle =
+                GetClipboardData(CF_UNICODETEXT.0 as u32).expect("text format must be present");
+            assert_eq!(
+                GlobalSize(HGLOBAL(handle.0)),
+                text_bytes.len(),
+                "the text allocation must be exactly the payload size, terminator included"
+            );
+            let locked = GlobalLock(HGLOBAL(handle.0));
+            assert!(!locked.is_null(), "text memory must lock");
+            let copied = std::slice::from_raw_parts(locked.cast::<u8>(), text_bytes.len()).to_vec();
+            let _ = GlobalUnlock(HGLOBAL(handle.0));
+            let units = copied
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<u16>>();
+            let units = units.strip_suffix(&[0u16]).unwrap_or(&units);
+            assert_eq!(
+                String::from_utf16(units).unwrap(),
+                "TokenBurn · test",
+                "pasted text must survive the round trip (with a null terminator)"
+            );
+
+            let handle = GetClipboardData(CF_DIB.0 as u32).expect("image format must be present");
+            assert_eq!(
+                GlobalSize(HGLOBAL(handle.0)),
+                dib.len(),
+                "the DIB allocation must be exactly the payload size"
+            );
+            let locked = GlobalLock(HGLOBAL(handle.0));
+            assert!(!locked.is_null(), "image memory must lock");
+            let copied = std::slice::from_raw_parts(locked.cast::<u8>(), dib.len()).to_vec();
+            let _ = GlobalUnlock(HGLOBAL(handle.0));
+            assert_eq!(copied, dib, "the clipboard DIB must survive the round trip");
+
+            let handle = GetClipboardData(png_format).expect("PNG format must be present");
+            assert_eq!(
+                GlobalSize(HGLOBAL(handle.0)),
+                png.len(),
+                "the PNG allocation must be exactly the payload size"
+            );
+            let locked = GlobalLock(HGLOBAL(handle.0));
+            assert!(!locked.is_null(), "PNG memory must lock");
+            let copied = std::slice::from_raw_parts(locked.cast::<u8>(), png.len()).to_vec();
+            let _ = GlobalUnlock(HGLOBAL(handle.0));
+            assert_eq!(copied, png, "the clipboard PNG must survive the round trip");
+            let _ = CloseClipboard();
+        }
+
+        // Image-only copy phase: no text placement means no CF_UNICODETEXT on the clipboard,
+        // which is what makes text-first chat composers attach the chart instead of pasting only
+        // the text. Kept in the same test as the full round trip because the system clipboard is
+        // process-global and these tests would otherwise race each other's clipboard writes.
+        let image_only_dib = dib_bytes(2, 2, &rgba);
+        let dib_handle = alloc_global_bytes(&image_only_dib).unwrap();
+        let png_handle = alloc_global_bytes(&png).unwrap();
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            assert!(EmptyClipboard().is_ok());
+            assert!(SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(dib_handle.0))).is_ok());
+            assert!(SetClipboardData(png_format, Some(HANDLE(png_handle.0))).is_ok());
+            let _ = CloseClipboard();
+        }
+        unsafe {
+            assert!(OpenClipboard(None).is_ok());
+            assert!(
+                GetClipboardData(CF_UNICODETEXT.0 as u32).is_err(),
+                "an image-only copy must not leave a text format behind"
+            );
+            assert!(GetClipboardData(CF_DIB.0 as u32).is_ok());
+            assert!(GetClipboardData(png_format).is_ok());
+            let _ = CloseClipboard();
+        }
     }
 }

@@ -1,6 +1,7 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
+using UsageMonitor.Core;
 
 namespace UsageMonitor.LocalApi;
 
@@ -47,9 +48,23 @@ public sealed class UsageApiService
             if (kind is not ("limits" or "usage") || route.Length > 3)
                 return UsageApiResponse.Error(404, "not_found");
 
-            string? providerId = route.Length == 3 ? Uri.UnescapeDataString(route[2]) : null;
-            if (providerId is not null && !_source.KnownProviderIds.Contains(providerId))
-                return UsageApiResponse.Error(404, "provider_not_found");
+            string? providerId = null;
+            if (route.Length == 3)
+            {
+                try
+                {
+                    // The host already hands over a decoded path; decoding a second time only
+                    // unescapes percent signs that survived Kestrel (e.g. a literal %25) and can
+                    // throw on malformed escapes. Malformed input is a client error, never a 500.
+                    providerId = Uri.UnescapeDataString(route[2]);
+                }
+                catch (UriFormatException)
+                {
+                    return UsageApiResponse.Error(400, "bad_request");
+                }
+                if (providerId is null || !_source.KnownProviderIds.Contains(providerId))
+                    return UsageApiResponse.Error(404, "provider_not_found");
+            }
 
             var snapshots = await _source.GetSnapshotsAsync(providerId, force, cancellationToken)
                 .ConfigureAwait(false);
@@ -71,7 +86,7 @@ public sealed class UsageApiService
         var now = generatedAt ?? DateTimeOffset.UtcNow;
         var providers = snapshots.ToDictionary(s => s.ProviderId, s => ToLimitsProvider(s, now), StringComparer.OrdinalIgnoreCase);
         var errors = snapshots.Where(s => !string.IsNullOrWhiteSpace(s.Error))
-            .Select(s => new LimitsError(s.ProviderId, RedactError(s.Error!))).ToArray();
+            .Select(s => new LimitsError(s.ProviderId, SensitiveDataRedactor.Redact(s.Error!))).ToArray();
         return new LimitsEnvelope("openusage.limits.v1", now, providers, errors);
     }
 
@@ -120,12 +135,12 @@ public sealed class UsageApiService
         snapshot.ProviderId, snapshot.DisplayName, snapshot.Plan,
         snapshot.Lines.Select(metric => metric is BadgeMetricData badge &&
                 string.Equals(badge.Label, "Error", StringComparison.OrdinalIgnoreCase)
-            ? badge with { Text = RedactError(badge.Text) }
+            ? badge with { Text = SensitiveDataRedactor.Redact(badge.Text) }
             : metric).Select(ToLegacyLine).ToArray(),
         snapshot.FetchedAt,
         snapshot.UsageHistory,
-        snapshot.Error is null ? null : RedactError(snapshot.Error),
-        snapshot.Warning is null ? null : RedactError(snapshot.Warning));
+        snapshot.Error is null ? null : SensitiveDataRedactor.Redact(snapshot.Error),
+        snapshot.Warning is null ? null : SensitiveDataRedactor.Redact(snapshot.Warning));
 
     private static LegacyLine ToLegacyLine(UsageMetricData metric) => metric switch
     {
@@ -144,15 +159,16 @@ public sealed class UsageApiService
         _ => new("text", metric.Label, string.Empty, null, null, null, null, null, null, null, null, null, null)
     };
 
-    private static string FormatValue(ScalarValueData value) => value.Unit switch
+    private static string FormatValue(ScalarValueData value)
     {
-        "usd" or "dollars" => $"${value.Number:0.00}",
-        _ => value.Number.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
-    };
-
-    private static string RedactError(string message) => Regex.Replace(message,
-        @"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[redacted-email]",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        // A non-finite metric must never surface as a literal "NaN"/"Infinity" string on the wire.
+        if (!double.IsFinite(value.Number)) return string.Empty;
+        return value.Unit switch
+        {
+            "usd" or "dollars" => "$" + value.Number.ToString("0.00", CultureInfo.InvariantCulture),
+            _ => value.Number.ToString("0.##", CultureInfo.InvariantCulture)
+        };
+    }
 
     private sealed record LegacySnapshot(
         [property: JsonPropertyName("providerId")] string ProviderId, string DisplayName, string? Plan,
@@ -188,6 +204,39 @@ internal static class UsageApiJson
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        WriteIndented = false
+        WriteIndented = false,
+        Converters =
+        {
+            // A non-finite metric (NaN/Infinity leaking from a provider or a division) must never
+            // be emitted as a JSON string that strict consumers reject, nor silently as a healthy
+            // number. Absent (null) keeps the field omitted by WhenWritingNull.
+            new FiniteDoubleConverter(),
+            new FiniteNullableDoubleConverter()
+        }
     };
+
+    private sealed class FiniteDoubleConverter : JsonConverter<double>
+    {
+        public override double Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+            reader.GetDouble();
+
+        public override void Write(Utf8JsonWriter writer, double value, JsonSerializerOptions options)
+        {
+            if (double.IsFinite(value)) writer.WriteNumberValue(value);
+            else writer.WriteNullValue();
+        }
+    }
+
+    private sealed class FiniteNullableDoubleConverter : JsonConverter<double?>
+    {
+        public override double? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+            reader.TokenType == JsonTokenType.Null ? null : reader.GetDouble();
+
+        public override void Write(Utf8JsonWriter writer, double? value, JsonSerializerOptions options)
+        {
+            if (value is not { } number) writer.WriteNullValue();
+            else if (double.IsFinite(number)) writer.WriteNumberValue(number);
+            else writer.WriteNullValue();
+        }
+    }
 }

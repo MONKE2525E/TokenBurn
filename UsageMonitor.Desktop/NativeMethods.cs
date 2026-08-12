@@ -4,9 +4,6 @@ namespace UsageMonitor.Desktop;
 
 internal static class NativeMethods
 {
-    private const int GwlExStyle = -20;
-    private const int WsExNoActivate = 0x08000000;
-    private const int WsExToolWindow = 0x00000080;
     internal const string ActivationHostMarker = "UsageMonitor.ActivationHost";
     internal const string LegacyTaskbarOverlayMarker = "UsageMonitor.TaskbarOverlay";
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -17,6 +14,15 @@ internal static class NativeMethods
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MONITORINFO
+    {
+        public uint Size;
+        public RECT Monitor;
+        public RECT Work;
+        public uint Flags;
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
@@ -42,43 +48,12 @@ internal static class NativeMethods
     internal static extern bool GetCursorPos(out POINT lpPoint);
 
     [DllImport("user32.dll", SetLastError = true)]
-    internal static extern IntPtr SetCapture(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool ReleaseCapture();
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-    internal static void SetWindowNoActivate(IntPtr hWnd)
-    {
-        var style = GetWindowLong(hWnd, GwlExStyle);
-        SetWindowLong(hWnd, GwlExStyle, style | WsExNoActivate | WsExToolWindow);
-    }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsWindow(IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -89,6 +64,14 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern uint RegisterWindowMessage(string lpString);
@@ -108,6 +91,19 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr GetShellWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    internal static string? GetWindowClassName(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return null;
+        var builder = new System.Text.StringBuilder(256);
+        return GetClassName(hWnd, builder, builder.Capacity) > 0 ? builder.ToString() : null;
+    }
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -255,24 +251,9 @@ internal static class NativeMethods
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     internal static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
 
-    internal const int GWL_EXSTYLE = -20;
-    internal const int WS_EX_TOOLWINDOW = 0x00000080;
-    internal const int WS_EX_APPWINDOW = 0x00040000;
-    internal const int WS_EX_NOACTIVATE = 0x08000000;
     internal const uint WDA_NONE = 0x00000000;
     internal const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
-    internal static readonly IntPtr HWND_TOPMOST = new(-1);
-    internal const int SW_HIDE = 0;
-    internal const int SW_SHOW = 5;
-    internal const int SW_RESTORE = 9;
     internal const uint WmClose = 0x0010;
-    internal const uint SWP_NOACTIVATE = 0x0010;
-    internal const uint SWP_SHOWWINDOW = 0x0040;
-    internal const uint SWP_NOSENDCHANGING = 0x0400;
-    internal const uint SWP_NOSIZE = 0x0001;
-    internal const uint SWP_NOMOVE = 0x0002;
-    internal const uint SWP_NOZORDER = 0x0004;
-    internal const uint SWP_FRAMECHANGED = 0x0020;
     internal const uint MONITOR_DEFAULTTONEAREST = 2;
     internal const uint GwHwndNext = 2;
     internal const uint GwHwndPrev = 3;
@@ -281,6 +262,5 @@ internal static class NativeMethods
     internal const uint EventSystemMoveSizeEnd = 0x000A;
     internal const uint EventSystemDesktopSwitch = 0x0020;
     internal const uint EventObjectShow = 0x8002;
-    internal const uint EventObjectHide = 0x8003;
     internal const uint EventObjectLocationChange = 0x800B;
 }

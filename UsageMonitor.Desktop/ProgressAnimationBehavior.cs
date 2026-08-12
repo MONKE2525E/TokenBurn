@@ -31,12 +31,14 @@ public static class ProgressAnimationBehavior
             bar.ValueChanged += OnValueChanged;
             bar.Loaded += OnLoaded;
             bar.Unloaded += OnUnloaded;
+            bar.SizeChanged += OnSizeChanged;
         }
         else
         {
             bar.ValueChanged -= OnValueChanged;
             bar.Loaded -= OnLoaded;
             bar.Unloaded -= OnUnloaded;
+            bar.SizeChanged -= OnSizeChanged;
         }
     }
 
@@ -49,6 +51,19 @@ public static class ProgressAnimationBehavior
     {
         if (sender is not WpfProgressBar bar) return;
         var indicator = bar.Template.FindName("PART_Indicator", bar) as FrameworkElement;
+        indicator?.BeginAnimation(FrameworkElement.WidthProperty, null);
+    }
+
+    // A resize or DPI change moves the track under the animation clock. The clock holds a stale
+    // pixel width — computed for the OLD ActualWidth — and keeps overriding the converter binding,
+    // so the fill would track the pre-resize width until the next Value change. Dropping the
+    // clock lets ProgressWidthConverter re-assert the real fraction of the new width immediately.
+    private static void OnSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (sender is not WpfProgressBar bar) return;
+        if (e.PreviousSize.Width.Equals(e.NewSize.Width)) return;
+        // A SizeChanged can arrive before the template is applied; skip the clock drop then.
+        var indicator = bar.Template?.FindName("PART_Indicator", bar) as FrameworkElement;
         indicator?.BeginAnimation(FrameworkElement.WidthProperty, null);
     }
 

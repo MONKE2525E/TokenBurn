@@ -7,8 +7,16 @@ public sealed record ProviderContext
     public Uri? Proxy { get; init; }
     public ISecretStore? Secrets { get; init; }
     public IDiagnosticsLogger? Logger { get; init; }
+    /// <summary>
+    /// Short identifier that correlates every diagnostic entry of one refresh end-to-end.
+    /// Refresh orchestration layers stamp a fresh value per refresh operation; standalone
+    /// callers (tests, CLI) get a per-context value automatically.
+    /// </summary>
+    public string RefreshId { get; init; } = Guid.NewGuid().ToString("N")[..8];
     public IModelCatalog? ModelCatalog { get; init; }
     public string? ConfigDirectory { get; init; }
+    /// <summary>Directory used to persist incremental history indexes. Null disables incremental history.</summary>
+    public string? CacheDirectory { get; init; }
     public bool ForceRefresh { get; init; }
 }
 

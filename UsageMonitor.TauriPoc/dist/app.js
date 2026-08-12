@@ -117,10 +117,6 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 
-function providerColor(id) {
-  return id === 'claude-code' ? 'var(--orange)' : id === 'codex' ? 'var(--teal)' : id === 'antigravity' ? '#f1f1f2' : '#8d7dff';
-}
-
 function progressLine(line) {
   return line && line.type === 'progress' && Number.isFinite(line.limit) && line.limit > 0;
 }
@@ -138,8 +134,18 @@ const providerLogoPaths = {
   zai: './assets/providers/zai.svg',
 };
 
+// The bundled asset map is the only source of logo URLs. A catalog/logo value from the desktop
+// settings surface is honored only when it matches the narrow packaged-asset pattern exactly;
+// anything else (absolute URLs, javascript: schemes, attribute-breakout strings) falls back to
+// the map, and unknown providers get the plain fallback marker.
+const PACKAGED_LOGO_PATTERN = /^\.\/assets\/providers\/[a-z0-9-]+\.svg$/;
+
 function providerLogo(id) {
-  const source = state.providerCatalog.find(provider => provider.id === id)?.logo || providerLogoPaths[id];
+  const catalogEntry = state.providerCatalog.find(provider => provider.id === id);
+  const source =
+    catalogEntry && typeof catalogEntry.logo === 'string' && PACKAGED_LOGO_PATTERN.test(catalogEntry.logo)
+      ? catalogEntry.logo
+      : providerLogoPaths[id];
   return source
     ? `<img src="${source}" alt="" aria-hidden="true" loading="eager">`
     : '<span class="provider-fallback" aria-hidden="true"></span>';
@@ -204,7 +210,6 @@ let lastRingValues = [];
 let lastRingSize = 0;
 let ringHoverStart = 0;
 let lastSpendRootRows = [];
-let lastSpendDisplayedRows = [];
 // render() runs during initial startup, before the lower spend-card helpers are evaluated.
 // Keep this render state with the other top-level state to avoid a temporal-dead-zone crash that
 // left the popup permanently in "Refreshing..." while the taskbar continued to receive data.
@@ -285,6 +290,9 @@ function setOverlayOpen(element, open) {
 function closeHeaderPopovers() {
   setOverlayOpen($('#info-popover'), false);
   setOverlayOpen($('#metric-popover'), false);
+  // setShareMenu also resets shareMenuOpenedByPress, so a long-press release is never mistaken
+  // for a plain click after the menu was dismissed some other way.
+  setShareMenu(false);
   $('#metric-menu')?.setAttribute('aria-expanded', 'false');
 }
 
@@ -335,6 +343,87 @@ function breakdownSummary(rows) {
     return result;
   }, { cost:0, processed:0, cached:0, uncached:0, creation:0, output:0, reasoning:0, cacheSavings:0, reportedCost:0, modelPricedCost:0, unpriced:0 });
 }
+
+// The ledger aggregation the breakdown table renders. Shared with the share copy so pasting the
+// text always mirrors exactly what the page shows for the current grouping and sort.
+function mergedCostBasis(costBases) {
+  if (costBases.size === 1) return [...costBases][0];
+  return costBases.has('Unpriced') ? 'PartiallyPriced' : 'Mixed';
+}
+
+function breakdownGroupedRows(rows) {
+  const modelRows = Object.values(rows.reduce((map,row) => { const key = `${row.providerId}|${row.modelId || ''}`; const target = map[key] ||= { ...row, processed:0, costUsd:0, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.costBasis = mergedCostBasis(target.costBases); return map; }, {}));
+  const dayRows = Object.values(rows.reduce((map,row) => { const target = map[row.date] ||= { date:row.date, processed:0, costUsd:0, providers:{}, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.providers[row.providerId] = (target.providers[row.providerId] || 0) + (state.breakdownMetric === 'cost' ? Number(row.costUsd || 0) : row.processed || 0); return map; }, {}));
+  const data = state.breakdownGrouping === 'model' ? modelRows : dayRows;
+  const column = state.breakdownSort.column; const factor = state.breakdownSort.direction === 'asc' ? 1 : -1;
+  data.sort((a, b) => {
+    const sortValue = item => {
+      if (column === 'model') return item.modelId || item.providerName || '';
+      if (column === 'date') return item.date;
+      return Number(item[column] || 0);
+    };
+    const av = sortValue(a);
+    const bv = sortValue(b);
+    return typeof av === 'string' ? factor * av.localeCompare(bv) : factor * (av - bv);
+  });
+  return { data, modelRows, dayRows };
+}
+
+function breakdownBasisLabel(value) {
+  return ({ ProviderReported: 'Provider reported', CatalogEstimated: 'Catalog estimated', CoarseEstimate: 'Coarse estimate', Unpriced: 'Unpriced', PartiallyPriced: 'Partially priced', Mixed: 'Mixed pricing' }[value] || 'Unknown');
+}
+
+function breakdownDayQuality(row) {
+  if (row.costBases.has('Unpriced')) {
+    return row.costBases.size > 1 ? 'Partially priced' : 'Unpriced';
+  }
+  if (row.costBases.has('ProviderReported')) {
+    return row.costBases.size > 1 ? 'Mixed pricing' : 'Provider reported';
+  }
+  return 'Catalog estimated';
+}
+
+// The usage page copies as dense text only: the same summary stats and ledger rows the page
+// renders, formatted for pasting into an assistant conversation.
+function breakdownShareText() {
+  const rows = breakdownRows();
+  const summary = breakdownSummary(rows);
+  const { data } = breakdownGroupedRows(rows);
+  const input = summary.cached + summary.uncached + summary.creation;
+  const cacheRate = input > 0 ? summary.cached / input : 0;
+  const lines = [
+    `TokenBurn · Usage · ${breakdownStart()} to ${dayKey(0)} (${breakdownDays()} days, local history only)`,
+    `Raw cost: ${formatCost(summary.cost)} (reported ${formatCost(summary.reportedCost)}, estimated ${formatCost(summary.modelPricedCost)}${summary.unpriced ? `, unpriced ${shareTokenCount(summary.unpriced)} tokens` : ''})`,
+    `Processed: ${shareTokenCount(summary.processed)} tokens · cached input ${shareTokenCount(summary.cached)} (${(cacheRate * 100).toFixed(1)}%) · uncached ${shareTokenCount(summary.uncached)} · cache creation ${shareTokenCount(summary.creation)} · output ${shareTokenCount(summary.output)}${summary.reasoning ? ` (${shareTokenCount(summary.reasoning)} reasoning)` : ''}`,
+  ];
+  if (summary.cacheSavings) lines.push(`Cache savings: ${formatCost(summary.cacheSavings)} (estimated with catalog rates)`);
+  lines.push('');
+  if (!rows.length) {
+    lines.push('No local usage history is available for this range.');
+    return lines.join('\n');
+  }
+  const metricLabel = state.breakdownMetric === 'cost' ? 'cost' : 'tokens';
+  if (state.breakdownGrouping === 'model') {
+    const shareTotal = state.breakdownMetric === 'cost' ? summary.cost : summary.processed;
+    lines.push(`By model (${metricLabel})`, 'Model | Provider | Cost | Share | Tokens | $/MTok | Pricing');
+    data.forEach(row => {
+      const modelLabel = row.modelId || `${row.providerName} aggregate`;
+      const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed;
+      lines.push(`${modelLabel} | ${row.providerName} | ${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)} | ${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'} | ${shareTokenCount(row.processed)} | ${row.costBasis === 'Unpriced' || !row.processed ? '—' : formatCost(row.costUsd / row.processed * 1e6)} | ${breakdownBasisLabel(row.costBasis)}`);
+    });
+  } else {
+    const series = breakdownSeries(rows);
+    lines.push(`By day (${metricLabel})`, ['Day', ...series.map(item => item.name), 'Total', 'Tokens', 'Pricing'].join(' | '));
+    data.forEach(row => {
+      const cells = [row.date,
+        ...series.map(item => state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : shareTokenCount(row.providers[item.id] || 0)),
+        state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : shareTokenCount(row.processed),
+        shareTokenCount(row.processed), breakdownDayQuality(row)];
+      lines.push(cells.join(' | '));
+    });
+  }
+  return lines.join('\n');
+}
 function breakdownSeries(rows) {
   const days = Array.from({ length: breakdownDays() }, (_, index) => dayKey(breakdownDays() - 1 - index));
   const providerIds = [...new Set(rows.map(row => row.providerId))];
@@ -347,7 +436,10 @@ let breakdownChartGeometry = null;
 function traceSmoothLine(ctx, coordinates) {
   if (!coordinates.length) return;
   ctx.moveTo(coordinates[0].x, coordinates[0].y);
-  for (let index = 1; index < coordinates.length - 1; index++) {
+  // Stop one point earlier: the tail quadratic ends ON the last point, so the loop must not
+  // already have advanced past the midpoint of the last pair. Drawing that final segment twice
+  // made the last section hook back toward the peak at the right edge of the chart.
+  for (let index = 1; index < coordinates.length - 2; index++) {
     const current = coordinates[index];
     const next = coordinates[index + 1];
     ctx.quadraticCurveTo(current.x, current.y, (current.x + next.x) / 2, (current.y + next.y) / 2);
@@ -398,43 +490,81 @@ function updateBreakdownChartTooltip(index, clientX = null) {
   const x = geometry.plot.left + index * (geometry.plot.right - geometry.plot.left) / Math.max(1,breakdownDays()-1);
   tooltip.style.left = `${Math.max(8, Math.min(geometry.width - 172, clientX ?? x + 10))}px`; tooltip.hidden = false;
 }
+// The chart canvas is recreated whenever the breakdown markup is rebuilt, and renderBreakdown()
+// runs on every period/metric/grouping change and on data refreshes. Wiring listeners on every
+// call added five more handlers per rebuild: the newest one always painted last so the screen
+// looked right, but every older closure kept running against its captured series, and the
+// listener count grew without bound. Wire once per canvas and let the handlers read the latest
+// series from a module-level slot instead.
+let lastBreakdownSeries = [];
 function wireBreakdownChart(series) {
+  lastBreakdownSeries = series;
   const canvas = $('#breakdown-chart'); if (!canvas) return;
+  if (canvas.dataset.chartWired === 'true') return;
+  canvas.dataset.chartWired = 'true';
+  const redraw = () => drawBreakdownChart(lastBreakdownSeries, state.breakdownHoverIndex);
   const select = (event, keyboardDelta = null) => {
     if (keyboardDelta !== null) state.breakdownHoverIndex = Math.max(0, Math.min(breakdownDays()-1, (state.breakdownHoverIndex ?? 0) + keyboardDelta));
     else { const rect = canvas.getBoundingClientRect(); state.breakdownHoverIndex = Math.round((event.clientX - rect.left - breakdownChartGeometry.plot.left) / Math.max(1, breakdownChartGeometry.plot.right - breakdownChartGeometry.plot.left) * (breakdownDays()-1)); state.breakdownHoverIndex = Math.max(0, Math.min(breakdownDays()-1, state.breakdownHoverIndex)); }
-    drawBreakdownChart(series, state.breakdownHoverIndex); updateBreakdownChartTooltip(state.breakdownHoverIndex, keyboardDelta === null ? event.clientX - canvas.getBoundingClientRect().left + 12 : null);
+    drawBreakdownChart(lastBreakdownSeries, state.breakdownHoverIndex); updateBreakdownChartTooltip(state.breakdownHoverIndex, keyboardDelta === null ? event.clientX - canvas.getBoundingClientRect().left + 12 : null);
   };
+  const clear = () => { state.breakdownHoverIndex = null; redraw(); updateBreakdownChartTooltip(null); };
   canvas.addEventListener('pointermove', event => select(event));
-  canvas.addEventListener('pointerleave', () => { state.breakdownHoverIndex = null; drawBreakdownChart(series); updateBreakdownChartTooltip(null); });
+  canvas.addEventListener('pointerleave', clear);
   canvas.addEventListener('keydown', event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); select(event, event.key === 'ArrowLeft' ? -1 : 1); } });
   canvas.addEventListener('focus', event => select(event, 0));
-  canvas.addEventListener('blur', () => { state.breakdownHoverIndex = null; drawBreakdownChart(series); updateBreakdownChartTooltip(null); });
+  canvas.addEventListener('blur', clear);
 }
 function formatCost(value) {
   if (!Number.isFinite(value)) return 'Unavailable';
   return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: value >= 100 ? 0 : 2, maximumFractionDigits: value >= 100 ? 0 : 2 })}`;
 }
-function renderBreakdown() {
-  const root = $('#breakdown'); if (!root) return; const rows = breakdownRows(); const summary = breakdownSummary(rows); const series = breakdownSeries(rows);
+let lastBreakdownRenderKey = '';
+function breakdownRenderKey(rows) {
+  return JSON.stringify([
+    state.breakdownPeriod, state.breakdownMetric, state.breakdownGrouping,
+    state.breakdownSort.column, state.breakdownSort.direction,
+    [...state.hiddenChartProviders].sort(),
+    rows.map(row => [row.date, row.providerId, row.modelId, row.costUsd, row.processed, row.costBasis]),
+  ]);
+}
+function renderBreakdown(force = false) {
+  const root = $('#breakdown'); if (!root) return; const rows = breakdownRows();
+  const key = breakdownRenderKey(rows);
+  // The refresh-status poll renders once a second. A breakdown whose data did not change must not
+  // rebuild its DOM: that would drop focus, reset hover, and re-sweep the chart on every tick.
+  // Interaction handlers change the key (period, metric, grouping, sort, hidden providers), so
+  // they always rebuild exactly like before.
+  if (!force && key === lastBreakdownRenderKey && $('#breakdown-chart')) return;
+  lastBreakdownRenderKey = key;
+  const summary = breakdownSummary(rows); const series = breakdownSeries(rows);
   const input = summary.cached + summary.uncached + summary.creation; const cacheRate = input > 0 ? summary.cached / input : 0;
-  const modelRows = Object.values(rows.reduce((map,row) => { const key = `${row.providerId}|${row.modelId || ''}`; const target = map[key] ||= { ...row, processed:0, costUsd:0, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.costBasis = target.costBases.size === 1 ? [...target.costBases][0] : target.costBases.has('Unpriced') ? 'PartiallyPriced' : 'Mixed'; return map; }, {}));
-  const dayRows = Object.values(rows.reduce((map,row) => { const target = map[row.date] ||= { date:row.date, processed:0, costUsd:0, providers:{}, costBases:new Set() }; target.processed += row.processed || 0; target.costUsd += Number(row.costUsd || 0); target.costBases.add(row.costBasis || 'Unknown'); target.providers[row.providerId] = (target.providers[row.providerId] || 0) + (state.breakdownMetric === 'cost' ? Number(row.costUsd || 0) : row.processed || 0); return map; }, {}));
-  const data = state.breakdownGrouping === 'model' ? modelRows : dayRows;
-  const column = state.breakdownSort.column; const factor = state.breakdownSort.direction === 'asc' ? 1 : -1;
-  data.sort((a,b) => { const av = column === 'model' ? (a.modelId || a.providerName || '') : column === 'date' ? a.date : Number(a[column] || 0); const bv = column === 'model' ? (b.modelId || b.providerName || '') : column === 'date' ? b.date : Number(b[column] || 0); return typeof av === 'string' ? factor * av.localeCompare(bv) : factor * (av-bv); });
+  const { data } = breakdownGroupedRows(rows);
   const head = state.breakdownGrouping === 'model'
     ? '<tr><th><button data-breakdown-sort="model">Model</button></th><th>Provider</th><th class="num"><button data-breakdown-sort="costUsd">Cost</button></th><th class="num">Share</th><th class="num"><button data-breakdown-sort="processed">Tokens</button></th><th class="num">$/MTok</th><th>Pricing</th></tr>'
     : `<tr><th><button data-breakdown-sort="date">Day</button></th>${series.map(item => `<th class="num">${esc(item.name)}</th>`).join('')}<th class="num">Total</th><th class="num">Tokens</th><th>Pricing</th></tr>`;
-  const basisLabel = value => ({ ProviderReported: 'Provider reported', CatalogEstimated: 'Catalog estimated', CoarseEstimate: 'Coarse estimate', Unpriced: 'Unpriced', PartiallyPriced: 'Partially priced', Mixed: 'Mixed pricing' }[value] || 'Unknown');
+  const basisLabel = breakdownBasisLabel;
   const shareTotal = state.breakdownMetric === 'cost' ? summary.cost : summary.processed;
-  const body = state.breakdownGrouping === 'model' ? data.map(row => { const modelLabel = row.modelId || `${row.providerName} aggregate`; const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed; return `<tr><td title="${esc(modelLabel)}">${esc(modelLabel)}</td><td>${esc(row.providerName)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)}</td><td class="num">${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'}</td><td class="num">${compactNumber(row.processed)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : row.processed ? formatCost(row.costUsd / row.processed * 1e6) : '—'}</td><td class="breakdown-basis">${esc(basisLabel(row.costBasis))}</td></tr>`; }).join('') : data.map(row => { const quality = row.costBases.has('Unpriced') ? (row.costBases.size > 1 ? 'Partially priced' : 'Unpriced') : row.costBases.has('ProviderReported') ? (row.costBases.size > 1 ? 'Mixed pricing' : 'Provider reported') : 'Catalog estimated'; return `<tr><td>${esc(row.date)}</td>${series.map(item => `<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)}</td>`).join('')}<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed)}</td><td class="num">${compactNumber(row.processed)}</td><td class="breakdown-basis">${esc(quality)}</td></tr>`; }).join('');
+  const body = state.breakdownGrouping === 'model' ? data.map(row => { const modelLabel = row.modelId || `${row.providerName} aggregate`; const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed; return `<tr><td title="${esc(modelLabel)}">${esc(modelLabel)}</td><td>${esc(row.providerName)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)}</td><td class="num">${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'}</td><td class="num">${compactNumber(row.processed)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : row.processed ? formatCost(row.costUsd / row.processed * 1e6) : '—'}</td><td class="breakdown-basis">${esc(basisLabel(row.costBasis))}</td></tr>`; }).join('') : data.map(row => { const quality = breakdownDayQuality(row); return `<tr><td>${esc(row.date)}</td>${series.map(item => `<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)}</td>`).join('')}<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed)}</td><td class="num">${compactNumber(row.processed)}</td><td class="breakdown-basis">${esc(quality)}</td></tr>`; }).join('');
   root.innerHTML = `<div class="breakdown-header"><div><h2 id="breakdown-title">Usage</h2><p class="breakdown-eyebrow">${esc(breakdownStart())} to ${esc(dayKey(0))} · local history only</p></div></div><div class="breakdown-controls"><div class="breakdown-toggle" role="tablist" aria-label="Breakdown period">${['7','30','90'].map(day => `<button class="breakdown-segment ${state.breakdownPeriod===day?'selected':''}" data-breakdown-period="${day}" role="tab" aria-selected="${state.breakdownPeriod===day}">${day} days</button>`).join('')}</div><div class="breakdown-toggle" role="tablist" aria-label="Chart metric"><button class="breakdown-segment ${state.breakdownMetric==='cost'?'selected':''}" data-breakdown-chart="cost" role="tab" aria-selected="${state.breakdownMetric==='cost'}">Cost</button><button class="breakdown-segment ${state.breakdownMetric==='tokens'?'selected':''}" data-breakdown-chart="tokens" role="tab" aria-selected="${state.breakdownMetric==='tokens'}">Tokens</button></div></div>${rows.length ? `<div class="breakdown-summary"><div class="breakdown-stat"><small>Raw cost</small><strong>${formatCost(summary.cost)}</strong><span>Reported + estimated</span></div><div class="breakdown-stat"><small>Processed tokens</small><strong>${compactNumber(summary.processed)}</strong><span>Observed local history</span></div><div class="breakdown-stat"><small>Cached input</small><strong>${compactNumber(summary.cached)}</strong><span>${(cacheRate*100).toFixed(1)}% of observed input</span></div><div class="breakdown-stat"><small>Output</small><strong>${compactNumber(summary.output)}</strong><span>${compactNumber(summary.reasoning)} reasoning</span></div><div class="breakdown-stat"><small>Cache savings</small><strong>${summary.cacheSavings ? formatCost(summary.cacheSavings) : 'Unavailable'}</strong><span>Estimated with catalog rates</span></div></div><div class="breakdown-chart-wrap"><div class="breakdown-chart-top"><h3>Daily ${state.breakdownMetric === 'cost' ? 'cost' : 'processed tokens'}</h3></div><div class="breakdown-chart-shell"><canvas id="breakdown-chart" tabindex="0" aria-label="Daily provider usage chart. Use left and right arrow keys to inspect dates."></canvas><div id="breakdown-chart-tooltip" class="breakdown-chart-tooltip" role="tooltip" hidden></div></div><div class="breakdown-legend">${series.map(item => `<button data-breakdown-provider="${esc(item.id)}" class="${state.hiddenChartProviders.has(item.id)?'off':''}" aria-pressed="${!state.hiddenChartProviders.has(item.id)}"><span class="breakdown-dot" style="background:${item.color}"></span>${esc(item.name)}</button>`).join('')}</div></div><div class="breakdown-lower"><div class="ledger-panel"><div class="ledger-heading"><h3>Breakdown</h3><div class="breakdown-toggle"><button class="breakdown-segment ${state.breakdownGrouping==='model'?'selected':''}" data-breakdown-group="model">Model</button><button class="breakdown-segment ${state.breakdownGrouping==='day'?'selected':''}" data-breakdown-group="day">Day</button></div></div><div class="breakdown-table-scroll"><table class="breakdown-table"><thead>${head}</thead><tbody>${body}</tbody></table></div></div><aside class="pricing-quality"><h3>Cost quality</h3><div class="quality-row"><span>Provider reported</span><strong>${summary.cost ? `${(summary.reportedCost/summary.cost*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Model priced</span><strong>${summary.cost ? `${(summary.modelPricedCost/summary.cost*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Unpriced</span><strong>${summary.processed ? `${(summary.unpriced/summary.processed*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Cache savings</span><strong>${summary.cacheSavings ? formatCost(summary.cacheSavings) : 'Unavailable'}</strong></div><div class="quality-row"><span>Data source</span><strong>Local</strong></div></aside></div>` : '<div class="breakdown-empty">No local usage history is available for this range. TokenBurn will show model detail when supported provider logs are present.</div>'}`;
-  drawBreakdownChart(series);
+  // A hover index can outlive the day range it was chosen in (90 -> 7 days) or the data behind
+  // it (a refresh can drop a provider). Clamp it and re-sync the tooltip so it never points at a
+  // date or a value that no longer exists.
+  if (state.breakdownHoverIndex !== null && (state.breakdownHoverIndex < 0 || state.breakdownHoverIndex >= breakdownDays())) {
+    state.breakdownHoverIndex = null;
+  }
+  drawBreakdownChart(series, state.breakdownHoverIndex);
+  updateBreakdownChartTooltip(state.breakdownHoverIndex);
   wireBreakdownChart(series);
 }
+// One transition at a time. setBreakdownView has animation waits and native resize round-trips
+// between deciding to expand and actually swapping the DOM; a second call issued in that window
+// (fast Back click, popup hidden mid-transition, window resize) used to complete after the newer
+// request and leave state.view disagreeing with the layout. The latest request wins.
+let breakdownRequestGeneration = 0;
 async function setBreakdownView(expanded, immediate = false) {
   const minimumWidth = 720;
+  const generation = ++breakdownRequestGeneration;
   const animate = !immediate && !prefersReducedMotion();
   const resizeNativeWindow = nextExpanded => Promise.resolve(invoke('set_breakdown_mode', {
     expanded: nextExpanded, reducedMotion: prefersReducedMotion() || immediate
@@ -470,10 +600,12 @@ async function setBreakdownView(expanded, immediate = false) {
     } else {
       clearTransition();
     }
+    if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
     // Compact content is restored before the native shrink starts. Even if the WebView is shown
     // during a shell race, dense breakdown content can never paint into the 320 DIP viewport.
     applyView(false);
     await resizeNativeWindow(false);
+    if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
     if (animate) requestAnimationFrame(() => requestAnimationFrame(() => {
       clearTransition();
       $('#metric-menu')?.focus();
@@ -490,7 +622,9 @@ async function setBreakdownView(expanded, immediate = false) {
   } else {
     clearTransition();
   }
+  if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
   const targetWidth = await resizeNativeWindow(true);
+  if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
   const availableWidth = Number.isFinite(Number(targetWidth)) ? Number(targetWidth) : window.innerWidth;
   if (availableWidth < minimumWidth) {
     await resizeNativeWindow(false);
@@ -666,115 +800,131 @@ function drawRing(values, centerValue, centerUnit) {
       const start = previousById.get(item.id) ?? 0;
       return { ...item, value: start + (target - start) * progress };
     });
-    const displayedTotal = displayedValues.reduce((sum, item) => sum + item.value, 0);
-    ctx.clearRect(0, 0, size, size);
-    // Unfilled track. Without it a zero-spend period renders as a bare floating "$0.00" with no
-    // indication the chart drew at all, and growing arcs have nothing to grow into.
-    ctx.beginPath();
-    ctx.arc(center, center, radius, 0, TAU);
-    ctx.strokeStyle = '#34383b';
-    ctx.lineWidth = stroke;
-    ctx.stroke();
-    let cursor = -Math.PI / 2;
-    const microMarkers = [];
-    displayedValues.forEach(item => {
-      if (!item.value || displayedTotal <= 0) return;
-      const angle = item.value / displayedTotal * Math.PI * 2;
-      const sweep = angle;
-      if (sweep > 0) {
-        const focused = state.hoveredSpendProviderId === item.id;
-        const dimmed = state.hoveredSpendProviderId && !focused;
-        ctx.globalAlpha = dimmed ? 1 - .58 * hoverT : 1;
-        const width = focused ? stroke + 4 * hoverT : stroke;
-        ctx.strokeStyle = item.color;
-        ctx.fillStyle = item.color;
-        fillSpendSegment(ctx, {
-          cx: center,
-          cy: center,
-          startBoundary: cursor,
-          endBoundary: cursor + sweep,
-          radius,
-          width,
-          gap: Math.min(3.5, size * .022),
-          corner: Math.min(2.75, size * .016),
-        });
-        // A provider can legitimately account for only a few pixels of the total. Keep the
-        // proportional arc as the source of truth, then add a tiny rounded locator at its actual
-        // angular position so the provider is still discoverable in the chart and legend.
-        // At small sizes the normal boundary gap can consume the entire slice. Keep the
-        // proportional cursor movement, but redraw these tiny slices with the reduced-gap
-        // marker below so they do not appear as a misleading empty hole.
-        // Fade in over the last third of the tween. Switching these on at progress >= 1 made tiny
-        // providers pop into existence at the exact moment the motion stopped.
-        if (angle < 0.11 && progress > .66) {
-          microMarkers.push({
-            item,
-            center: cursor + angle / 2,
-            sweep: Math.max(0.018, angle),
-            alpha: Math.min(1, (progress - .66) / .34),
-          });
-        }
-        ctx.globalAlpha = 1;
-      }
-      cursor += angle;
+    paintRingFrame(ctx, size, displayedValues, centerValue, centerUnit, {
+      hoveredId: state.hoveredSpendProviderId,
+      hoverT,
+      microMarkerProgress: progress,
     });
-    microMarkers.forEach(({ item, center: markerCenter, sweep: markerSweep, alpha }) => {
-      const focused = state.hoveredSpendProviderId === item.id;
-      const dimmed = state.hoveredSpendProviderId && !focused;
-      ctx.globalAlpha = (dimmed ? 1 - .58 * hoverT : 1) * alpha;
-      // Keep the tiny slice as an annular sliver. A centerline stroke is wrong here because
-      // its round caps overlap when the arc is shorter than the ring width and become a dot.
-      const markerPath = donutSegmentPath({
-        cx: center,
-        cy: center,
-        startBoundary: markerCenter - markerSweep / 2,
-        endBoundary: markerCenter + markerSweep / 2,
-        radius,
-        width: focused ? stroke + 4 * hoverT : stroke,
-        gap: 0,
-        corner: Math.min(1.25, size * .008),
-      });
-      if (markerPath) {
-        ctx.fillStyle = item.color;
-        ctx.fill(markerPath);
-      }
-      ctx.globalAlpha = 1;
-    });
-    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    // The center label must fit inside the ring's hole, not just the canvas. A fixed 21px font
-    // overflowed into the ring for longer values (e.g. "$204.14"). Shrink to fit the actual hole
-    // width instead, same approach as the WPF spend ring.
-    const maxTextWidth = (radius - stroke / 2) * 2 * 0.82;
-    let primarySize = Math.min(19, size * 0.118);
-    ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
-    while (ctx.measureText(centerValue).width > maxTextWidth && primarySize > 11) {
-      primarySize -= 1;
-      ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
-    }
-    if (centerUnit) {
-      let secondarySize = Math.min(12, size * 0.073);
-      ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
-      while (ctx.measureText(centerUnit).width > maxTextWidth && secondarySize > 8) {
-        secondarySize -= 1;
-        ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
-      }
-      ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
-      const primaryMetrics = ctx.measureText(centerValue);
-      const primaryHeight = (primaryMetrics.actualBoundingBoxAscent || primarySize) + (primaryMetrics.actualBoundingBoxDescent || primarySize * .25);
-      ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
-      const secondaryMetrics = ctx.measureText(centerUnit);
-      const secondaryHeight = (secondaryMetrics.actualBoundingBoxAscent || secondarySize) + (secondaryMetrics.actualBoundingBoxDescent || secondarySize * .25);
-      const gap = Math.max(3, secondarySize * .25);
-      const top = center - (primaryHeight + gap + secondaryHeight) / 2;
-      ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerValue, center, top + (primaryMetrics.actualBoundingBoxAscent || primarySize));
-      ctx.fillStyle = '#99999e'; ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerUnit, center, top + primaryHeight + gap + (secondaryMetrics.actualBoundingBoxAscent || secondarySize));
-    } else {
-      ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; drawCenteredText(ctx, centerValue, center, center);
-    }
     if (linear < 1 || hoverT < 1) ringAnimationFrame = requestAnimationFrame(paint);
   };
   if (renderChanged && !reduced) ringAnimationFrame = requestAnimationFrame(paint);
   else paint(performance.now());
+}
+
+// The same ring geometry as drawRing, painted once at final values. The live popup ring and the
+// generated share image both draw through this so the copied chart always matches the dashboard.
+function paintRingFrame(ctx, size, values, centerValue, centerUnit, options = {}) {
+  const hoveredId = options.hoveredId || null;
+  const hoverT = options.hoverT ?? 1;
+  const microMarkerProgress = options.microMarkerProgress ?? 1;
+  const center = size / 2;
+  const radius = size * .335;
+  const stroke = size * .11;
+  const displayedTotal = values.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  ctx.clearRect(0, 0, size, size);
+  // Unfilled track. Without it a zero-spend period renders as a bare floating "$0.00" with no
+  // indication the chart drew at all, and growing arcs have nothing to grow into.
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, TAU);
+  ctx.strokeStyle = '#34383b';
+  ctx.lineWidth = stroke;
+  ctx.stroke();
+  let cursor = -Math.PI / 2;
+  const microMarkers = [];
+  values.forEach(item => {
+    if (!item.value || displayedTotal <= 0) return;
+    const angle = item.value / displayedTotal * Math.PI * 2;
+    const sweep = angle;
+    if (sweep > 0) {
+      const focused = hoveredId === item.id;
+      const dimmed = hoveredId && !focused;
+      ctx.globalAlpha = dimmed ? 1 - .58 * hoverT : 1;
+      const width = focused ? stroke + 4 * hoverT : stroke;
+      ctx.strokeStyle = item.color;
+      ctx.fillStyle = item.color;
+      fillSpendSegment(ctx, {
+        cx: center,
+        cy: center,
+        startBoundary: cursor,
+        endBoundary: cursor + sweep,
+        radius,
+        width,
+        gap: Math.min(3.5, size * .022),
+        corner: Math.min(2.75, size * .016),
+      });
+      // A provider can legitimately account for only a few pixels of the total. Keep the
+      // proportional arc as the source of truth, then add a tiny rounded locator at its actual
+      // angular position so the provider is still discoverable in the chart and legend.
+      // At small sizes the normal boundary gap can consume the entire slice. Keep the
+      // proportional cursor movement, but redraw these tiny slices with the reduced-gap
+      // marker below so they do not appear as a misleading empty hole.
+      // Fade in over the last third of the tween. Switching these on at progress >= 1 made tiny
+      // providers pop into existence at the exact moment the motion stopped.
+      if (angle < 0.11 && microMarkerProgress > .66) {
+        microMarkers.push({
+          item,
+          center: cursor + angle / 2,
+          sweep: Math.max(0.018, angle),
+          alpha: Math.min(1, (microMarkerProgress - .66) / .34),
+        });
+      }
+      ctx.globalAlpha = 1;
+    }
+    cursor += angle;
+  });
+  microMarkers.forEach(({ item, center: markerCenter, sweep: markerSweep, alpha }) => {
+    const focused = hoveredId === item.id;
+    const dimmed = hoveredId && !focused;
+    ctx.globalAlpha = (dimmed ? 1 - .58 * hoverT : 1) * alpha;
+    // Keep the tiny slice as an annular sliver. A centerline stroke is wrong here because
+    // its round caps overlap when the arc is shorter than the ring width and become a dot.
+    const markerPath = donutSegmentPath({
+      cx: center,
+      cy: center,
+      startBoundary: markerCenter - markerSweep / 2,
+      endBoundary: markerCenter + markerSweep / 2,
+      radius,
+      width: focused ? stroke + 4 * hoverT : stroke,
+      gap: 0,
+      corner: Math.min(1.25, size * .008),
+    });
+    if (markerPath) {
+      ctx.fillStyle = item.color;
+      ctx.fill(markerPath);
+    }
+    ctx.globalAlpha = 1;
+  });
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  // The center label must fit inside the ring's hole, not just the canvas. A fixed 21px font
+  // overflowed into the ring for longer values (e.g. "$204.14"). Shrink to fit the actual hole
+  // width instead, same approach as the WPF spend ring.
+  const maxTextWidth = (radius - stroke / 2) * 2 * 0.82;
+  let primarySize = Math.min(19, size * 0.118);
+  ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
+  while (ctx.measureText(centerValue).width > maxTextWidth && primarySize > 11) {
+    primarySize -= 1;
+    ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
+  }
+  if (centerUnit) {
+    let secondarySize = Math.min(12, size * 0.073);
+    ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
+    while (ctx.measureText(centerUnit).width > maxTextWidth && secondarySize > 8) {
+      secondarySize -= 1;
+      ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
+    }
+    ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`;
+    const primaryMetrics = ctx.measureText(centerValue);
+    const primaryHeight = (primaryMetrics.actualBoundingBoxAscent || primarySize) + (primaryMetrics.actualBoundingBoxDescent || primarySize * .25);
+    ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`;
+    const secondaryMetrics = ctx.measureText(centerUnit);
+    const secondaryHeight = (secondaryMetrics.actualBoundingBoxAscent || secondarySize) + (secondaryMetrics.actualBoundingBoxDescent || secondarySize * .25);
+    const gap = Math.max(3, secondarySize * .25);
+    const top = center - (primaryHeight + gap + secondaryHeight) / 2;
+    ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerValue, center, top + (primaryMetrics.actualBoundingBoxAscent || primarySize));
+    ctx.fillStyle = '#99999e'; ctx.font = `600 ${secondarySize}px -apple-system,Segoe UI,sans-serif`; ctx.fillText(centerUnit, center, top + primaryHeight + gap + (secondaryMetrics.actualBoundingBoxAscent || secondarySize));
+  } else {
+    ctx.fillStyle = '#f1f1f2'; ctx.font = `700 ${primarySize}px -apple-system,Segoe UI,sans-serif`; drawCenteredText(ctx, centerValue, center, center);
+  }
 }
 
 // The provider list used to be rebuilt from a template string on every render(), and render() runs
@@ -801,14 +951,35 @@ function providerRows() {
     const warning = snapshot.warning || snapshot.error;
     const compactLines = visibleLines(snapshot).map(line => displayLine(snapshot, line));
     const errorText = [warning, ...compactLines.map(line => line.text || line.value || '')].filter(Boolean).join(' ');
+    const reauthAction = reauthActionFor(snapshot, errorText);
     return {
       snapshot,
       warning,
       compactLines,
-      canReauth: snapshot.providerId === 'claude-code' && /(auth|login|expired|not configured|signed out)/i.test(errorText),
+      canReauth: !!reauthAction,
+      reauthAction,
       displayName: snapshot.providerId === 'claude-code' ? 'Claude Code' : snapshot.displayName,
     };
   });
+}
+
+// A provider in an authentication-failure state gets a re-sign-in action that opens its own CLI.
+// Claude uses `claude auth login`; Antigravity uses the `agy` CLI the user is already signed in to.
+// The backend already classifies failures (errorCategory), so the decision uses the category first
+// and only falls back to text for cached envelopes that predate the category field. Mirrors
+// ReauthActionResolver in the desktop host.
+function reauthActionFor(snapshot, errorText) {
+  // The backend's errorCategory is authoritative when present; the text heuristic only covers
+  // category-less cached envelopes from older builds. This must match ReauthActionResolver.
+  const category = snapshot.errorCategory || '';
+  if (category) {
+    if (!/(Authentication|Authorization|NotConfigured)/i.test(category)) return null;
+  } else if (!/(auth|login|expired|not configured|signed out|sign.?in)/i.test(errorText || '')) {
+    return null;
+  }
+  if (snapshot.providerId === 'claude-code') return { action: 'claude-login', label: 'Open Claude sign-in' };
+  if (snapshot.providerId === 'antigravity') return { action: 'antigravity-login', label: 'Run agy to sign in' };
+  return null;
 }
 
 // Everything that affects the markup EXCEPT the four things patchProviderValues writes: meter width,
@@ -855,18 +1026,34 @@ function progressValues(line, stale) {
 
 function renderProvidersFinal() {
   const rows = providerRows();
+  // A valid-but-empty provider list is a real state, not a loading failure: show the empty
+  // state instead of a blank list, and never mark it as a failed load.
+  if (!rows.length) {
+    lastProvidersKey = '';
+    activeTrendBar = null;
+    clearTimeout(trendTooltipTimer);
+    setOverlayOpen(trendTooltip, false);
+    $('#providers').innerHTML = '<div class="providers-empty">No providers are enabled. Open Settings to choose providers.</div>';
+    return;
+  }
   const key = providersStructureKey(rows);
   if (key === lastProvidersKey) {
     patchProviderValues(rows);
     return;
   }
   lastProvidersKey = key;
+  // The provider list is about to be rebuilt underneath an open trend tooltip. Its bar element is
+  // detached by the innerHTML swap; keep the tooltip from floating over the new list pointing at
+  // a stale value.
+  activeTrendBar = null;
+  clearTimeout(trendTooltipTimer);
+  setOverlayOpen(trendTooltip, false);
   $('#providers').innerHTML = rows.map(row => {
-    const { snapshot, warning, compactLines, canReauth, displayName } = row;
+    const { snapshot, warning, compactLines, canReauth, reauthAction, displayName } = row;
     const lines = compactLines.map((line, index) => renderMetric(line,
       Boolean(warning) || isPreResetSnapshot(snapshot, line), `${snapshot.providerId}::${index}`)).join('');
     const localHistory = renderLocalHistory(snapshot);
-    return `<article class="provider"><div class="provider-heading"><span class="provider-mark">${providerLogo(snapshot.providerId)}</span><div><span class="provider-name">${esc(displayName)}</span><span class="provider-plan">${esc(snapshot.plan || '')}</span></div>${warning ? '<span class="provider-warning" aria-label="Provider warning">!</span>' : ''}</div><div class="provider-card">${warning ? `<div class="error-line" title="${esc(warning)}">${esc(warning)}</div>` : ''}${canReauth ? '<button class="provider-action" data-provider-action="claude-login">Open Claude sign-in</button>' : ''}${lines || (!localHistory ? '<div class="empty-line">No live limits returned.</div>' : '')}${localHistory}</div></article>`;
+    return `<article class="provider"><div class="provider-heading"><span class="provider-mark">${providerLogo(snapshot.providerId)}</span><div><span class="provider-name">${esc(displayName)}</span><span class="provider-plan">${esc(snapshot.plan || '')}</span></div>${warning ? '<span class="provider-warning" aria-label="Provider warning">!</span>' : ''}</div><div class="provider-card">${warning ? `<div class="error-line" title="${esc(warning)}">${esc(warning)}</div>` : ''}${canReauth && reauthAction ? `<button class="provider-action" data-provider-action="${esc(reauthAction.action)}">${esc(reauthAction.label)}</button>` : ''}${lines || (!localHistory ? '<div class="empty-line">No live limits returned.</div>' : '')}${localHistory}</div></article>`;
   }).join('');
   sweepMetersIn();
 }
@@ -1004,6 +1191,10 @@ function render() {
   $('#metric-title').textContent = state.metric === 'tokens' ? 'Tokens' : state.metric === 'cost-mtok' ? 'Cost/MTok' : 'Cost';
   renderSpend();
   renderProvidersFinal();
+  // A refresh (or the background poll) can complete while the drill-down is open. Without this,
+  // the breakdown table, chart, and tooltip kept showing the pre-refresh data until the user
+  // clicked something. renderBreakdown is keyed, so an unchanged page is left completely alone.
+  if (state.view === 'breakdown') renderBreakdown();
   $('#updated').textContent = loading
     ? 'Refreshing...'
     : state.refreshStatusError || formatRefreshCountdown(state.nextRefreshAt);
@@ -1013,8 +1204,14 @@ function render() {
 // host is actually gone; one means the WPF side was busy for a second.
 let refreshStatusFailures = 0;
 let lastInitialDataRetryAt = 0;
+// The 1s poll and refresh()'s cleanup path both call syncRefreshStatus. A status request still
+// waiting on a slow host must not stack a second one on top of it — each carries a 3.5s bound,
+// so overlapping requests would keep firing into a host that is already behind on the poll.
+let refreshStatusInFlight = false;
 
 async function syncRefreshStatus() {
+  if (refreshStatusInFlight) return;
+  refreshStatusInFlight = true;
   try {
     // This runs from refresh()'s cleanup path.  A WebView2 startup race can leave an IPC
     // promise unresolved, so this must use the same bound as the usage request.  Otherwise
@@ -1035,6 +1232,8 @@ async function syncRefreshStatus() {
     refreshStatusFailures += 1;
     if (refreshStatusFailures >= 2) state.refreshStatusError = 'Refresh service unavailable';
     render();
+  } finally {
+    refreshStatusInFlight = false;
   }
 }
 
@@ -1062,9 +1261,10 @@ async function refresh(force = false) {
     if (force && errors) showStatus(`${errors} provider update${errors === 1 ? '' : 's'} need attention.`);
   } catch (error) {
     state.refreshStatusError = 'Provider update unavailable';
-    // Raw Rust/JS exception text used to reach the user verbatim. Keep the detail available for
-    // diagnostics via the title attribute, but lead with something a person can act on.
-    showStatus('Could not reach the local provider service.', STATUS_LONG, error?.toString?.());
+    // Raw Rust/JS exception text (URLs, HTTP codes, command names) used to reach the user
+    // verbatim through the status title attribute. That detail belongs in the diagnostics
+    // bundle, not on a user-facing element.
+    showStatus('Could not reach the local provider service. It will retry automatically.', STATUS_LONG);
   } finally {
     state.localLoading = false;
     render();
@@ -1114,6 +1314,13 @@ document.addEventListener('keydown', event => {
     closeSettingsPage(activePage);
     return;
   }
+  // The breakdown is a drill-down level like a settings page. Escape collapses it before it is
+  // allowed to dismiss the whole popup; closing the window from inside the drill-down skipped a
+  // level and landed the next open back on the dense wide view.
+  if (state.view === 'breakdown') {
+    setBreakdownView(false);
+    return;
+  }
   hidePopup();
 });
 document.addEventListener('mousedown', event => {
@@ -1129,15 +1336,79 @@ $('#content').addEventListener('scroll', () => {
   scrollTimer = setTimeout(() => $('#content').classList.remove('scrolling'), 650);
 }, { passive: true });
 $('#refresh-button').addEventListener('click', () => { closeHeaderPopovers(); refresh(true); });
-$('#share-button').addEventListener('click', async () => {
-  closeHeaderPopovers();
-  try {
-    await navigator.clipboard?.writeText(`TokenBurn: ${$('#spend-legend').innerText}`);
-    showStatus('Copied spend summary');
-  } catch (_) {
-    showStatus('Clipboard access was blocked by Windows.', STATUS_LONG);
+const shareButton = $('#share-button');
+let sharePressTimer = 0;
+let shareMenuOpenedByPress = false;
+
+function setShareMenu(open) {
+  setOverlayOpen($('#share-popover'), open);
+  if (!open) shareMenuOpenedByPress = false;
+}
+
+async function copyCompactSummary() {
+  const text = compactShareText();
+  const image = buildShareImage();
+  if (await copyShareToClipboard(text, image)) {
+    showStatus('Copied spend summary + chart image');
+    return;
   }
+  const ok = await copyTextToClipboard(text);
+  showStatus(ok ? 'Copied spend summary without the chart image.' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
+}
+
+async function copyCompactChartImage() {
+  const image = buildShareImage();
+  if (await copyShareImageOnly(image)) {
+    showStatus('Copied chart image');
+    return;
+  }
+  showStatus('Clipboard access was blocked by Windows.', STATUS_LONG);
+}
+
+// A plain click copies the summary with the chart. A long press opens the copy menu: chat apps
+// that paste text first would otherwise drop the image, so an image-only copy matches how a
+// Snipping Tool screenshot pastes everywhere.
+shareButton?.addEventListener('pointerdown', () => {
+  if (state.view === 'breakdown') return;
+  clearTimeout(sharePressTimer);
+  sharePressTimer = window.setTimeout(() => {
+    shareMenuOpenedByPress = true;
+    setShareMenu(true);
+  }, 480);
 });
+shareButton?.addEventListener('pointerup', () => clearTimeout(sharePressTimer));
+shareButton?.addEventListener('pointerleave', () => clearTimeout(sharePressTimer));
+shareButton?.addEventListener('pointercancel', () => clearTimeout(sharePressTimer));
+shareButton?.addEventListener('click', async () => {
+  // A long press releases as a click. Keep the menu open instead of instantly closing it.
+  if (shareMenuOpenedByPress) {
+    shareMenuOpenedByPress = false;
+    return;
+  }
+  if ($('#share-popover')?.classList.contains('is-open')) {
+    setShareMenu(false);
+    return;
+  }
+  closeHeaderPopovers();
+  if (state.view === 'breakdown') {
+    const ok = await copyTextToClipboard(breakdownShareText());
+    showStatus(ok ? 'Copied usage breakdown' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
+    return;
+  }
+  await copyCompactSummary();
+});
+document.querySelectorAll('[data-share-copy]').forEach(item => item.addEventListener('click', async () => {
+  const mode = item.dataset.shareCopy;
+  setShareMenu(false);
+  if (mode === 'image') {
+    await copyCompactChartImage();
+  } else if (mode === 'text') {
+    const ok = await copyTextToClipboard(compactShareText());
+    showStatus(ok ? 'Copied spend summary text' : 'Clipboard access was blocked by Windows.', ok ? STATUS_SHORT : STATUS_LONG);
+  } else {
+    await copyCompactSummary();
+  }
+}));
 $('#info-button').addEventListener('click', event => {
   const popover = $('#info-popover');
   const next = !popover.classList.contains('is-open');
@@ -1168,6 +1439,7 @@ document.querySelectorAll('[data-metric]').forEach(button => button.addEventList
   }
   if (state.view === 'breakdown') await setBreakdownView(false);
   closeSpendOtherTooltip();
+  userTouchedSettings = true;
   state.metric = normalizeSpendMetric(button.dataset.metric);
   state.compactMetric = state.metric;
   state.settings.spendMetric = state.metric;
@@ -1402,7 +1674,7 @@ async function applySettingsImmediately(name) {
     render();
     if (providersChanged) refresh(true);
   } catch (error) {
-    showStatus('Could not save that setting.', STATUS_LONG, error?.toString?.());
+    showStatus('Could not save that setting. The change was not applied; try again.', STATUS_LONG);
   } finally {
     settingsApplyInFlight = false;
     if (settingsApplyQueuedName) {
@@ -1414,13 +1686,23 @@ async function applySettingsImmediately(name) {
 }
 
 function scheduleSettingsApply(name) {
+  userTouchedSettings = true;
   clearTimeout(settingsApplyTimer);
   settingsApplyTimer = setTimeout(() => applySettingsImmediately(name), 160);
 }
 
+// Each settings page wires its change handler exactly once. The views are static in the shell,
+// so a per-view guard prevents the listener accumulation that repeated opens used to cause.
+// Delegation (not per-input listeners) keeps re-rendered inputs — the customize list rebuilds
+// its whole innerHTML — attached without rewiring on every render.
+const instantSettingsWired = new Set();
 function wireInstantSettings(name) {
+  if (instantSettingsWired.has(name)) return;
+  instantSettingsWired.add(name);
   const root = $(`#${name}-view`);
-  root.querySelectorAll('input, select').forEach(input => input.addEventListener('change', () => scheduleSettingsApply(name)));
+  root?.addEventListener('change', event => {
+    if (event.target?.closest?.('input, select')) scheduleSettingsApply(name);
+  });
 }
 
 function updateNotificationProviderSummary() {
@@ -1479,6 +1761,10 @@ $('#notification-provider-menu')?.addEventListener('keydown', event => {
   }
   if (event.key === 'Escape') {
     event.preventDefault();
+    // Stop the document-level Escape handler from ALSO closing the settings page. Without this,
+    // one Escape closed the picker and the whole page, skipping the in-between levels that the
+    // ordered handler (select -> picker -> tooltip -> overlays -> page -> popup) is meant to keep.
+    event.stopPropagation();
     closeNotificationProviderMenu();
     return;
   }
@@ -1690,7 +1976,10 @@ async function openSettingsPage(name) {
     try { await invoke('set_screen_share_privacy', { hidden: Boolean(state.settings.hideFromScreenShare) }); } catch (_) { /* older native host */ }
   } catch (error) {
     if (requestGeneration !== pageRequestGeneration) return;
-    showStatus('Settings are unavailable while the desktop host is starting.', STATUS_LONG, error?.toString?.());
+    // The host is usually still starting when this fires, but it can also be any other settings
+    // bridge failure. Claiming one specific cause would be misleading, so say what happened and
+    // what to do next instead of why.
+    showStatus('Settings could not be loaded. Close and reopen Settings to try again.', STATUS_LONG);
   }
 }
 
@@ -1702,6 +1991,46 @@ document.querySelectorAll('[data-options]').forEach(button => button.addEventLis
 document.querySelectorAll('[data-page-back]').forEach(button => button.addEventListener('click', () => {
   closeSettingsPage(button.closest('.page-view'));
 }));
+
+const copyLogsButton = $('#copy-logs-button');
+copyLogsButton?.addEventListener('click', async () => {
+  if (copyLogsButton.disabled) return;
+  copyLogsButton.disabled = true;
+  try {
+    const bundle = await withTimeout(
+      invoke('get_diagnostics_bundle'),
+      COMMAND_TIMEOUT_MS,
+      'The logs command did not respond.'
+    );
+    const text = typeof bundle === 'string' ? bundle : JSON.stringify(bundle, null, 2);
+    await copyTextToClipboard(text);
+    showStatus('Logs copied to clipboard.', STATUS_SHORT);
+  } catch (error) {
+    showStatus('Could not copy logs. Try again in a moment.', STATUS_LONG);
+  } finally {
+    copyLogsButton.disabled = false;
+  }
+});
+
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) { /* fall through to the legacy path */ }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand('copy');
+  } catch (_) {
+    return false;
+  } finally {
+    textarea.remove();
+  }
+}
 
 const providerStatusTooltip = $('#provider-status-tooltip');
 function positionProviderStatusTooltip(clientX, clientY) {
@@ -1751,14 +2080,25 @@ $('#customize-providers').addEventListener('focusout', event => {
 });
 
 $('#providers').addEventListener('click', async event => {
-  const button = event.target.closest('[data-provider-action="claude-login"]');
+  const button = event.target.closest('[data-provider-action]');
   if (!button) return;
+  const kind = button.dataset.providerAction;
+  if (kind !== 'claude-login' && kind !== 'antigravity-login') return;
   button.disabled = true;
   try {
-    await invoke('open_claude_login');
-    showStatus('Claude sign-in opened in a new terminal.');
+    if (kind === 'claude-login') {
+      await invoke('open_claude_login');
+      showStatus('Claude sign-in opened in a new terminal.');
+    } else {
+      await invoke('open_antigravity_login');
+      showStatus('Antigravity CLI opened in a new terminal. Finish sign-in there.');
+    }
   } catch (error) {
-    showStatus('Could not start Claude sign-in.', STATUS_LONG, error?.toString?.());
+    // The native command's error is already a clean, actionable sentence ("Claude Code was not
+    // found on PATH. Install it, then try again."). Show it directly instead of burying it in a
+    // title tooltip behind a generic headline.
+    const message = error?.message || 'Could not start provider sign-in.';
+    showStatus(message, STATUS_LONG);
   } finally {
     button.disabled = false;
   }
@@ -1849,7 +2189,7 @@ window.addEventListener('resize', () => {
   if (state.view === 'breakdown' && window.innerWidth < 720) {
     setBreakdownView(false, true);
   } else if (state.view === 'breakdown') {
-    renderBreakdown();
+    renderBreakdown(true);
   }
 });
 // The Rust side reveals the window with a raw ShowWindow and no fade, so the entrance happens in
@@ -1858,10 +2198,18 @@ window.addEventListener('resize', () => {
 // re-asserts it.
 let revealAnimationFrame = 0;
 let focusRevealTimer = 0;
+// One transitionend handler at a time. Each open used to attach a fresh finishOpening listener,
+// and a close that interrupted the transition removed the 'opening' class before any
+// transitionend could fire, so cancelled openings leaked one listener each.
+let popoverFinishHandler = null;
 function revealPopover(restart = false) {
   const popover = $('.popover');
   if (!popover) return;
   cancelAnimationFrame(revealAnimationFrame);
+  if (popoverFinishHandler) {
+    popover.removeEventListener('transitionend', popoverFinishHandler);
+    popoverFinishHandler = null;
+  }
   popover.classList.remove('closing');
   if (!restart || prefersReducedMotion()) {
     popover.classList.remove('opening');
@@ -1875,8 +2223,10 @@ function revealPopover(restart = false) {
     if (event.target === popover && event.propertyName === 'transform') {
       popover.classList.remove('opening');
       popover.removeEventListener('transitionend', finishOpening);
+      popoverFinishHandler = null;
     }
   };
+  popoverFinishHandler = finishOpening;
   popover.addEventListener('transitionend', finishOpening);
   // The forced layout above commits the offset state. Starting the transition immediately keeps
   // the web surface synchronized with the native HWND rise instead of spending two frames fully
@@ -1887,6 +2237,10 @@ function beginPopoverClose() {
   const popover = $('.popover');
   if (!popover) return;
   cancelAnimationFrame(revealAnimationFrame);
+  if (popoverFinishHandler) {
+    popover.removeEventListener('transitionend', popoverFinishHandler);
+    popoverFinishHandler = null;
+  }
   popover.classList.remove('opening');
   if (prefersReducedMotion()) {
     popover.classList.remove('shown');
@@ -1906,19 +2260,42 @@ window.addEventListener('focus', () => {
 });
 // Reset only while genuinely hidden, so the next open animates again. If WebView2 does not report
 // visibility for a hidden native window this simply never fires and we lose the entrance on
-// subsequent opens — degraded, not broken.
+// subsequent opens — degraded, not broken. The flag also stops the poll while hidden.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    popupHidden = true;
     $('.popover')?.classList.remove('shown', 'opening');
     if (state.view === 'breakdown') setBreakdownView(false, true);
+  } else {
+    popupHidden = false;
   }
 });
 
 window.__TAURI__?.event?.listen?.('poc-refresh', () => refresh(true));
-window.__TAURI__?.event?.listen?.('poc-closing', beginPopoverClose);
+window.__TAURI__?.event?.listen?.('poc-closing', () => {
+  popupHidden = true;
+  // A dismissal must invalidate any in-flight breakdown expansion (the 72ms entrance wait or the
+  // native widen round-trip). Without this, a close during the transition resumed the widen on the
+  // hidden window and paid a second geometry round-trip on every such reopen.
+  breakdownRequestGeneration++;
+  beginPopoverClose();
+});
 window.__TAURI__?.event?.listen?.('poc-opened', () => {
+  popupHidden = false;
   clearTimeout(focusRevealTimer);
   closeHeaderPopovers();
+  // A tooltip left over from the previous session is stale by definition: the cursor that
+  // requested it is long gone, and its data may no longer be rendered. Close both tooltip
+  // surfaces so the reopen never floats a dead popup over fresh content.
+  closeSpendOtherTooltip();
+  activeTrendBar = null;
+  clearTimeout(trendTooltipTimer);
+  setOverlayOpen(trendTooltip, false);
+  // The ring hover is the same class of stale state: the cursor never left the canvas while the
+  // window was hidden, so a reopen would repaint the ring/legend as if that phantom cursor were
+  // still hovering a slice.
+  state.hoveredSpendProviderId = null;
+  applyLegendHighlight();
   // A tray click means "show me my usage". Reopening onto whatever settings page happened to be
   // open when the popup was last dismissed is a wrong answer to that.
   document.querySelectorAll('.select-control.open').forEach(closeSelect);
@@ -1933,12 +2310,16 @@ window.__TAURI__?.event?.listen?.('poc-opened', () => {
 // instead of a second native window.
 window.__TAURI__?.event?.listen?.('open-page', event => openSettingsPage(event.payload));
 window.addEventListener('usage-monitor-open-page', event => openSettingsPage(event.detail));
+// A user change that happens before this startup response resolves must win over the stale
+// response: applying it would revert a fresh metric pick or settings edit the user just made.
+let userTouchedSettings = false;
 withTimeout(
   invoke('get_settings_data'),
   COMMAND_TIMEOUT_MS,
   'The settings command did not respond.'
 ).then(data => {
   if (!data?.settings) return;
+  if (userTouchedSettings) return;
   state.settings = data.settings;
   rememberMotionPreference();
   applyMotionPreference();
@@ -1950,7 +2331,19 @@ withTimeout(
 }).catch(() => { /* the native host can still be starting */ });
 refresh(false);
 syncRefreshStatus();
+// A hidden native window must not keep polling the host: every tick round-trips the desktop
+// bridge, and the WPF host is the primary refresh owner while the popup is closed. The Rust side
+// emits poc-closing/poc-opened reliably even where WebView2's visibilitychange is unreliable for
+// a hidden HWND, so both signals feed one flag. The popup starts hidden, so polling begins only
+// after the first real open.
+let popupHidden = true;
+function popupIsHidden() {
+  return popupHidden || document.hidden || document.visibilityState === 'hidden';
+}
 setInterval(async () => {
+  // A hidden popup has nothing to paint and no user to answer to; the reopen path resyncs
+  // immediately (poc-opened triggers a refresh), so skipping the poll while hidden loses nothing.
+  if (popupIsHidden()) return;
   const wasLoading = state.localLoading || state.hostLoading;
   await syncRefreshStatus();
   // A background WPF refresh can complete while the popup is open. Pull the new cached
@@ -1959,9 +2352,9 @@ setInterval(async () => {
   // The desktop API and WebView start independently. A first request can legitimately arrive
   // before the loopback listener is ready; without this retry, the popup kept rendering its
   // synthetic "not configured" placeholders forever even though the live API came up seconds
-  // later. Retrying only while no real snapshot exists keeps the normal five-minute refresh
-  // cadence untouched.
-  if (!state.localLoading && !state.hostLoading && !state.snapshots.length &&
+  // later. The retry stops after one successful load: a valid-but-empty provider list is real
+  // data, not a failed load, and retrying it forever would hammer the host with no user visible.
+  if (!state.localLoading && !state.hostLoading && state.lastGood === null &&
       Date.now() - lastInitialDataRetryAt >= 2000) {
     lastInitialDataRetryAt = Date.now();
     refresh(false);
@@ -2055,9 +2448,15 @@ function renderSpend() {
     .sort((a, b) => spendRowCompare(a, b, spendRowOrder()));
   const rootRows = groupSmallSpendRows(rows);
   lastSpendRootRows = rootRows;
-  lastSpendDisplayedRows = rootRows;
   if (state.hoveredSpendProviderId && !rootRows.some(row => row.id === state.hoveredSpendProviderId))
     state.hoveredSpendProviderId = null;
+  // A refresh can regroup or dissolve the Others tail while its tooltip is open. Re-paint the
+  // tooltip from the new aggregation, or close it if the aggregate no longer exists — a tooltip
+  // listing providers that vanished from the chart is a stale surface pointing at dead data.
+  if (state.spendTooltipRowId && $('#spend-other-tooltip')?.classList.contains('is-open')) {
+    const aggregate = rootRows.find(row => row.id === state.spendTooltipRowId && row.isAggregate);
+    if (!aggregate || !paintSpendOtherTooltip(aggregate)) closeSpendOtherTooltip();
+  }
   const totalCost = rootRows.reduce((sum, row) => sum + row.cost, 0);
   const totalTokens = rootRows.reduce((sum, row) => sum + row.tokens, 0);
   const centerValue = state.metric === 'tokens' ? compactNumber(totalTokens)
@@ -2111,6 +2510,230 @@ function renderLegend(rows) {
     });
   }
   applyLegendHighlight();
+}
+
+// --- Share copy: generated chart image + text ------------------------------------------------
+
+function formatShareDate(key) {
+  const [year, month, day] = String(key).split('-').map(Number);
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${names[(month || 1) - 1] || ''} ${day || ''}, ${year || ''}`.trim();
+}
+
+function periodRangeText() {
+  if (state.period === 'today') return `Today · ${formatShareDate(dayKey(0))}`;
+  if (state.period === 'yesterday') return `Yesterday · ${formatShareDate(dayKey(1))}`;
+  return `${formatShareDate(dayKey(29))} – ${formatShareDate(dayKey(0))} · Last 30 Days`;
+}
+
+function compactShareText() {
+  const rows = lastSpendRootRows;
+  const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
+  const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const lines = [`TokenBurn · ${periodRangeText()}`];
+  lines.push(...rows.map(row => `${row.name} ${legendLabel(row)}`));
+  if (state.metric === 'tokens') lines.push(`Total ${shareTokenCount(totalTokens)} tokens`);
+  else if (state.metric === 'cost-mtok') lines.push(`Total $${totalCost.toFixed(2)} · ${shareTokenCount(totalTokens)} tokens`);
+  else lines.push(`Total $${totalCost.toFixed(2)}`);
+  return lines.join('\n');
+}
+
+// Token counts in copied text read better as whole numbers below 1K; compactNumber's two-decimal
+// fallback exists for cost figures like the ring center and would print "500.00 tokens".
+function shareTokenCount(number) {
+  return number >= 1e3 ? compactNumber(number) : String(Math.round(number || 0));
+}
+
+const SHARE_IMAGE_WIDTH = 800;
+const SHARE_IMAGE_HEIGHT = 400;
+
+// Draws the spend card as a shareable image straight from the data the dashboard renders — the
+// same rows and the same ring painter, not a screenshot. The clipboard carries the PNG-equivalent
+// bitmap alongside the text so pasting into an assistant chat brings both. Sized like the compact
+// card: small ring, tight legend rows, minimal chrome.
+function buildShareImage() {
+  const canvas = document.createElement('canvas');
+  canvas.width = SHARE_IMAGE_WIDTH;
+  canvas.height = SHARE_IMAGE_HEIGHT;
+  const ctx = canvas.getContext('2d');
+  const rows = lastSpendRootRows;
+  const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
+  const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  let centerValue;
+  if (state.metric === 'tokens') centerValue = shareTokenCount(totalTokens);
+  else if (state.metric === 'cost') centerValue = `$${compactNumber(totalCost)}`;
+  else centerValue = `$${(totalTokens > 0 ? totalCost / totalTokens * 1e6 : 0).toFixed(2)}`;
+  const centerUnit = state.metric === 'tokens' ? 'tokens' : '';
+  const margin = 32;
+  const footerH = 40;
+  const bodyTop = 62;
+  const bodyBottom = SHARE_IMAGE_HEIGHT - footerH;
+
+  // Card surface and hairline border, matching the popup's dark theme.
+  ctx.fillStyle = '#0F1115';
+  ctx.fillRect(0, 0, SHARE_IMAGE_WIDTH, SHARE_IMAGE_HEIGHT);
+  ctx.strokeStyle = 'rgba(255,255,255,.08)';
+  ctx.lineWidth = 1;
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(.5, .5, SHARE_IMAGE_WIDTH - 1, SHARE_IMAGE_HEIGHT - 1, 16);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(.5, .5, SHARE_IMAGE_WIDTH - 1, SHARE_IMAGE_HEIGHT - 1);
+  }
+
+  // Header: brand + period on the left, generated timestamp on the right, one compact row.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f1f1f2';
+  ctx.font = '700 19px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText('TokenBurn', margin, 32);
+  ctx.fillStyle = '#9ea0a8';
+  ctx.font = '500 12px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(periodRangeText(), margin, 50);
+  const generated = `Generated ${new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+  ctx.fillStyle = '#77777D';
+  ctx.font = '400 11px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(generated, SHARE_IMAGE_WIDTH - margin - ctx.measureText(generated).width, 32);
+  ctx.strokeStyle = 'rgba(255,255,255,.09)';
+  ctx.beginPath();
+  ctx.moveTo(margin, bodyTop);
+  ctx.lineTo(SHARE_IMAGE_WIDTH - margin, bodyTop);
+  ctx.stroke();
+
+  // The donut, painted by the same painter the live dashboard uses at final values. Sized near
+  // the compact card's proportion so the exported chart reads like the dashboard, not a poster.
+  const ringSize = 240;
+  const ringCanvas = document.createElement('canvas');
+  ringCanvas.width = ringSize;
+  ringCanvas.height = ringSize;
+  paintRingFrame(ringCanvas.getContext('2d'), ringSize, rows, centerValue, centerUnit);
+  const ringLeft = 48;
+  const ringTop = bodyTop + (bodyBottom - bodyTop - ringSize) / 2;
+  ctx.drawImage(ringCanvas, ringLeft, ringTop);
+
+  // Legend rows mirror #spend-legend: dot, name, value right-aligned.
+  const legendLeft = 300;
+  const legendRight = SHARE_IMAGE_WIDTH - margin;
+  const rowHeight = 28;
+  const legendTop = bodyTop + Math.max(0, (bodyBottom - bodyTop - rows.length * rowHeight) / 2);
+  if (!rows.length) {
+    ctx.fillStyle = '#9ea0a8';
+    ctx.font = '500 13px -apple-system,Segoe UI,sans-serif';
+    ctx.fillText('No usage data for this period.', legendLeft + 5, legendTop + 13);
+  }
+  rows.forEach((row, index) => {
+    const y = legendTop + index * rowHeight + rowHeight / 2;
+    ctx.fillStyle = row.color;
+    ctx.beginPath();
+    ctx.arc(legendLeft + 5, y, 4.5, 0, TAU);
+    ctx.fill();
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f1f1f2';
+    ctx.font = '500 13px -apple-system,Segoe UI,sans-serif';
+    ctx.fillText(row.name, legendLeft + 18, y + 4.5);
+    ctx.textAlign = 'right';
+    ctx.font = '600 13px -apple-system,Segoe UI,sans-serif';
+    ctx.fillText(legendLabel(row), legendRight, y + 4.5);
+  });
+  ctx.textAlign = 'left';
+
+  // Footer: totals for the selected period.
+  ctx.strokeStyle = 'rgba(255,255,255,.09)';
+  ctx.beginPath();
+  ctx.moveTo(margin, SHARE_IMAGE_HEIGHT - footerH);
+  ctx.lineTo(SHARE_IMAGE_WIDTH - margin, SHARE_IMAGE_HEIGHT - footerH);
+  ctx.stroke();
+  let footer;
+  if (state.metric === 'tokens') footer = `Total ${shareTokenCount(totalTokens)} tokens`;
+  else if (state.metric === 'cost') footer = `Total $${totalCost.toFixed(2)}`;
+  else footer = `Total $${totalCost.toFixed(2)} · ${shareTokenCount(totalTokens)} tokens`;
+  ctx.fillStyle = '#9ea0a8';
+  ctx.font = '500 12px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(footer, margin, SHARE_IMAGE_HEIGHT - 18);
+  const caption = 'Local usage history';
+  ctx.fillStyle = '#77777D';
+  ctx.font = '400 11px -apple-system,Segoe UI,sans-serif';
+  ctx.fillText(caption, SHARE_IMAGE_WIDTH - margin - ctx.measureText(caption).width, SHARE_IMAGE_HEIGHT - 18);
+  return canvas;
+}
+
+// Writes the chart bitmap to the clipboard. The native command is the primary path because it
+// bypasses the WebView clipboard-permission quirks; the web ClipboardItem path covers older
+// binaries that predate the command. A null text writes the image formats only.
+let shareInFlight = false;
+async function copyShareToClipboard(text, canvas) {
+  // A double click would otherwise run two full canvas encodes and two clipboard writes. The
+  // encode alone stalls the main thread for hundreds of milliseconds, so a second click must not
+  // start a second encode while the first is still working.
+  if (shareInFlight) return true;
+  shareInFlight = true;
+  try {
+    return await copyShareToClipboardCore(text, canvas);
+  } finally {
+    shareInFlight = false;
+  }
+}
+
+async function copyShareToClipboardCore(text, canvas) {
+  try {
+    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    let binary = '';
+    // apply() with a very large argument list can exhaust the call stack on some engines; 16K
+    // elements per call is comfortably below the limits of every WebView2/WebKit build.
+    const chunk = 0x4000;
+    for (let index = 0; index < pixels.length; index += chunk) {
+      binary += String.fromCharCode.apply(null, pixels.subarray(index, index + chunk));
+    }
+    // Chromium paste targets (ChatGPT, browser uploads) read image data from the registered PNG
+    // clipboard format, so encode the same canvas as a PNG alongside the raw bitmap. The encode
+    // must be bounded too: a WebView2 that never invokes the toBlob callback would otherwise hang
+    // the share with no status and no fallback.
+    const pngBlob = await withTimeout(
+      new Promise(resolve => canvas.toBlob(resolve, 'image/png')),
+      COMMAND_TIMEOUT_MS,
+      'The chart image encode did not respond.'
+    );
+    let pngBase64 = '';
+    if (pngBlob) {
+      pngBase64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(pngBlob);
+      });
+    }
+    await withTimeout(invoke('copy_share', {
+      payload: {
+        text,
+        width: canvas.width,
+        height: canvas.height,
+        rgbaBase64: btoa(binary),
+        pngBase64,
+      },
+    }), COMMAND_TIMEOUT_MS, 'The clipboard command did not respond.');
+    return true;
+  } catch (_) {
+    // Fall through to the web clipboard path.
+  }
+  try {
+    if (typeof ClipboardItem === 'undefined') return false;
+    const blob = await withTimeout(
+      new Promise(resolve => canvas.toBlob(resolve, 'image/png')),
+      COMMAND_TIMEOUT_MS,
+      'The chart image encode did not respond.'
+    );
+    if (!blob) return false;
+    const payload = { 'image/png': blob };
+    if (text) payload['text/plain'] = new Blob([text], { type: 'text/plain' });
+    await navigator.clipboard.write([new ClipboardItem(payload)]);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function copyShareImageOnly(canvas) {
+  return copyShareToClipboard(null, canvas);
 }
 
 function drawMiniSpendRing(rows) {
@@ -2170,18 +2793,26 @@ function closeSpendOtherTooltip() {
   setOverlayOpen($('#spend-other-tooltip'), false);
 }
 
-function showSpendOtherTooltip(row, clientX, clientY) {
-  if (!row?.isAggregate || !row.children?.length) {
-    closeSpendOtherTooltip();
-    return;
-  }
-  clearTimeout(state.spendTooltipTimer);
+// Paints the tooltip body for an aggregate row without touching its open/closed state, so a data
+// refresh can re-sync an already visible tooltip in place. Returns false when the row is not a
+// usable aggregate.
+function paintSpendOtherTooltip(row) {
+  if (!row?.isAggregate || !row.children?.length) return false;
   state.spendTooltipRowId = row.id;
   $('#spend-other-total').textContent = legendLabel(row);
   $('#spend-other-list').innerHTML = row.children.map(child =>
     `<div class="spend-other-item"><span class="dot" style="background:${child.color}"></span><span>${esc(child.name)}</span><strong>${esc(legendLabel(child))}</strong></div>`
   ).join('');
   drawMiniSpendRing(row.children);
+  return true;
+}
+
+function showSpendOtherTooltip(row, clientX, clientY) {
+  clearTimeout(state.spendTooltipTimer);
+  if (!paintSpendOtherTooltip(row)) {
+    closeSpendOtherTooltip();
+    return;
+  }
   setOverlayOpen($('#spend-other-tooltip'), true);
   updateSpendOtherTooltipPosition(clientX, clientY);
 }

@@ -109,11 +109,11 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .icon-button:hover, .title-button:hover { color: var(--text); background: rgba(255, 255, 255, .08); transition-duration: var(--dur-micro); }
 .icon-button:active:not(:disabled), .title-button:active { transform: scale(.94); transition-duration: 80ms; }
 .icon-button:disabled { cursor: default; opacity: .5; }
-.copy-icon { font-size: 18px; }
 .header-actions { margin-left: auto; display: flex; gap: 4px; }
-.hint, .metric-menu { position: absolute; z-index: 4; top: 45px; background: var(--frost-menu); border: 1px solid rgba(255,255,255,.28); border-radius: 10px; box-shadow: 0 10px 26px #0008; padding: 8px 10px; color: var(--muted); font-size: 12px; transform-origin: top left; }
+.hint, .metric-menu, .share-menu { position: absolute; z-index: 4; top: 45px; background: var(--frost-menu); border: 1px solid rgba(255,255,255,.28); border-radius: 10px; box-shadow: 0 10px 26px #0008; padding: 8px 10px; color: var(--muted); font-size: 12px; transform-origin: top left; }
 /* Anchored under the metric button it belongs to. */
 .metric-menu { left: 18px; display: grid; gap: 3px; min-width: 172px; padding: 9px; }
+.share-menu { right: 44px; display: grid; gap: 3px; min-width: 178px; padding: 9px; transform-origin: top right; }
 /* Anchored under the info button, not under the metric button next to it. The left edge is set
    from the button's real position in app.js, because the metric title before it changes width. */
 .hint { left: 18px; right: 18px; }
@@ -121,8 +121,9 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .menu-indicator { width: 7px; height: 7px; margin-inline: auto; border-radius: 50%; background: var(--blue); opacity: 0; transform: scale(.55); transition: opacity var(--dur-micro) var(--ease-out), transform var(--dur-micro) var(--ease-out); }
 .menu-indicator.is-on { opacity: 1; transform: scale(1); }
 .menu-action-indicator { width: 5px; height: 5px; background: var(--muted); opacity: .55; transform: none; }
-.metric-menu button:hover, .metric-menu button.selected { background: #3b3b3d; transition-duration: var(--dur-micro); }
-.metric-menu button:active { background: #454548; transition-duration: 80ms; }
+.share-menu button { text-align: left; padding: 9px 11px; background: transparent; border-radius: 9px; display: grid; grid-template-columns: 14px 1fr; align-items: center; gap: 6px; transition: background 140ms ease, color 140ms ease; }
+.metric-menu button:hover, .metric-menu button.selected, .share-menu button:hover { background: #3b3b3d; transition-duration: var(--dur-micro); }
+.metric-menu button:active, .share-menu button:active { background: #454548; transition-duration: 80ms; }
 
 /* The native shell owns outer-window geometry. This only transitions the content swap, keeping
    WebView layout work cheap while the popup widens around it. */
@@ -302,6 +303,7 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 /* "Not configured" / "no limits returned" are neutral facts, not failures. Red is reserved for
    things the user should act on, otherwise the one urgent signal stops meaning anything. */
 .empty-line { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.providers-empty { padding: 24px 18px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .provider-action { margin-top: 8px; padding: 6px 9px; border: 1px solid rgba(255,255,255,.15); border-radius: 8px; background: rgba(255,255,255,.07); color: var(--text); font-size: 11px; font-weight: 600; transition: background 140ms ease, opacity var(--dur-micro) ease, transform 80ms var(--ease-out); }
 .provider-action:hover:not(:disabled) { background: rgba(255,255,255,.13); transition-duration: var(--dur-micro); }
 .provider-action:active:not(:disabled) { background: rgba(255,255,255,.18); transform: scale(.98); }
@@ -368,8 +370,10 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .provider-name-label img { width: 18px; height: 18px; object-fit: contain; filter: brightness(0) invert(1); opacity: .8; }
 .provider-customize-logo { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; }
 .provider-customize-logo.has-issue img { filter: brightness(0) saturate(100%) invert(79%) sepia(64%) saturate(520%) hue-rotate(343deg) brightness(103%) contrast(91%); opacity: 1; }
-.provider-status-badge { position: absolute; top: -6px; right: -7px; width: 13px; height: 13px; display: grid; place-items: center; border: 2px solid #242426; border-radius: 50%; background: var(--warning); color: #242426; font-size: 9px; font-weight: 900; line-height: 1; }
-.provider-status-trigger { border: 0; padding: 0; background: transparent; cursor: help; }
+.provider-status-badge { position: absolute; top: -6px; right: -7px; width: 13px; height: 13px; display: grid; place-items: center; border: 2px solid #242426; border-radius: 50%; background: var(--warning); color: #242426; font-size: 9px; font-weight: 900; line-height: 0; }
+/* line-height 0 keeps the glyph box itself centered in the badge: with a normal line box the
+   "!" renders against the top of the circle because its em-box has no descender space. */
+.provider-status-trigger { border: 0; padding: 0; background: transparent; cursor: pointer; }
 .provider-status-trigger:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 5px; }
 .provider-switch { grid-column: 3; display: flex; justify-content: flex-end; align-items: center; cursor: pointer; }
 .provider-switch .toggle-track { margin-left: 0; }
@@ -402,10 +406,9 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .provider-metric-options .toggle-row { min-height: 31px; font-size: 12px; }
 .provider-metric-options .toggle-label { color: var(--muted); }
 .field-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 7px 0; font-size: 13px; }
-.notification-providers { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; }
-.notification-providers > span:first-child { display: grid; gap: 2px; min-width: 0; line-height: 1.3; }
-.notification-providers > span:first-child small { display: block; color: var(--muted); font-size: 11px; line-height: 1.35; }
-.notification-providers > .provider-multi-select { width: 178px; min-width: 0; max-width: 178px; justify-self: end; }
+.notification-providers > .field-title { display: grid; gap: 2px; min-width: 0; line-height: 1.3; }
+.notification-providers > .field-title small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.notification-providers > .provider-multi-select { flex: 0 0 auto; min-width: 142px; }
 /* Kept out of the tab order: it is a 1x1 invisible element, and leaving it focusable put a phantom
    tab stop in front of every enhanced select. The custom control below carries the keyboard model. */
 .field-row select.select-native { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -420,14 +423,14 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .select-menu { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; min-width: 100%; padding: 6px; display: grid; gap: 3px; border: 1px solid rgba(255,255,255,.2); border-radius: 10px; background: var(--frost-menu); box-shadow: 0 14px 30px rgba(0,0,0,.45); transform-origin: top right; }
 .select-option { padding: 8px 9px; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; white-space: nowrap; transition: background 140ms ease, color 140ms ease; }
 .select-option:hover, .select-option.selected, .select-option.is-active { background: #414145; color: var(--text); transition-duration: var(--dur-micro); }
-.notification-provider-menu { top: calc(100% + 6px); right: 0; width: 178px; min-width: 178px; max-width: 178px; max-height: min(280px, calc(100vh - 138px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.28) transparent; }
+.notification-provider-menu { top: calc(100% + 6px); right: 0; min-width: 100%; max-width: 264px; max-height: min(280px, calc(100vh - 138px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.28) transparent; }
 .notification-provider-menu::-webkit-scrollbar { width: 8px; }
 .notification-provider-menu::-webkit-scrollbar-track { background: transparent; }
 .notification-provider-menu::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 .notification-provider-menu::-webkit-scrollbar-thumb { min-height: 28px; border: 2px solid transparent; border-radius: 999px; background: rgba(255,255,255,.28); background-clip: padding-box; }
 .notification-provider-menu::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.44); background-clip: padding-box; }
-.notification-provider-option { width: 100%; display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 8px 9px; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), transform 80ms var(--ease-out); }
-.notification-provider-option:hover, .notification-provider-option:focus-visible { background: rgba(255,255,255,.08); color: var(--text); transition-duration: var(--dur-micro); }
+.notification-provider-option { width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; white-space: nowrap; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), transform 80ms var(--ease-out); }
+.notification-provider-option:hover, .notification-provider-option:focus-visible { background: #414145; color: var(--text); transition-duration: var(--dur-micro); }
 .notification-provider-option:not(.notification-provider-select-all)[aria-selected="true"] { background: #414145; color: var(--text); }
 .notification-provider-option:active { transform: scale(.985); }
 .notification-provider-option:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
@@ -437,11 +440,8 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .notification-provider-option-name img { width: 18px; height: 18px; object-fit: contain; filter: brightness(0) invert(1); opacity: .82; }
 .notification-provider-select-all { border-bottom: 1px solid rgba(255,255,255,.1); border-radius: 7px 7px 4px 4px; margin-bottom: 3px; font-weight: 650; color: var(--text); }
 .notification-provider-empty { padding: 14px 10px; color: var(--muted); font-size: 11px; line-height: 1.4; }
-.notification-trigger > span { display: grid; gap: 3px; }
-.notification-trigger small { color: var(--muted); font-size: 10px; }
 .history-trend .trend { position: relative; }
 .trend i:hover { opacity: 1; filter: brightness(1.22); }
-.trend i.empty { background: rgba(255,255,255,.14); border-radius: 2px; }
 .trend i[aria-label$="No data"] { background: rgba(255,255,255,.14); border-radius: 2px; }
 .trend-tooltip { position: fixed; z-index: 100; max-width: 220px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.2); border-radius: 9px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.3; white-space: nowrap; pointer-events: none; transform-origin: bottom left; }
 .provider-status-tooltip { position: fixed; z-index: 100; max-width: 230px; padding: 8px 10px; border: 1px solid rgba(244,183,77,.42); border-radius: 8px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.35; pointer-events: none; transform-origin: top left; }

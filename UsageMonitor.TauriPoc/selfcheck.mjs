@@ -79,9 +79,9 @@ context.window.addEventListener = noop;
 context.__TAURI__ = undefined;
 
 vm.createContext(context);
-vm.runInContext(`${source}\nglobalThis.__selfCheck = { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, state };`, context, { filename: 'app.js' });
+vm.runInContext(`${source}\nglobalThis.__selfCheck = { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, reauthActionFor, setLastSpendRootRows: (rows) => { lastSpendRootRows = rows; }, compactShareText, breakdownShareText, periodRangeText, formatShareDate, dayKey, providerLogo, state };`, context, { filename: 'app.js' });
 
-const { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, state } = context.__selfCheck;
+const { providersStructureKey, providerRows, progressValues, groupSmallSpendRows, eligibleNotificationProviders, reauthActionFor, setLastSpendRootRows, compactShareText, breakdownShareText, periodRangeText, formatShareDate, dayKey, providerLogo, state } = context.__selfCheck;
 assert.ok(typeof providersStructureKey === 'function', 'providersStructureKey should be defined');
 assert.ok(typeof providerRows === 'function', 'providerRows should be defined');
 
@@ -231,5 +231,140 @@ assert.deepEqual(
   'notification picker must exclude unavailable or unknown providers');
 assert.match(source, /ArrowDown.*ArrowUp.*Home.*End/, 'notification picker needs keyboard navigation');
 assert.match(styles, /notification-provider-menu::?-webkit-scrollbar/, 'notification picker needs custom scrollbar styling');
+
+// 11. Share copy on the compact view: text names the period and carries the displayed rows.
+state.period = '30';
+state.metric = 'cost';
+setLastSpendRootRows([
+  { id: 'claude-code', name: 'Claude', cost: 12.34, tokens: 123456, value: 12.34, color: '#da7756', isAggregate: false },
+  { id: 'codex', name: 'Codex', cost: 4.56, tokens: 65432, value: 4.56, color: '#3d82f6', isAggregate: false },
+]);
+const compactText = compactShareText();
+assert.match(compactText, /^TokenBurn · .*Last 30 Days/, 'compact share text must name the selected period');
+assert.match(compactText, /Claude \$12\.34/, 'compact share text must include each provider value');
+assert.match(compactText, /Total \$16\.90/, 'compact share text must include the period total');
+assert.equal(compactText.split('\n').length, 4, 'compact share text must be header + rows + total');
+state.period = 'today';
+assert.match(periodRangeText(), /^Today · /, 'the today range must be labelled Today');
+state.period = 'yesterday';
+assert.match(periodRangeText(), /^Yesterday · /, 'the yesterday range must be labelled Yesterday');
+state.period = '30';
+assert.match(periodRangeText(), /· Last 30 Days$/, 'the 30-day range must be labelled Last 30 Days');
+assert.match(formatShareDate('2026-08-10'), /^Aug 10, 2026$/, 'share dates must render as friendly dates');
+
+// 12. Share copy on the usage page: dense text from the same ledger aggregation the page renders.
+state.snapshots = [snapshot({
+  usageHistory: {
+    breakdown: [{
+      date: dayKey(1), providerId: 'codex', modelId: 'gpt-5-codex',
+      uncachedInputTokens: 1000, cachedInputTokens: 2000, cacheCreationTokens: 500,
+      outputTokens: 800, reasoningTokens: 100, costUsd: 1.25,
+      costBasis: 'ProviderReported', pricingBasis: 'Provider', estimated: false, cacheSavingsUsd: 0.4,
+    }],
+  },
+})];
+state.breakdownPeriod = '30';
+state.breakdownMetric = 'cost';
+state.breakdownGrouping = 'model';
+state.breakdownSort = { column: 'costUsd', direction: 'desc' };
+const breakdownText = breakdownShareText();
+assert.match(breakdownText, /^TokenBurn · Usage · /, 'breakdown share text must open with the page header');
+assert.match(breakdownText, /Raw cost: \$1\.25 \(reported \$1\.25, estimated \$0\.00\)/, 'breakdown share text must include the cost quality split');
+assert.match(breakdownText, /Processed: 4\.4K tokens · cached input 2\.0K \(57\.1%\)/, 'breakdown share text must include the token split');
+assert.match(breakdownText, /Cache savings: \$0\.40/, 'breakdown share text must include cache savings');
+assert.match(breakdownText, /gpt-5-codex \| Codex \| \$1\.25 \| 100\.0% \| 4\.4K \| \$284 \| Provider reported/, 'breakdown share text must mirror the model ledger row');
+state.breakdownGrouping = 'day';
+assert.match(breakdownShareText(), /^By day \(cost\)\nDay \| Codex \| Total \| Tokens \| Pricing/m, 'day grouping must copy the per-day ledger');
+assert.doesNotMatch(breakdownShareText(), /ClipboardItem/, 'the usage page must copy text only, without an image path');
+
+// 13. The compact share path must prefer the native atomic clipboard command, with a web
+// ClipboardItem fallback for older binaries.
+assert.match(source, /invoke\('copy_share'/, 'the compact share copy must call the native atomic clipboard command');
+assert.match(source, /invoke\('copy_share', \{\s*payload: \{/, 'the native clipboard command must receive its struct under the payload key');
+assert.match(source, /pngBase64/, 'the share payload must include a PNG for Chromium paste targets');
+assert.match(source, /FileReader/, 'the PNG must be produced from the same canvas blob');
+assert.match(markup, /data-share-copy="image"/, 'the share menu must offer an image-only copy for text-first paste targets');
+assert.match(styles, /\.hint, \.metric-menu, \.share-menu \{/, 'the share menu must share the styled container group (background, border, shadow)');
+assert.match(styles, /\.share-menu \{ right: 44px;/, 'the share menu must stay anchored to the share button');
+assert.match(source, /copyShareToClipboard\(null, canvas\)/, 'the image-only copy must omit the text placement');
+assert.match(source, /shareMenuOpenedByPress/, 'the share menu must open from a long press without firing the plain click copy');
+assert.match(source, /if \(shareMenuOpenedByPress\) \{\s*shareMenuOpenedByPress = false;\s*return;/, 'a long-press release must keep the share menu open instead of closing it');
+assert.match(source, /function shareTokenCount/, 'share texts must round token counts below 1K instead of printing 500.00');
+assert.match(source, /shareTokenCount\(summary\.unpriced\)/, 'unpriced token counts must use the rounded token formatter');
+assert.match(source, /const chunk = 0x4000;/, 'pixel chunking must stay under the apply() stack limit');
+assert.doesNotMatch(markup, /data-share-copy="breakdown"/, 'the usage page must keep its single text copy, no image menu');
+assert.match(source, /new ClipboardItem/, 'a web ClipboardItem fallback must remain for older binaries');
+assert.match(source, /state\.view === 'breakdown'/, 'the share button must dispatch on the current view');
+
+// 14. User-facing failures must not leak raw exception text, and the re-auth action must be
+// driven by the backend error category instead of a second text heuristic.
+assert.doesNotMatch(source, /error\?\.toString/, 'raw exception text must not reach the status surface');
+assert.doesNotMatch(source, /Settings are unavailable while the desktop host is starting/, 'the settings error must not claim a single cause the app cannot know');
+assert.match(source, /const message = error\?\.message \|\| 'Could not start provider sign-in\.'/, 'the sign-in failure must surface the actionable native message');
+const categoryAuth = { providerId: 'claude-code', errorCategory: 'Authentication', lines: [] };
+const categoryNetwork = { providerId: 'claude-code', errorCategory: 'Network', lines: [] };
+const legacyText = { providerId: 'antigravity', lines: [] };
+assert.equal(reauthActionFor(categoryAuth, '').action, 'claude-login', 'an Authentication category must offer the sign-in action');
+assert.equal(reauthActionFor({ providerId: 'antigravity', errorCategory: 'Authorization', lines: [] }, '').action, 'antigravity-login', 'an Authorization category must offer the Antigravity sign-in action');
+assert.equal(reauthActionFor(categoryNetwork, 'Something broke'), null, 'a Network category must never offer a sign-in action');
+assert.equal(reauthActionFor(categoryNetwork, 'Session expired. Run `agy` to sign in.'), null, 'a non-auth category must not be overridden by auth-sounding text (matches ReauthActionResolver)');
+assert.equal(reauthActionFor(legacyText, 'Session expired. Run `agy` to sign in.').action, 'antigravity-login', 'a category-less cached envelope must fall back to the text heuristic');
+assert.equal(reauthActionFor(legacyText, 'quota service returned HTTP 500'), null, 'a network-style message must not trigger the text heuristic');
+
+// 14. Provider logos come from the bundled asset map only. A catalog-supplied logo is honored
+// only when it matches the narrow packaged-asset pattern; anything else falls back and unknown
+// providers render the plain marker. This protects the img src interpolation from injection.
+const logoFor = (id) => providerLogo(id);
+assert.equal(
+  logoFor('codex'),
+  '<img src="./assets/providers/codex.svg" alt="" aria-hidden="true" loading="eager">',
+  'a known provider must render its packaged logo');
+state.providerCatalog = [{ id: 'codex', logo: 'javascript:alert(1)' }];
+assert.equal(logoFor('codex'), '<img src="./assets/providers/codex.svg" alt="" aria-hidden="true" loading="eager">', 'a javascript: logo must fall back to the packaged asset');
+state.providerCatalog = [{ id: 'codex', logo: 'https://evil.example/x.svg" onerror="alert(1)' }];
+assert.equal(logoFor('codex'), '<img src="./assets/providers/codex.svg" alt="" aria-hidden="true" loading="eager">', 'an attribute-breakout logo must fall back to the packaged asset');
+state.providerCatalog = [{ id: 'codex', logo: 'C:\\Users\\nobody\\logo.svg' }];
+assert.equal(logoFor('codex'), '<img src="./assets/providers/codex.svg" alt="" aria-hidden="true" loading="eager">', 'an absolute path logo must fall back to the packaged asset');
+state.providerCatalog = [{ id: 'evil', logo: './assets/providers/evil.svg' }];
+assert.equal(logoFor('evil'), '<img src="./assets/providers/evil.svg" alt="" aria-hidden="true" loading="eager">', 'a pattern-conforming bundled-relative logo is honored even for unknown providers (same-origin only)');
+state.providerCatalog = [{ id: 'evil', logo: '../../secret.svg' }, { id: 'evil', logo: './assets/providers/evil.svg' }];
+assert.match(logoFor('evil'), /^<span class="provider-fallback"/, 'a path-traversal logo must fall back even when it is the first catalog entry');
+state.providerCatalog = [{ id: 'evil', logo: './assets/other/evil.svg' }];
+assert.match(logoFor('evil'), /^<span class="provider-fallback"/, 'a non-provider asset path must fall back');
+state.providerCatalog = [{ id: 'evil' }];
+assert.match(logoFor('evil'), /^<span class="provider-fallback"/, 'a logo-less unknown provider must render the fallback marker');
+state.providerCatalog = [
+  { id: 'claude-code', logo: './assets/providers/claude.svg' },
+  { id: 'codex', logo: './assets/providers/codex.svg' },
+  { id: 'antigravity', logo: './assets/providers/antigravity.svg' },
+  { id: 'cursor', logo: './assets/providers/cursor.svg' },
+  { id: 'copilot', logo: './assets/providers/copilot.svg' },
+  { id: 'devin', logo: './assets/providers/devin.svg' },
+  { id: 'grok', logo: './assets/providers/grok.svg' },
+  { id: 'opencode', logo: './assets/providers/opencode.svg' },
+];
+assert.match(logoFor('claude-code'), /^<img src="\.\/assets\/providers\/claude\.svg"/, 'a valid catalog logo is honored');
+
+// 15. Interaction-state regression guards. These protect the fixes in the audit: the breakdown
+// chart must wire its handlers once per canvas, hover/tooltips must never outlive their data, a
+// refresh must re-render an open drill-down, Escape must back out of the drill-down one level,
+// and tooltips must not survive a popup close/reopen cycle.
+assert.match(source, /canvas\.dataset\.chartWired === 'true'/, 'the breakdown chart must wire its handlers once per canvas');
+assert.match(source, /lastBreakdownSeries = series;/, 'chart handlers must read the latest series from a module slot');
+assert.match(source, /if \(state\.breakdownHoverIndex !== null && \(state\.breakdownHoverIndex < 0 \|\| state\.breakdownHoverIndex >= breakdownDays\(\)\)\)/, 'an out-of-range hover index must be clamped away');
+assert.match(source, /updateBreakdownChartTooltip\(state\.breakdownHoverIndex\);\s*\n\s*wireBreakdownChart\(series\);/, 'the drill-down must re-sync its tooltip on every render');
+assert.match(source, /if \(state\.view === 'breakdown'\) renderBreakdown\(\);/, 'a refresh must re-render an open drill-down');
+assert.match(source, /if \(!force && key === lastBreakdownRenderKey && \$\(\'#breakdown-chart\'\)\) return;/, 'an unchanged drill-down must not rebuild every second');
+assert.match(source, /breakdownRequestGeneration/, 'drill-down transitions must carry a request generation');
+assert.match(source, /if \(generation !== breakdownRequestGeneration\) \{ clearTransition\(\); return false; \}/, 'stale drill-down transitions must bail out and clean their transition classes');
+assert.match(source, /\/\/ The breakdown is a drill-down level like a settings page\./, 'Escape must collapse the drill-down before hiding the popup');
+assert.match(source, /paintSpendOtherTooltip/, 'the Others tooltip body must be paintable in place');
+assert.match(source, /state\.spendTooltipRowId && \$\(\'#spend-other-tooltip\'\)\?\.classList\.contains\(\'is-open\'\)/, 'a refresh must re-sync or close an open Others tooltip');
+assert.match(source, /\/\/ The provider list is about to be rebuilt underneath an open trend tooltip\./, 'a provider rebuild must tear down the trend tooltip');
+assert.match(source, /\/\/ A tooltip left over from the previous session is stale by definition/, 'a popup reopen must clear leftover tooltips');
+assert.equal(
+  (source.match(/popover\.removeEventListener\('transitionend', popoverFinishHandler\);/g) || []).length,
+  2,
+  'the entrance transitionend handler must be removed on both replay and cancel paths');
 
 console.log('popup render and breakdown navigation self-check: all assertions passed');

@@ -13,7 +13,6 @@ public static class ProviderSecretKeys
 {
     public const string OpenRouterApiKey = "providers/openrouter/api-key";
     public const string ZaiApiKey = "providers/z-ai/api-key";
-    public const string GrokApiKey = "providers/grok/api-key";
     public const string DevinApiKey = "providers/devin/api-key";
 }
 
@@ -61,7 +60,7 @@ public sealed class CredentialManagerSecretStore : ISecretStore
         }
         catch (Exception ex) when (ex is Win32Exception or CryptographicException or InvalidOperationException)
         {
-            _logger.Warning("Credential read failed", new Dictionary<string, object?> { ["credentialKey"] = key }, ex);
+            _logger.Warning("Credential read failed", new Dictionary<string, object?> { ["storeKey"] = key }, ex);
             return Task.FromResult<string?>(null);
         }
     }
@@ -101,7 +100,7 @@ public sealed class CredentialManagerSecretStore : ISecretStore
         }
         catch (Exception ex) when (ex is Win32Exception or CryptographicException or InvalidOperationException)
         {
-            _logger.Warning("Credential write failed", new Dictionary<string, object?> { ["credentialKey"] = key }, ex);
+            _logger.Warning("Credential write failed", new Dictionary<string, object?> { ["storeKey"] = key }, ex);
         }
         return Task.CompletedTask;
     }
@@ -110,10 +109,21 @@ public sealed class CredentialManagerSecretStore : ISecretStore
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows()) return Task.CompletedTask;
-        try { NativeMethods.CredDelete(NormalizeTarget(key), NativeMethods.CredentialTypeGeneric, 0); }
+        try
+        {
+            var target = NormalizeTarget(key);
+            // ERROR_NOT_FOUND (1168) means there was nothing to delete - the desired end state -
+            // so it is not a failure. Any other refusal is worth a diagnostics entry.
+            if (!NativeMethods.CredDelete(target, NativeMethods.CredentialTypeGeneric, 0))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error != 1168)
+                    throw new Win32Exception(error);
+            }
+        }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
-            _logger.Warning("Credential delete failed", new Dictionary<string, object?> { ["credentialKey"] = key }, ex);
+            _logger.Warning("Credential delete failed", new Dictionary<string, object?> { ["storeKey"] = key }, ex);
         }
         return Task.CompletedTask;
     }

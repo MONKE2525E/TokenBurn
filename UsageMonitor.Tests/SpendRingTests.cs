@@ -1,3 +1,4 @@
+using System.Globalization;
 using UsageMonitor.Desktop;
 using UsageMonitor.LocalApi;
 
@@ -116,6 +117,30 @@ public sealed class SpendRingTests
     {
         Assert.Equal("$1.2K", SpendRingModel.FormatTotal(1_234.56, SpendRingMetric.Cost));
         Assert.Equal("$1234.56", SpendRingModel.FormatTotal(1_234.56, SpendRingMetric.CostPerMillionTokens));
+    }
+
+    [Fact]
+    public void FormattingIsIdenticalUnderAnyProcessCulture()
+    {
+        var previous = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE");
+            Assert.Equal("$1.25", SpendRingModel.FormatTotal(1.25, SpendRingMetric.Cost));
+            Assert.Equal("$1.2K", SpendRingModel.FormatTotal(1_234.56, SpendRingMetric.Cost));
+            Assert.Equal("1M", SpendRingModel.FormatTotal(1_000_000, SpendRingMetric.Tokens));
+            Assert.Equal("2.5K", SpendRingModel.FormatTotal(2_500, SpendRingMetric.Tokens));
+
+            var summary = SpendRingModel.Build(new[]
+            {
+                Snapshot("codex", "Codex", (new DateOnly(2026, 8, 5), 1_000_000d, 0.37d))
+            }, SpendRingPeriod.ThirtyDays, SpendRingMetric.Cost, new DateOnly(2026, 8, 5));
+            Assert.Equal("$0.37", summary.TotalLabel);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
     }
 
     private static UsageSnapshotData Snapshot(string id, string name, params (DateOnly Date, double Tokens, double Cost)[] points)

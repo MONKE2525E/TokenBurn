@@ -81,17 +81,23 @@ public sealed class CachedModelCatalog : IModelCatalog
     private readonly string _path;
     private readonly TimeSpan _freshness;
     private readonly IReadOnlyDictionary<string, ModelPricingOverride> _overrides;
+    private readonly IDiagnosticsLogger _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private ModelPricingSnapshot? _snapshot;
+    /// <summary>When the last network refresh failed, skip further attempts for this long so an
+    /// unreachable catalog does not get re-hit on every provider refresh cycle.</summary>
+    private static readonly TimeSpan FailedRefreshBackoff = TimeSpan.FromMinutes(30);
+    private DateTimeOffset _lastFailedAt;
 
     public CachedModelCatalog(IEnumerable<IModelCatalogSource>? sources = null, string? pricingDirectory = null,
-        TimeSpan? freshness = null)
+        TimeSpan? freshness = null, IDiagnosticsLogger? logger = null)
     {
         _sources = (sources ?? [new OpenRouterModelCatalogSource()]).ToArray();
         _freshness = freshness ?? TimeSpan.FromHours(24);
         _path = Path.Combine(pricingDirectory ?? UsageMonitorPaths.Current.PricingDirectory, "model-catalog.json");
         var overridePath = Path.Combine(pricingDirectory ?? UsageMonitorPaths.Current.PricingDirectory, "model-overrides.json");
         _overrides = ReadOverrides(overridePath);
+        _logger = logger ?? NullDiagnosticsLogger.Instance;
     }
 
     public async Task<ModelPricingSnapshot> GetAsync(string? providerId = null, bool forceRefresh = false,
@@ -110,6 +116,18 @@ public sealed class CachedModelCatalog : IModelCatalog
                 return Filter(cached, providerId);
             }
 
+            // A recent failed refresh stays on the last-known snapshot instead of re-hitting the
+            // network on every provider refresh; forceRefresh still bypasses the backoff.
+            if (!forceRefresh && DateTimeOffset.UtcNow - _lastFailedAt < FailedRefreshBackoff)
+            {
+                var recent = current is not null
+                    ? current with { IsStale = true, Models = current.Models.Select(x => x with { IsStale = true }).ToArray() }
+                    : new ModelPricingSnapshot(Array.Empty<ModelCatalogEntry>(), DateTimeOffset.MinValue, "bundled", true);
+                _snapshot = recent;
+                ModelPricingCatalog.ApplyRemote(recent.Models);
+                return Filter(recent, providerId);
+            }
+
             foreach (var source in _sources)
             {
                 ModelPricingSnapshot? fresh;
@@ -122,6 +140,9 @@ public sealed class CachedModelCatalog : IModelCatalog
                     fresh = null;
                 }
                 if (fresh is null || fresh.Models.Count > 10_000) continue;
+                // A successful fetch clears the failure backoff so the next scheduled refresh
+                // resumes normal freshness checks instead of staying on the stale snapshot.
+                _lastFailedAt = DateTimeOffset.MinValue;
                 _snapshot = fresh;
                 ModelPricingCatalog.ApplyRemote(fresh.Models);
                 try
@@ -132,10 +153,26 @@ public sealed class CachedModelCatalog : IModelCatalog
                 {
                     // A read-only or locked cache directory must not discard a usable network result.
                 }
+                _logger.Debug("Model catalog refreshed",
+                    new Dictionary<string, object?>
+                    {
+                        ["source"] = source.Id,
+                        ["models"] = fresh.Models.Count,
+                        ["etag"] = fresh.ETag,
+                        ["fromCache"] = false
+                    });
                 return Filter(fresh, providerId);
             }
 
             var fallback = current ?? new ModelPricingSnapshot(Array.Empty<ModelCatalogEntry>(), DateTimeOffset.MinValue, "bundled", true);
+            _lastFailedAt = DateTimeOffset.UtcNow;
+            _logger.Warning("Model catalog refresh failed; using the last known or bundled pricing",
+                new Dictionary<string, object?>
+                {
+                    ["fromCache"] = current is not null,
+                    ["sourceCount"] = _sources.Count,
+                    ["models"] = fallback.Models.Count
+                });
             var stale = fallback with { IsStale = true, Models = fallback.Models.Select(x => x with { IsStale = true }).ToArray() };
             _snapshot = stale;
             ModelPricingCatalog.ApplyRemote(stale.Models);
@@ -153,6 +190,14 @@ public sealed class CachedModelCatalog : IModelCatalog
             if (overrideValue.CanonicalModel is { Length: > 0 } aliasTarget)
                 return ModelPricingCatalog.TryResolve(providerId, aliasTarget);
         }
+        if (IsOpenCodeProvider(providerId))
+        {
+            // OpenCode Go bills its own rates, which differ from OpenRouter's published cache
+            // price for the same model. Pin the rates that match OpenCode's billing dashboard so
+            // the remote catalog cannot shadow them with a different cache figure.
+            var openCodePrice = TryResolveOpenCodePrice(normalized);
+            if (openCodePrice is not null) return openCodePrice;
+        }
         var direct = ModelPricingCatalog.TryResolve(providerId, modelId);
         if (direct is not null) return direct;
         if (providerId.Equals(ProviderIds.Codex, StringComparison.OrdinalIgnoreCase) &&
@@ -160,6 +205,17 @@ public sealed class CachedModelCatalog : IModelCatalog
             return ModelPricingCatalog.TryResolve(providerId, $"openai/{modelId}");
         return null;
     }
+
+    private static bool IsOpenCodeProvider(string providerId) =>
+        providerId.Equals(ProviderIds.OpenCode, StringComparison.OrdinalIgnoreCase) ||
+        providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase);
+
+    private static ModelPrice? TryResolveOpenCodePrice(string normalized) => normalized switch
+    {
+        "deepseek-v4-flash" => new ModelPrice(.14, .0028, .28),
+        _ when normalized.Contains("-free", StringComparison.OrdinalIgnoreCase) => new ModelPrice(0, 0, 0),
+        _ => null
+    };
 
     private static IReadOnlyDictionary<string, ModelPricingOverride> ReadOverrides(string path)
     {

@@ -21,6 +21,7 @@ Run:
 dotnet build UsageMonitor.slnx --configuration Release -m:1 /p:BuildInParallel=false /p:UseSharedCompilation=false
 dotnet test UsageMonitor.slnx --configuration Release --no-build --no-restore -m:1 /p:BuildInParallel=false /p:UseSharedCompilation=false
 node UsageMonitor.TauriPoc\selfcheck.mjs
+node UsageMonitor.TauriPoc\interaction-tests.mjs
 ```
 
 For Tauri changes also run `npm --prefix UsageMonitor.TauriPoc ci`, `npm --prefix UsageMonitor.TauriPoc run build`, `cargo fmt --manifest-path UsageMonitor.TauriPoc\src-tauri\Cargo.toml -- --check`, and `cargo test --manifest-path UsageMonitor.TauriPoc\src-tauri\Cargo.toml`.

@@ -28,7 +28,7 @@ internal sealed class WindowsAppNotificationService : IDisposable
     {
         if (IsElevated())
         {
-            new FileDiagnosticsLogger().Warning("Windows app notifications are unavailable from an elevated process.");
+            FileDiagnosticsLogger.Default.Warning("Windows app notifications are unavailable from an elevated process.");
             return;
         }
 
@@ -36,7 +36,7 @@ internal sealed class WindowsAppNotificationService : IDisposable
         {
             if (!AppNotificationManager.IsSupported())
             {
-                new FileDiagnosticsLogger().Warning(
+                FileDiagnosticsLogger.Default.Warning(
                     "Windows app notifications are unavailable because the Windows App Runtime Singleton package is not registered.");
                 return;
             }
@@ -46,17 +46,23 @@ internal sealed class WindowsAppNotificationService : IDisposable
             _manager.NotificationInvoked += OnNotificationInvoked;
             _manager.Register();
             _registered = true;
-            new FileDiagnosticsLogger().Info("Windows app notifications registered.");
+            FileDiagnosticsLogger.Default.Info("Windows app notifications registered.");
         }
         catch (Exception exception)
         {
             _manager?.NotificationInvoked -= OnNotificationInvoked;
             _manager = null;
-            new FileDiagnosticsLogger().Warning("Windows app notification registration failed.", exception: exception);
+            FileDiagnosticsLogger.Default.Warning("Windows app notification registration failed.", exception: exception);
         }
     }
 
-    public void ShowQuotaAlert(string message)
+    public void ShowQuotaAlert(string message) => ShowAlert(message, "quota-alert", "quota");
+
+    public void ShowAuthAlert(string message) => ShowAlert(message, "auth-alert", "auth");
+
+    public void ShowFallbackAlert(string message) => ShowAlert(message, "fallback-alert", "fallback");
+
+    private void ShowAlert(string message, string tag, string group)
     {
         if (!_registered || _manager is null) return;
 
@@ -70,8 +76,8 @@ internal sealed class WindowsAppNotificationService : IDisposable
                 .AddArgument("action", "open-dashboard")
                 .AddText("TokenBurn")
                 .AddText(message)
-                .SetTag("quota-alert")
-                .SetGroup("quota");
+                .SetTag(tag)
+                .SetGroup(group);
             if (File.Exists(logoPath))
                 builder.SetAppLogoOverride(new Uri(logoPath, UriKind.Absolute));
 
@@ -80,7 +86,7 @@ internal sealed class WindowsAppNotificationService : IDisposable
         }
         catch (Exception exception)
         {
-            new FileDiagnosticsLogger().Warning("Windows app notification could not be shown.", exception: exception);
+            FileDiagnosticsLogger.Default.Warning("Windows app notification could not be shown.", exception: exception);
         }
     }
 
@@ -94,7 +100,7 @@ internal sealed class WindowsAppNotificationService : IDisposable
         }
         catch (Exception exception)
         {
-            new FileDiagnosticsLogger().Warning("Windows app notification cleanup failed.", exception: exception);
+            FileDiagnosticsLogger.Default.Warning("Windows app notification cleanup failed.", exception: exception);
         }
         finally
         {
