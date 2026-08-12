@@ -257,6 +257,7 @@ public sealed class CodexLogUsageScanner
                             NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) || tokens <= 0) continue;
                     if (report is not null) report.RowsRead++;
                     var modelMatch = DiagnosticsModelPattern.Match(reader.GetString(1));
+                    if (report is not null) report.Track(DateTimeOffset.FromUnixTimeSeconds(timestamp));
                     rows.Add((DateTimeOffset.FromUnixTimeSeconds(timestamp), (long)tokens,
                         modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5"));
                 }
