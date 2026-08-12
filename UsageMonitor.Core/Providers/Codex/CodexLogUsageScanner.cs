@@ -263,8 +263,6 @@ public sealed class CodexLogUsageScanner
                     if (report is not null) report.Track(DateTimeOffset.FromUnixTimeSeconds(timestamp));
                     rows.Add((DateTimeOffset.FromUnixTimeSeconds(timestamp), (long)tokens,
                         modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5"));
-                    rows.Add((DateTimeOffset.FromUnixTimeSeconds(timestamp), (long)tokens,
-                        modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5"));
                 }
             }
             catch (SqliteException) { }
