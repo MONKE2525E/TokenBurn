@@ -203,9 +203,10 @@ public sealed class CodexLogUsageScanner
         IDictionary<(DateOnly Date, string Model, UsageCostBasis Basis), UsageBreakdownPoint> breakdown,
         ISet<string> unknownModels, HistoryScanReport? report = null)
     {
-        // Newer Codex builds stopped writing event_msg/token_count records to session JSONL.
-        // Their authoritative per-turn usage is now emitted to the local logs SQLite database.
-        // Keep this fallback local and read-only so older JSONL history remains supported.
+        // Newer Codex builds emit authoritative per-turn usage to the local logs SQLite database,
+        // while older sessions keep JSONL token_count records (and current builds can re-log both).
+        // The day-level source preference below keeps the two sources from double-counting the
+        // same turns; the JSONL reader stays supported for installs without a logs database.
         if (string.IsNullOrWhiteSpace(codexHome) || !Directory.Exists(codexHome)) return;
         string[] databases;
         try
@@ -215,7 +216,11 @@ public sealed class CodexLogUsageScanner
         catch (IOException) { return; }
         catch (UnauthorizedAccessException) { return; }
 
-        var cutoff = since.ToUniversalTime().ToUnixTimeSeconds();
+        // The window is applied at local-day granularity everywhere else in the pipeline, so the
+        // SQL cutoff is local midnight on the boundary day instead of the `since` instant.
+        var cutoff = IncrementalHistoryScan.UtcSecondsAtLocalMidnight(
+            IncrementalHistoryScan.SinceDate(since, _localTimeZone), _localTimeZone);
+        var rows = new List<(DateTimeOffset Timestamp, long Tokens, string Model)>();
         foreach (var database in databases)
         {
             try
@@ -243,6 +248,10 @@ public sealed class CodexLogUsageScanner
                     if (reader.IsDBNull(0) || reader.IsDBNull(1)) continue;
                     if (!long.TryParse(reader.GetValue(0).ToString(), NumberStyles.Integer,
                             CultureInfo.InvariantCulture, out var timestamp)) continue;
+                    // Sanity window shared with the Antigravity scanner (2001-09-09..2096-08-08).
+                    // A corrupt or absurd row must not kill the whole scan with an
+                    // ArgumentOutOfRangeException or fabricate far-future spend points.
+                    if (timestamp < 1_000_000_000 || timestamp > 4_000_000_000) continue;
                     var match = DiagnosticsUsagePattern.Match(reader.GetString(1));
                     if (!match.Success || !double.TryParse(match.Groups["tokens"].Value,
                             NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) || tokens <= 0 ||
@@ -254,11 +263,51 @@ public sealed class CodexLogUsageScanner
                     if (report is not null) report.Track(DateTimeOffset.FromUnixTimeSeconds(timestamp));
                     rows.Add((DateTimeOffset.FromUnixTimeSeconds(timestamp), (long)tokens,
                         modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5"));
+                    rows.Add((DateTimeOffset.FromUnixTimeSeconds(timestamp), (long)tokens,
+                        modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5"));
                 }
             }
             catch (SqliteException) { }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+        if (rows.Count == 0) return;
+
+        // The logs database is the authoritative per-turn usage source for the days it covers.
+        // The same turns are also re-logged as JSONL token_count records, so counting both would
+        // double the day. Drop the JSONL-derived contribution for every covered day before adding
+        // these rows. The rule runs at merge time, so fresh parses and cached index contributions
+        // apply it identically for a given database state.
+        var coveredDays = rows.Select(row => IncrementalHistoryScan.DayOf(row.Timestamp, _localTimeZone)).ToHashSet();
+        foreach (var day in coveredDays)
+        {
+            totals.Remove(day);
+            foreach (var key in breakdown.Keys.Where(key => key.Date == day).ToArray())
+                breakdown.Remove(key);
+        }
+
+        foreach (var (timestamp, tokens, model) in rows)
+        {
+            var pricing = _catalog.ResolvePrice(ProviderIds.Codex, model);
+            var cost = pricing is null
+                ? 0
+                : pricing.Estimate(0, 0, tokens);
+            if (pricing is null) unknownModels.Add(model);
+            var day = IncrementalHistoryScan.DayOf(timestamp, _localTimeZone);
+            totals.TryGetValue(day, out var prior);
+            totals[day] = (prior.Tokens + tokens, prior.Cost + cost);
+            var basis = pricing is null ? UsageCostBasis.Unpriced : UsageCostBasis.CoarseEstimate;
+            var key = (day, model, basis);
+            if (breakdown.TryGetValue(key, out var existing))
+            {
+                breakdown[key] = existing with { OutputTokens = existing.OutputTokens + tokens, CostUsd = existing.CostUsd + cost };
+            }
+            else
+            {
+                breakdown[key] = new UsageBreakdownPoint(day, ProviderIds.Codex, model,
+                    0, 0, 0, tokens, 0, cost, basis,
+                    pricing is null ? PricingBasis.Unknown : PricingBasis.LocalEstimate, true);
+            }
         }
     }
 
