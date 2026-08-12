@@ -1,6 +1,6 @@
 [package]
 name = "tokenburn-desktop"
-version = "0.1.0"
+version = "0.0.1"
 description = "TokenBurn desktop popup for local AI usage and quota monitoring"
 authors = ["TokenBurn"]
 edition = "2021"

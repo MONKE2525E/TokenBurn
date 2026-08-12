@@ -25,7 +25,6 @@ public sealed record ClaudeCredentialsFile
 public sealed record ClaudeAuthState(string Path, ClaudeOAuth OAuth, bool InferenceOnly = false)
 {
     public bool HasAccessToken => !string.IsNullOrWhiteSpace(OAuth.AccessToken);
-    public bool HasRefreshToken => !string.IsNullOrWhiteSpace(OAuth.RefreshToken);
     public bool HasProfileScope => OAuth.Scopes is null || OAuth.Scopes.Count == 0 || OAuth.Scopes.Any(x => string.Equals(x, "user:profile", StringComparison.OrdinalIgnoreCase));
 }
 

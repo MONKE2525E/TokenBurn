@@ -43,7 +43,6 @@ public partial class SpendRingCard : WpfUserControl
     public SpendRingSummary CurrentSummary { get; private set; } = SpendRingModel.Build(null);
     private SpendRingSummary _rootSummary = SpendRingModel.Build(null);
 
-    public event EventHandler<SpendRingSummary>? SummaryChanged;
     public event EventHandler? ShareRequested;
 
     public void SetMetric(SpendRingMetric metric)
@@ -159,7 +158,6 @@ public partial class SpendRingCard : WpfUserControl
         EmptyText.Visibility = CurrentSummary.HasData ? Visibility.Collapsed : Visibility.Visible;
         EstimateNotice.Visibility = CurrentSummary.HasEstimatedValues ? Visibility.Visible : Visibility.Collapsed;
         BackButton.Visibility = CurrentSummary.IsDrillDown ? Visibility.Visible : Visibility.Collapsed;
-        SummaryChanged?.Invoke(this, CurrentSummary);
         if (animate) AnimateSpendContent();
     }
 

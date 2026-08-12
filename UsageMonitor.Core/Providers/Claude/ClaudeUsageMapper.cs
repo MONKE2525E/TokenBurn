@@ -4,8 +4,6 @@ public sealed record ClaudeMappedUsage(string? Plan, IReadOnlyList<MetricLine> L
 
 public static class ClaudeUsageMapper
 {
-    public static ClaudeMappedUsage MapUsageResponse(ProviderHttpResponse response, ClaudeOAuth credentials, DateTimeOffset now) => Map(response, credentials, now);
-
     public static ClaudeMappedUsage Map(ProviderHttpResponse response, ClaudeOAuth credentials, DateTimeOffset now)
     {
         if (response.StatusCode is 401 or 403) throw new ClaudeAuthenticationException("Claude session expired. Run `claude auth login`, then refresh.");

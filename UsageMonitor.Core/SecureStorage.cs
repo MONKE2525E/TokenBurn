@@ -13,7 +13,6 @@ public static class ProviderSecretKeys
 {
     public const string OpenRouterApiKey = "providers/openrouter/api-key";
     public const string ZaiApiKey = "providers/z-ai/api-key";
-    public const string DevinApiKey = "providers/devin/api-key";
 }
 
 public sealed class NullSecretStore : ISecretStore
@@ -174,19 +173,6 @@ public static class WindowsCredentialReader
 
 public static class DpapiProtector
 {
-    public static string ProtectString(string plaintext)
-    {
-        ArgumentNullException.ThrowIfNull(plaintext);
-        return Convert.ToBase64String(Protect(Encoding.UTF8.GetBytes(plaintext)));
-    }
-
-    public static string? UnprotectString(string protectedValue)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(protectedValue);
-        try { return Unprotect(Convert.FromBase64String(protectedValue)); }
-        catch (FormatException) { return null; }
-    }
-
     public static byte[] Protect(byte[] plaintext)
     {
         ArgumentNullException.ThrowIfNull(plaintext);

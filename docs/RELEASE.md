@@ -16,8 +16,8 @@ Example:
 ```powershell
 git switch master
 git pull --ff-only origin master
-git tag -a TokenBurn-v0.1.39 -m "TokenBurn 0.1.39"
-git push origin TokenBurn-v0.1.39
+git tag -a TokenBurn-v0.0.1 -m "TokenBurn 0.0.1"
+git push origin TokenBurn-v0.0.1
 ```
 
 ## Packaging notes

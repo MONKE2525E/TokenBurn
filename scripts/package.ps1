@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.39',
+    [string]$Version = '0.0.1',
     [ValidateSet('win-x64', 'win-arm64')]
     [string]$Runtime = 'win-x64',
     [string]$Configuration = 'Release'

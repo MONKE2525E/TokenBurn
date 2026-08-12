@@ -121,12 +121,6 @@ public sealed record MetricLine
     };
 
     public static readonly MetricLine NoUsageData = Badge("Status", "No usage data", "#A3A3A3", state: MetricState.Unknown);
-
-    public static void AppendNoDataIfNeeded(IList<MetricLine> lines)
-    {
-        ArgumentNullException.ThrowIfNull(lines);
-        if (lines.Count == 0) lines.Add(NoUsageData);
-    }
 }
 
 public sealed record UsageHistoryPoint(DateOnly Date, double Tokens = 0, double CostUsd = 0, bool Estimated = false);
@@ -179,12 +173,7 @@ public sealed record ProviderDescriptor(
     public IReadOnlyList<ProviderLink> Links { get; init; } = Links ?? Array.Empty<ProviderLink>();
 }
 
-public sealed record ProviderLink(string Label, string Url)
-{
-    public bool IsSafe => !string.IsNullOrWhiteSpace(Label) &&
-                          Uri.TryCreate(Url, UriKind.Absolute, out var uri) &&
-                          (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp);
-}
+public sealed record ProviderLink(string Label, string Url);
 
 public sealed record ProviderSnapshot
 {
@@ -250,8 +239,6 @@ public static class UsageMath
         if (double.IsNaN(value)) return min;
         return Math.Clamp(value, min, max);
     }
-
-    public static double Fraction(double used, double limit) => limit <= 0 ? 0 : Clamp(used / limit);
 
     public static MetricState GetMetricState(double used, double limit)
     {

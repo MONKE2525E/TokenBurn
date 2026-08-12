@@ -7,8 +7,6 @@ public sealed record CodexMappedUsage(string? Plan, IReadOnlyList<MetricLine> Li
 
 public static class CodexUsageMapper
 {
-    public static CodexMappedUsage MapUsageResponse(ProviderHttpResponse response, DateTimeOffset now) => Map(response, now);
-
     public static CodexMappedUsage Map(ProviderHttpResponse response, DateTimeOffset now)
     {
         if (response.StatusCode is 401 or 403) throw new CodexAuthenticationException("Codex session expired.");

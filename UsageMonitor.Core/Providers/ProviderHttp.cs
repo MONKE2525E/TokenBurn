@@ -31,12 +31,10 @@ public interface IProviderHttpClient
 public sealed class ProviderHttpClient : IProviderHttpClient
 {
     private readonly HttpClient _client;
-    private readonly bool _ownsClient;
 
     public ProviderHttpClient(HttpClient? client = null)
     {
         _client = client ?? new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        _ownsClient = client is null;
     }
 
     public async Task<ProviderHttpResponse> SendAsync(
@@ -75,10 +73,5 @@ public sealed class ProviderHttpClient : IProviderHttpClient
             .GroupBy(h => h.Key, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => string.Join(", ", g.SelectMany(x => x.Value)), StringComparer.OrdinalIgnoreCase);
         return new ProviderHttpResponse((int)response.StatusCode, responseHeaders, await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
-    }
-
-    public void DisposeOwnedClient()
-    {
-        if (_ownsClient) _client.Dispose();
     }
 }

@@ -15,10 +15,7 @@ public sealed record PacingResult(
     double DeltaFraction,
     PacingStatus Status,
     DateTimeOffset? EstimatedDepletion,
-    TimeSpan? RemainingPeriod)
-{
-    public bool IsAtRisk => Status is PacingStatus.Behind or PacingStatus.Exhausted;
-}
+    TimeSpan? RemainingPeriod);
 
 public static class PacingCalculator
 {
@@ -54,16 +51,6 @@ public static class PacingCalculator
         return new PacingResult(actual, expected, delta, status,
             depletion, resetAt > instant ? resetAt - instant : TimeSpan.Zero);
     }
-
-    public static double ProjectedUsageAtReset(double used, DateTimeOffset periodStart,
-        DateTimeOffset resetAt, DateTimeOffset? now = null)
-    {
-        var instant = now ?? DateTimeOffset.UtcNow;
-        var elapsed = (instant - periodStart).TotalSeconds;
-        var total = (resetAt - periodStart).TotalSeconds;
-        if (used <= 0 || elapsed <= 0 || total <= 0) return 0;
-        return used * total / elapsed;
-    }
 }
 
 public static class ResetCalculator
@@ -84,13 +71,5 @@ public static class ResetCalculator
         if (remaining.TotalHours >= 1) return $"{(int)remaining.TotalHours}h {remaining.Minutes}m";
         if (remaining.TotalMinutes >= 1) return $"{(int)remaining.TotalMinutes}m {remaining.Seconds}s";
         return $"{Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds))}s";
-    }
-
-    public static string FormatExact(DateTimeOffset? resetsAt, TimeZoneInfo? timeZone = null)
-    {
-        if (resetsAt is null) return "No reset scheduled";
-        var zone = timeZone ?? TimeZoneInfo.Local;
-        var local = TimeZoneInfo.ConvertTime(resetsAt.Value, zone);
-        return local.ToString("g", System.Globalization.CultureInfo.CurrentCulture);
     }
 }
