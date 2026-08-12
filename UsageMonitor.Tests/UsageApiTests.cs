@@ -122,6 +122,29 @@ public sealed class UsageApiTests
         Assert.DoesNotContain(Environment.UserName, output.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task NonFiniteMetricsSerializeAsNullNotAsJsonStringsOrZeros()
+    {
+        var snapshot = new UsageSnapshotData("codex", "Codex", null,
+            [new ValuesMetricData("Balance", [new ScalarValueData(double.NaN, "usd")])],
+            DateTimeOffset.UtcNow)
+        {
+            UsageHistory = new UsageHistoryData([
+                new UsageHistoryPointData(DateOnly.FromDateTime(DateTime.UtcNow), double.PositiveInfinity, double.NaN)])
+        };
+        var response = await new UsageApiService(new FakeSource(snapshot)).HandleAsync("GET", "/v1/usage/codex");
+
+        Assert.Equal(200, response.StatusCode);
+        Assert.DoesNotContain("NaN", response.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Infinity", response.Body, StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(response.Body);
+        var provider = doc.RootElement[0];
+        var value = provider.GetProperty("lines")[0].GetProperty("value").GetString();
+        Assert.Equal(string.Empty, value);
+        Assert.Equal(JsonValueKind.Null, provider.GetProperty("usageHistory").GetProperty("totalCostUsd").ValueKind);
+        Assert.Equal(JsonValueKind.Null, provider.GetProperty("usageHistory").GetProperty("points")[0].GetProperty("tokens").ValueKind);
+    }
+
     private sealed class FakeSource(params UsageSnapshotData[] snapshots) : IUsageSnapshotSource
     {
         private readonly IReadOnlyList<UsageSnapshotData> _snapshots = snapshots;
