@@ -255,8 +255,10 @@ public static class IncrementalHistoryScan
     {
         var localMidnight = day.ToDateTime(TimeOnly.MinValue);
         // Spring-forward at midnight (e.g. America/Havana): local midnight never occurs, so the
-        // day's first instant is the first valid local time after the gap.
-        while (timeZone.IsInvalidTime(localMidnight)) localMidnight = localMidnight.AddHours(1);
+        // day's first instant is the first valid local time after the gap. Quarter-hour steps
+        // land on the first valid instant for every real-world gap size (30-minute Lord Howe,
+        // 45-minute Chatham, 60-minute Havana) instead of overshooting past it.
+        while (timeZone.IsInvalidTime(localMidnight)) localMidnight = localMidnight.AddMinutes(15);
         // Fall-back with midnight repeated (e.g. America/Havana): the larger offset is the earlier
         // instant, which keeps the whole repeated first hour inside the window.
         var offset = timeZone.IsAmbiguousTime(localMidnight)
