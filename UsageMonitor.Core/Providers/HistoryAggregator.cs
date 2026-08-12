@@ -68,6 +68,7 @@ internal sealed class HistoryAggregator
         Breakdown = _breakdown.Values
             .OrderBy(point => point.Date)
             .ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(point => point.CostBasis)
             .ToList(),
         UnknownModels = _unknownModels.OrderBy(model => model, StringComparer.OrdinalIgnoreCase).ToList()
     };

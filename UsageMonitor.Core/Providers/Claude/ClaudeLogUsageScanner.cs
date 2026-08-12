@@ -115,11 +115,7 @@ public sealed class ClaudeLogUsageScanner
         for (var i = 0; i < entries.Count; i++)
         {
             var entry = entries[i];
-            var exactKey = entry.MessageId is { Length: > 0 } messageId
-                ? $"message:{messageId}|request:{entry.RequestId}"
-                : entry.RequestId is { Length: > 0 } requestId
-                    ? $"request:{requestId}"
-                    : $"line:{entry.Timestamp:O}|{entry.Tokens}|{entry.Cost:0.########}";
+            var exactKey = ExactKeyOf(entry);
             var collision = exact.TryGetValue(exactKey, out var exactIndex)
                 ? exactIndex
                 : entry.MessageId is { Length: > 0 } id && messages.TryGetValue(id, out var messageIndex)
@@ -134,16 +130,18 @@ public sealed class ClaudeLogUsageScanner
                     // Drop the replaced entry's identity pointers so a later distinct message
                     // sharing the old request id is not wrongly merged into this slot.
                     var replaced = result[collision];
-                    if (replaced.MessageId is { } replacedMessage &&
+                    if (replaced.MessageId is { Length: > 0 } replacedMessage &&
                         messages.TryGetValue(replacedMessage, out var staleMessageSlot) && staleMessageSlot == collision)
                         messages.Remove(replacedMessage);
-                    if (replaced.RequestId is { } replacedRequest &&
+                    if (replaced.RequestId is { Length: > 0 } replacedRequest &&
                         requests.TryGetValue(replacedRequest, out var staleRequestSlot) && staleRequestSlot == collision)
                         requests.Remove(replacedRequest);
+                    if (exact.TryGetValue(ExactKeyOf(replaced), out var staleExactSlot) && staleExactSlot == collision)
+                        exact.Remove(ExactKeyOf(replaced));
                     result[collision] = entry;
                     exact[exactKey] = collision;
-                    if (entry.MessageId is { } entryMessage) messages[entryMessage] = collision;
-                    if (entry.RequestId is { } entryRequest) requests[entryRequest] = collision;
+                    if (entry.MessageId is { Length: > 0 } entryMessage) messages[entryMessage] = collision;
+                    if (entry.RequestId is { Length: > 0 } entryRequest) requests[entryRequest] = collision;
                 }
                 continue;
             }
@@ -156,6 +154,13 @@ public sealed class ClaudeLogUsageScanner
         }
         return result;
     }
+
+    private static string ExactKeyOf(ClaudeUsageEntry entry) =>
+        entry.MessageId is { Length: > 0 } messageId
+            ? $"message:{messageId}|request:{entry.RequestId}"
+            : entry.RequestId is { Length: > 0 } requestId
+                ? $"request:{requestId}"
+                : $"line:{entry.Timestamp:O}|{entry.Tokens}|{entry.Cost:0.########}";
 
     private static bool ShouldReplace(ClaudeUsageEntry candidate, ClaudeUsageEntry existing)
     {

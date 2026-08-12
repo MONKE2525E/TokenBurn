@@ -147,8 +147,11 @@ public sealed class CodexLogUsageScanner
             if (usage is null) continue;
             if (cumulative is not null) previousTotals = cumulative;
             // Corrupt or hostile records can carry NaN/Infinity (string-typed "1e999") or negative
-            // components. Clamp negatives to zero and drop the record when anything is non-finite
-            // so one bad line can neither poison the day totals nor the cumulative baseline.
+            // components. Drop the record when anything is non-finite before clamping negatives to
+            // zero, so one bad line can neither poison the day totals nor the cumulative baseline.
+            if (!double.IsFinite(usage.Input) || !double.IsFinite(usage.Cached) ||
+                !double.IsFinite(usage.Output) || !double.IsFinite(usage.Reasoning) ||
+                !double.IsFinite(usage.Total)) continue;
             usage = usage with
             {
                 Input = Math.Max(0, usage.Input),
@@ -157,9 +160,6 @@ public sealed class CodexLogUsageScanner
                 Reasoning = Math.Max(0, usage.Reasoning),
                 Total = Math.Max(0, usage.Total)
             };
-            if (!double.IsFinite(usage.Input) || !double.IsFinite(usage.Cached) ||
-                !double.IsFinite(usage.Output) || !double.IsFinite(usage.Reasoning) ||
-                !double.IsFinite(usage.Total)) continue;
             usage = usage with { Cached = Math.Min(usage.Cached, usage.Input) };
             if (usage.Total <= 0) usage = usage with { Total = usage.Input + usage.Output + usage.Reasoning };
             if (usage.Total <= 0) continue;
@@ -254,7 +254,10 @@ public sealed class CodexLogUsageScanner
                     if (timestamp < 1_000_000_000 || timestamp > 4_000_000_000) continue;
                     var match = DiagnosticsUsagePattern.Match(reader.GetString(1));
                     if (!match.Success || !double.TryParse(match.Groups["tokens"].Value,
-                            NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) || tokens <= 0) continue;
+                            NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) || tokens <= 0 ||
+                        // The row is narrowed to long below; absurd counts from corrupt rows would
+                        // wrap the cast and poison the day total instead of being skipped.
+                        tokens > long.MaxValue) continue;
                     if (report is not null) report.RowsRead++;
                     var modelMatch = DiagnosticsModelPattern.Match(reader.GetString(1));
                     if (report is not null) report.Track(DateTimeOffset.FromUnixTimeSeconds(timestamp));
