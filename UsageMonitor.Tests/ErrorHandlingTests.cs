@@ -122,4 +122,48 @@ public sealed class ErrorHandlingTests
         Assert.False(ReauthActionResolver.ShouldOfferReauth(null, null));
         Assert.False(ReauthActionResolver.ShouldOfferReauth(null, string.Empty));
     }
+
+    [Fact]
+    public void ProviderSnapshotErrorFromExceptionRedactsSecrets()
+    {
+        var descriptor = new ProviderDescriptor("fixture", "Fixture");
+        var exception = new InvalidOperationException(
+            "fetch failed for user engineer@example.com with token=sk_live_abc123 " +
+            "Authorization: Bearer sekrit C:\\Users\\alice\\.codex\\auth.json");
+
+        var snapshot = ProviderSnapshot.Error(descriptor, exception, ProviderErrorCategory.Network);
+
+        var text = snapshot.GetLine("Error")!.Text;
+        Assert.DoesNotContain("engineer@example.com", text);
+        Assert.DoesNotContain("sk_live_abc123", text);
+        Assert.DoesNotContain("sekrit", text);
+        Assert.DoesNotContain("alice", text);
+        Assert.Contains("[redacted]", text);
+        Assert.Equal(ProviderErrorCategory.Network, snapshot.ErrorCategory);
+    }
+
+    [Fact]
+    public async Task UnexpectedProviderExceptionBecomesRedactedOtherSnapshot()
+    {
+        var descriptor = new ProviderDescriptor("fixture", "Fixture");
+        var source = new CoreUsageSnapshotSource(
+            new UsageProviderCatalog([new ThrowingProvider(descriptor)]));
+
+        var snapshot = Assert.Single(await source.GetSnapshotsAsync("fixture", force: true));
+
+        Assert.Equal("Other", snapshot.ErrorCategory);
+        Assert.NotNull(snapshot.Error);
+        Assert.DoesNotContain("account_abc", snapshot.Error);
+        Assert.DoesNotContain("shard token=xyz", snapshot.Error);
+        Assert.Contains("[redacted]", snapshot.Error);
+    }
+
+    private sealed class ThrowingProvider(ProviderDescriptor descriptor) : IUsageProvider
+    {
+        public ProviderDescriptor Descriptor => descriptor;
+
+        public Task<ProviderSnapshot> RefreshAsync(ProviderContext context, CancellationToken cancellationToken)
+            => throw new InvalidOperationException(
+                "boom on account_abc shard token=xyz at C:\\Users\\admin\\.fixture");
+    }
 }

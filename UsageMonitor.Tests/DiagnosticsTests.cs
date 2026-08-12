@@ -9,6 +9,78 @@ namespace UsageMonitor.Tests;
 public sealed class DiagnosticsTests
 {
     [Fact]
+    public void RedactorScrubsBearerTokensJsonValuesAndHeaders()
+    {
+        var text = SensitiveDataRedactor.Redact(
+            "Authorization: Bearer sk-ant-abc123DEF456 cookie=session=xyz \"access_token\":\"secret-token-value\" " +
+            "client_secret=abc-def-ghi api-key-12345 account_id=acct_999 user_id=usr_1");
+        Assert.DoesNotContain("sk-ant-abc123DEF456", text);
+        Assert.DoesNotContain("session=xyz", text);
+        Assert.DoesNotContain("secret-token-value", text);
+        Assert.DoesNotContain("abc-def-ghi", text);
+        Assert.DoesNotContain("api-key-12345", text);
+        Assert.DoesNotContain("acct_999", text);
+        Assert.DoesNotContain("usr_1", text);
+    }
+
+    [Fact]
+    public void RedactorScrubsNestedDictionariesByKeyAndPreservesMetadata()
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["providerId"] = "claude-code",
+            ["metricCount"] = 2,
+            ["token"] = "super-secret-token",
+            ["nested"] = new Dictionary<string, object?>
+            {
+                ["api_key"] = "nested-key",
+                ["historyPoints"] = 12
+            }
+        };
+        var redacted = (Dictionary<string, object?>)SensitiveDataRedactor.RedactObject(payload)!;
+
+        Assert.Equal("claude-code", redacted["providerId"]);
+        Assert.Equal(2, redacted["metricCount"]);
+        Assert.Equal("[redacted]", redacted["token"]);
+        var nested = Assert.IsType<Dictionary<string, object?>>(redacted["nested"]!);
+        Assert.Equal("[redacted]", nested["api_key"]);
+        Assert.Equal(12, nested["historyPoints"]);
+    }
+
+    [Fact]
+    public void RedactorScrubsExceptionMessagesAndTruncatesGiantPayloads()
+    {
+        var exception = new InvalidOperationException("failed with token=abc123 and C:\\Users\\victim\\.codex");
+        var text = SensitiveDataRedactor.Redact(exception.Message);
+        Assert.DoesNotContain("abc123", text);
+        Assert.DoesNotContain("C:\\Users\\victim", text);
+
+        var huge = new string('a', 20_000) + " token=leak";
+        var bounded = SensitiveDataRedactor.Redact(huge);
+        Assert.True(bounded.Length is > 8_000 and <= 8_193, "payloads must be bounded");
+        Assert.DoesNotContain("leak", bounded);
+    }
+
+    [Fact]
+    public void InMemoryLoggerRedactsMessagesAndExceptionMessages()
+    {
+        var logger = new InMemoryDiagnosticsLogger();
+        logger.Info("user developer@example.invalid signed in", new Dictionary<string, object?>
+        {
+            ["api_key"] = "key-value",
+            ["count"] = 3
+        });
+        logger.Error("boom", exception: new InvalidOperationException("secret credential=abc"));
+
+        Assert.Equal(2, logger.Entries.Count);
+        var info = logger.Entries.First();
+        Assert.DoesNotContain("developer@example.invalid", info.Message);
+        Assert.Equal("[redacted]", info.Data!["api_key"]);
+        Assert.Equal(3, info.Data!["count"]);
+        Assert.DoesNotContain("abc", logger.Entries.Last().ExceptionMessage);
+    }
+
+    [Fact]
     public void CorrelatingLoggerAppendsRefreshIdWithoutMutatingCallerData()
     {
         var inner = new InMemoryDiagnosticsLogger();
@@ -45,6 +117,25 @@ public sealed class DiagnosticsTests
         var second = new ProviderContext();
         Assert.Equal(8, first.RefreshId.Length);
         Assert.NotEqual(first.RefreshId, second.RefreshId);
+    }
+
+    [Fact]
+    public void RedactorKeepsLogicalSecretStoreKeyNames()
+    {
+        // The credential store logs the logical key (e.g. "providers/openrouter/api-key") under
+        // "storeKey" so support can tell which credential failed; the secret value itself stays
+        // redacted. An old "credentialKey" name matched the redactor's "credential" sensitivity
+        // and destroyed that diagnostic value.
+        var redacted = (IReadOnlyDictionary<string, object?>)SensitiveDataRedactor.RedactObject(
+            new Dictionary<string, object?>
+            {
+                ["storeKey"] = "providers/openrouter/api-key",
+                ["credentialKey"] = "providers/openrouter/api-key",
+                ["secret"] = "sk-live-123"
+            })!;
+        Assert.Equal("providers/openrouter/api-key", redacted["storeKey"]);
+        Assert.Equal("[redacted]", redacted["credentialKey"]);
+        Assert.Equal("[redacted]", redacted["secret"]);
     }
 
     [Fact]
