@@ -110,8 +110,14 @@ public static class LoopbackRequestGate
             // the bracket host (e.g. "[::1]evil.example") is not a loopback host and must be
             // rejected rather than trimmed into one.
             var remainder = candidate[(end + 1)..];
-            if (remainder.Length > 0 && !remainder.StartsWith(":", StringComparison.Ordinal)) return false;
-            portSuffix = remainder;
+            if (remainder.Length > 0)
+            {
+                // A port may follow the bracket (e.g. "[::1]:6737"), but anything else appended
+                // to the bracket host (e.g. "[::1]evil.example") is not a loopback host and must
+                // be rejected rather than trimmed into one.
+                if (!remainder.StartsWith(":", StringComparison.Ordinal)) return false;
+                portSuffix = remainder;
+            }
             candidate = candidate[..(end + 1)];
         }
         else if (candidate.Count(character => character == ':') > 1)
