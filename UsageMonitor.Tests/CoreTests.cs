@@ -76,6 +76,127 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task ConcurrentColdMissesRefreshTheProviderOnce()
+    {
+        using var cache = new JsonFileUsageCache(Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N")));
+        var called = 0;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var results = new Task<CacheReadResult<string?>>[6];
+
+        for (var i = 0; i < results.Length; i++)
+        {
+            results[i] = cache.GetAsync<string?>("cold-race", async token =>
+            {
+                if (Interlocked.Increment(ref called) == 1)
+                {
+                    // Hold the winning refresh open so the losers all line up behind it.
+                    await gate.Task.WaitAsync(token).ConfigureAwait(false);
+                }
+                return "winner-value";
+            });
+        }
+        await Task.Delay(50);
+        gate.SetResult();
+        var completed = await Task.WhenAll(results);
+
+        Assert.All(completed, result => Assert.Equal("winner-value", result.Value));
+        Assert.Equal(1, called);
+        Assert.Equal("winner-value", await cache.ReadAsync<string>("cold-race"));
+    }
+
+    [Fact]
+    public async Task ConcurrentColdMissesShareAnErrorSnapshotWithoutRetrying()
+    {
+        using var cache = new JsonFileUsageCache(Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N")));
+        var provider = new ProviderDescriptor("fixture", "Fixture");
+        var called = 0;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var results = new Task<CacheReadResult<ProviderSnapshot?>>[4];
+
+        for (var i = 0; i < results.Length; i++)
+        {
+            results[i] = cache.GetAsync<ProviderSnapshot?>("cold-error", async token =>
+            {
+                if (Interlocked.Increment(ref called) == 1)
+                {
+                    await gate.Task.WaitAsync(token).ConfigureAwait(false);
+                }
+                return ProviderSnapshot.Error(provider, "temporarily unavailable", ProviderErrorCategory.Authentication);
+            });
+        }
+        await Task.Delay(50);
+        gate.SetResult();
+        var completed = await Task.WhenAll(results);
+
+        Assert.All(completed, result =>
+        {
+            Assert.NotNull(result.Value);
+            Assert.Equal(ProviderErrorCategory.Authentication, result.Value!.ErrorCategory);
+        });
+        Assert.Equal(1, called);
+        // Error snapshots are observations, not cache values: nothing persisted.
+        Assert.Null(await cache.ReadAsync<ProviderSnapshot>("cold-error"));
+    }
+
+    [Fact]
+    public async Task WaiterCancellationDoesNotAbortTheSharedColdRefresh()
+    {
+        using var cache = new JsonFileUsageCache(Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N")));
+        var called = 0;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var winner = cache.GetAsync("cold-cancel", async token =>
+        {
+            Interlocked.Increment(ref called);
+            await gate.Task.WaitAsync(token).ConfigureAwait(false);
+            return "shared-value";
+        });
+        await Task.Delay(50);
+
+        using var shortLived = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+        var waiter = cache.GetAsync("cold-cancel", async _ =>
+        {
+            Interlocked.Increment(ref called);
+            return "waiter-should-never-refresh";
+        }, shortLived.Token);
+        var waiterResult = await waiter;
+        Assert.Null(waiterResult.Value);
+
+        gate.SetResult();
+        var winnerResult = await winner;
+        Assert.Equal("shared-value", winnerResult.Value);
+        Assert.Equal(1, called);
+    }
+
+    [Fact]
+    public async Task ConcurrentColdMissesWithNullResultRefreshOnlyOnce()
+    {
+        using var cache = new JsonFileUsageCache(Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N")));
+        var called = 0;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var results = new Task<CacheReadResult<string?>>[4];
+
+        for (var i = 0; i < results.Length; i++)
+        {
+            results[i] = cache.GetAsync<string?>("cold-null", async token =>
+            {
+                if (Interlocked.Increment(ref called) == 1)
+                {
+                    await gate.Task.WaitAsync(token).ConfigureAwait(false);
+                }
+                return null;
+            });
+        }
+        await Task.Delay(50);
+        gate.SetResult();
+        var completed = await Task.WhenAll(results);
+
+        Assert.All(completed, result => Assert.Null(result.Value));
+        // A null outcome is shared like any other: waiters must not each re-run the provider.
+        Assert.Equal(1, called);
+    }
+
+    [Fact]
     public async Task CacheReturnsStaleValueAndRefreshesInBackground()
     {
         var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N"));
@@ -340,7 +461,7 @@ public sealed class CoreTests
         await insert.ExecuteNonQueryAsync();
     }
 
-    private sealed class FixedProvider(ProviderDescriptor descriptor, ProviderSnapshot snapshot) : IUsageProvider
+    internal sealed class FixedProvider(ProviderDescriptor descriptor, ProviderSnapshot snapshot) : IUsageProvider
     {
         public ProviderDescriptor Descriptor => descriptor;
 

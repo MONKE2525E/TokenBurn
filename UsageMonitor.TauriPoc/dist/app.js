@@ -117,10 +117,6 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 
-function providerColor(id) {
-  return id === 'claude-code' ? 'var(--orange)' : id === 'codex' ? 'var(--teal)' : id === 'antigravity' ? '#f1f1f2' : '#8d7dff';
-}
-
 function progressLine(line) {
   return line && line.type === 'progress' && Number.isFinite(line.limit) && line.limit > 0;
 }
@@ -138,8 +134,18 @@ const providerLogoPaths = {
   zai: './assets/providers/zai.svg',
 };
 
+// The bundled asset map is the only source of logo URLs. A catalog/logo value from the desktop
+// settings surface is honored only when it matches the narrow packaged-asset pattern exactly;
+// anything else (absolute URLs, javascript: schemes, attribute-breakout strings) falls back to
+// the map, and unknown providers get the plain fallback marker.
+const PACKAGED_LOGO_PATTERN = /^\.\/assets\/providers\/[a-z0-9-]+\.svg$/;
+
 function providerLogo(id) {
-  const source = state.providerCatalog.find(provider => provider.id === id)?.logo || providerLogoPaths[id];
+  const catalogEntry = state.providerCatalog.find(provider => provider.id === id);
+  const source =
+    catalogEntry && typeof catalogEntry.logo === 'string' && PACKAGED_LOGO_PATTERN.test(catalogEntry.logo)
+      ? catalogEntry.logo
+      : providerLogoPaths[id];
   return source
     ? `<img src="${source}" alt="" aria-hidden="true" loading="eager">`
     : '<span class="provider-fallback" aria-hidden="true"></span>';
@@ -204,7 +210,6 @@ let lastRingValues = [];
 let lastRingSize = 0;
 let ringHoverStart = 0;
 let lastSpendRootRows = [];
-let lastSpendDisplayedRows = [];
 // render() runs during initial startup, before the lower spend-card helpers are evaluated.
 // Keep this render state with the other top-level state to avoid a temporal-dead-zone crash that
 // left the popup permanently in "Refreshing..." while the taskbar continued to receive data.
@@ -485,25 +490,54 @@ function updateBreakdownChartTooltip(index, clientX = null) {
   const x = geometry.plot.left + index * (geometry.plot.right - geometry.plot.left) / Math.max(1,breakdownDays()-1);
   tooltip.style.left = `${Math.max(8, Math.min(geometry.width - 172, clientX ?? x + 10))}px`; tooltip.hidden = false;
 }
+// The chart canvas is recreated whenever the breakdown markup is rebuilt, and renderBreakdown()
+// runs on every period/metric/grouping change and on data refreshes. Wiring listeners on every
+// call added five more handlers per rebuild: the newest one always painted last so the screen
+// looked right, but every older closure kept running against its captured series, and the
+// listener count grew without bound. Wire once per canvas and let the handlers read the latest
+// series from a module-level slot instead.
+let lastBreakdownSeries = [];
 function wireBreakdownChart(series) {
+  lastBreakdownSeries = series;
   const canvas = $('#breakdown-chart'); if (!canvas) return;
+  if (canvas.dataset.chartWired === 'true') return;
+  canvas.dataset.chartWired = 'true';
+  const redraw = () => drawBreakdownChart(lastBreakdownSeries, state.breakdownHoverIndex);
   const select = (event, keyboardDelta = null) => {
     if (keyboardDelta !== null) state.breakdownHoverIndex = Math.max(0, Math.min(breakdownDays()-1, (state.breakdownHoverIndex ?? 0) + keyboardDelta));
     else { const rect = canvas.getBoundingClientRect(); state.breakdownHoverIndex = Math.round((event.clientX - rect.left - breakdownChartGeometry.plot.left) / Math.max(1, breakdownChartGeometry.plot.right - breakdownChartGeometry.plot.left) * (breakdownDays()-1)); state.breakdownHoverIndex = Math.max(0, Math.min(breakdownDays()-1, state.breakdownHoverIndex)); }
-    drawBreakdownChart(series, state.breakdownHoverIndex); updateBreakdownChartTooltip(state.breakdownHoverIndex, keyboardDelta === null ? event.clientX - canvas.getBoundingClientRect().left + 12 : null);
+    drawBreakdownChart(lastBreakdownSeries, state.breakdownHoverIndex); updateBreakdownChartTooltip(state.breakdownHoverIndex, keyboardDelta === null ? event.clientX - canvas.getBoundingClientRect().left + 12 : null);
   };
+  const clear = () => { state.breakdownHoverIndex = null; redraw(); updateBreakdownChartTooltip(null); };
   canvas.addEventListener('pointermove', event => select(event));
-  canvas.addEventListener('pointerleave', () => { state.breakdownHoverIndex = null; drawBreakdownChart(series); updateBreakdownChartTooltip(null); });
+  canvas.addEventListener('pointerleave', clear);
   canvas.addEventListener('keydown', event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); select(event, event.key === 'ArrowLeft' ? -1 : 1); } });
   canvas.addEventListener('focus', event => select(event, 0));
-  canvas.addEventListener('blur', () => { state.breakdownHoverIndex = null; drawBreakdownChart(series); updateBreakdownChartTooltip(null); });
+  canvas.addEventListener('blur', clear);
 }
 function formatCost(value) {
   if (!Number.isFinite(value)) return 'Unavailable';
   return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: value >= 100 ? 0 : 2, maximumFractionDigits: value >= 100 ? 0 : 2 })}`;
 }
-function renderBreakdown() {
-  const root = $('#breakdown'); if (!root) return; const rows = breakdownRows(); const summary = breakdownSummary(rows); const series = breakdownSeries(rows);
+let lastBreakdownRenderKey = '';
+function breakdownRenderKey(rows) {
+  return JSON.stringify([
+    state.breakdownPeriod, state.breakdownMetric, state.breakdownGrouping,
+    state.breakdownSort.column, state.breakdownSort.direction,
+    [...state.hiddenChartProviders].sort(),
+    rows.map(row => [row.date, row.providerId, row.modelId, row.costUsd, row.processed, row.costBasis]),
+  ]);
+}
+function renderBreakdown(force = false) {
+  const root = $('#breakdown'); if (!root) return; const rows = breakdownRows();
+  const key = breakdownRenderKey(rows);
+  // The refresh-status poll renders once a second. A breakdown whose data did not change must not
+  // rebuild its DOM: that would drop focus, reset hover, and re-sweep the chart on every tick.
+  // Interaction handlers change the key (period, metric, grouping, sort, hidden providers), so
+  // they always rebuild exactly like before.
+  if (!force && key === lastBreakdownRenderKey && $('#breakdown-chart')) return;
+  lastBreakdownRenderKey = key;
+  const summary = breakdownSummary(rows); const series = breakdownSeries(rows);
   const input = summary.cached + summary.uncached + summary.creation; const cacheRate = input > 0 ? summary.cached / input : 0;
   const { data } = breakdownGroupedRows(rows);
   const head = state.breakdownGrouping === 'model'
@@ -513,11 +547,24 @@ function renderBreakdown() {
   const shareTotal = state.breakdownMetric === 'cost' ? summary.cost : summary.processed;
   const body = state.breakdownGrouping === 'model' ? data.map(row => { const modelLabel = row.modelId || `${row.providerName} aggregate`; const shareValue = state.breakdownMetric === 'cost' ? row.costUsd : row.processed; return `<tr><td title="${esc(modelLabel)}">${esc(modelLabel)}</td><td>${esc(row.providerName)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : formatCost(row.costUsd)}</td><td class="num">${shareTotal ? `${(shareValue / shareTotal * 100).toFixed(1)}%` : '—'}</td><td class="num">${compactNumber(row.processed)}</td><td class="num">${row.costBasis === 'Unpriced' ? 'Unavailable' : row.processed ? formatCost(row.costUsd / row.processed * 1e6) : '—'}</td><td class="breakdown-basis">${esc(basisLabel(row.costBasis))}</td></tr>`; }).join('') : data.map(row => { const quality = breakdownDayQuality(row); return `<tr><td>${esc(row.date)}</td>${series.map(item => `<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.providers[item.id] || 0) : compactNumber(row.providers[item.id] || 0)}</td>`).join('')}<td class="num">${state.breakdownMetric === 'cost' ? formatCost(row.costUsd) : compactNumber(row.processed)}</td><td class="num">${compactNumber(row.processed)}</td><td class="breakdown-basis">${esc(quality)}</td></tr>`; }).join('');
   root.innerHTML = `<div class="breakdown-header"><div><h2 id="breakdown-title">Usage</h2><p class="breakdown-eyebrow">${esc(breakdownStart())} to ${esc(dayKey(0))} · local history only</p></div></div><div class="breakdown-controls"><div class="breakdown-toggle" role="tablist" aria-label="Breakdown period">${['7','30','90'].map(day => `<button class="breakdown-segment ${state.breakdownPeriod===day?'selected':''}" data-breakdown-period="${day}" role="tab" aria-selected="${state.breakdownPeriod===day}">${day} days</button>`).join('')}</div><div class="breakdown-toggle" role="tablist" aria-label="Chart metric"><button class="breakdown-segment ${state.breakdownMetric==='cost'?'selected':''}" data-breakdown-chart="cost" role="tab" aria-selected="${state.breakdownMetric==='cost'}">Cost</button><button class="breakdown-segment ${state.breakdownMetric==='tokens'?'selected':''}" data-breakdown-chart="tokens" role="tab" aria-selected="${state.breakdownMetric==='tokens'}">Tokens</button></div></div>${rows.length ? `<div class="breakdown-summary"><div class="breakdown-stat"><small>Raw cost</small><strong>${formatCost(summary.cost)}</strong><span>Reported + estimated</span></div><div class="breakdown-stat"><small>Processed tokens</small><strong>${compactNumber(summary.processed)}</strong><span>Observed local history</span></div><div class="breakdown-stat"><small>Cached input</small><strong>${compactNumber(summary.cached)}</strong><span>${(cacheRate*100).toFixed(1)}% of observed input</span></div><div class="breakdown-stat"><small>Output</small><strong>${compactNumber(summary.output)}</strong><span>${compactNumber(summary.reasoning)} reasoning</span></div><div class="breakdown-stat"><small>Cache savings</small><strong>${summary.cacheSavings ? formatCost(summary.cacheSavings) : 'Unavailable'}</strong><span>Estimated with catalog rates</span></div></div><div class="breakdown-chart-wrap"><div class="breakdown-chart-top"><h3>Daily ${state.breakdownMetric === 'cost' ? 'cost' : 'processed tokens'}</h3></div><div class="breakdown-chart-shell"><canvas id="breakdown-chart" tabindex="0" aria-label="Daily provider usage chart. Use left and right arrow keys to inspect dates."></canvas><div id="breakdown-chart-tooltip" class="breakdown-chart-tooltip" role="tooltip" hidden></div></div><div class="breakdown-legend">${series.map(item => `<button data-breakdown-provider="${esc(item.id)}" class="${state.hiddenChartProviders.has(item.id)?'off':''}" aria-pressed="${!state.hiddenChartProviders.has(item.id)}"><span class="breakdown-dot" style="background:${item.color}"></span>${esc(item.name)}</button>`).join('')}</div></div><div class="breakdown-lower"><div class="ledger-panel"><div class="ledger-heading"><h3>Breakdown</h3><div class="breakdown-toggle"><button class="breakdown-segment ${state.breakdownGrouping==='model'?'selected':''}" data-breakdown-group="model">Model</button><button class="breakdown-segment ${state.breakdownGrouping==='day'?'selected':''}" data-breakdown-group="day">Day</button></div></div><div class="breakdown-table-scroll"><table class="breakdown-table"><thead>${head}</thead><tbody>${body}</tbody></table></div></div><aside class="pricing-quality"><h3>Cost quality</h3><div class="quality-row"><span>Provider reported</span><strong>${summary.cost ? `${(summary.reportedCost/summary.cost*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Model priced</span><strong>${summary.cost ? `${(summary.modelPricedCost/summary.cost*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Unpriced</span><strong>${summary.processed ? `${(summary.unpriced/summary.processed*100).toFixed(1)}%` : '—'}</strong></div><div class="quality-row"><span>Cache savings</span><strong>${summary.cacheSavings ? formatCost(summary.cacheSavings) : 'Unavailable'}</strong></div><div class="quality-row"><span>Data source</span><strong>Local</strong></div></aside></div>` : '<div class="breakdown-empty">No local usage history is available for this range. TokenBurn will show model detail when supported provider logs are present.</div>'}`;
-  drawBreakdownChart(series);
+  // A hover index can outlive the day range it was chosen in (90 -> 7 days) or the data behind
+  // it (a refresh can drop a provider). Clamp it and re-sync the tooltip so it never points at a
+  // date or a value that no longer exists.
+  if (state.breakdownHoverIndex !== null && (state.breakdownHoverIndex < 0 || state.breakdownHoverIndex >= breakdownDays())) {
+    state.breakdownHoverIndex = null;
+  }
+  drawBreakdownChart(series, state.breakdownHoverIndex);
+  updateBreakdownChartTooltip(state.breakdownHoverIndex);
   wireBreakdownChart(series);
 }
+// One transition at a time. setBreakdownView has animation waits and native resize round-trips
+// between deciding to expand and actually swapping the DOM; a second call issued in that window
+// (fast Back click, popup hidden mid-transition, window resize) used to complete after the newer
+// request and leave state.view disagreeing with the layout. The latest request wins.
+let breakdownRequestGeneration = 0;
 async function setBreakdownView(expanded, immediate = false) {
   const minimumWidth = 720;
+  const generation = ++breakdownRequestGeneration;
   const animate = !immediate && !prefersReducedMotion();
   const resizeNativeWindow = nextExpanded => Promise.resolve(invoke('set_breakdown_mode', {
     expanded: nextExpanded, reducedMotion: prefersReducedMotion() || immediate
@@ -553,10 +600,12 @@ async function setBreakdownView(expanded, immediate = false) {
     } else {
       clearTransition();
     }
+    if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
     // Compact content is restored before the native shrink starts. Even if the WebView is shown
     // during a shell race, dense breakdown content can never paint into the 320 DIP viewport.
     applyView(false);
     await resizeNativeWindow(false);
+    if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
     if (animate) requestAnimationFrame(() => requestAnimationFrame(() => {
       clearTransition();
       $('#metric-menu')?.focus();
@@ -573,7 +622,9 @@ async function setBreakdownView(expanded, immediate = false) {
   } else {
     clearTransition();
   }
+  if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
   const targetWidth = await resizeNativeWindow(true);
+  if (generation !== breakdownRequestGeneration) { clearTransition(); return false; }
   const availableWidth = Number.isFinite(Number(targetWidth)) ? Number(targetWidth) : window.innerWidth;
   if (availableWidth < minimumWidth) {
     await resizeNativeWindow(false);
@@ -914,9 +965,18 @@ function providerRows() {
 
 // A provider in an authentication-failure state gets a re-sign-in action that opens its own CLI.
 // Claude uses `claude auth login`; Antigravity uses the `agy` CLI the user is already signed in to.
+// The backend already classifies failures (errorCategory), so the decision uses the category first
+// and only falls back to text for cached envelopes that predate the category field. Mirrors
+// ReauthActionResolver in the desktop host.
 function reauthActionFor(snapshot, errorText) {
-  const authError = /(auth|login|expired|not configured|signed out|sign.?in)/i.test(errorText);
-  if (!authError) return null;
+  // The backend's errorCategory is authoritative when present; the text heuristic only covers
+  // category-less cached envelopes from older builds. This must match ReauthActionResolver.
+  const category = snapshot.errorCategory || '';
+  if (category) {
+    if (!/(Authentication|Authorization|NotConfigured)/i.test(category)) return null;
+  } else if (!/(auth|login|expired|not configured|signed out|sign.?in)/i.test(errorText || '')) {
+    return null;
+  }
   if (snapshot.providerId === 'claude-code') return { action: 'claude-login', label: 'Open Claude sign-in' };
   if (snapshot.providerId === 'antigravity') return { action: 'antigravity-login', label: 'Run agy to sign in' };
   return null;
@@ -966,12 +1026,28 @@ function progressValues(line, stale) {
 
 function renderProvidersFinal() {
   const rows = providerRows();
+  // A valid-but-empty provider list is a real state, not a loading failure: show the empty
+  // state instead of a blank list, and never mark it as a failed load.
+  if (!rows.length) {
+    lastProvidersKey = '';
+    activeTrendBar = null;
+    clearTimeout(trendTooltipTimer);
+    setOverlayOpen(trendTooltip, false);
+    $('#providers').innerHTML = '<div class="providers-empty">No providers are enabled. Open Settings to choose providers.</div>';
+    return;
+  }
   const key = providersStructureKey(rows);
   if (key === lastProvidersKey) {
     patchProviderValues(rows);
     return;
   }
   lastProvidersKey = key;
+  // The provider list is about to be rebuilt underneath an open trend tooltip. Its bar element is
+  // detached by the innerHTML swap; keep the tooltip from floating over the new list pointing at
+  // a stale value.
+  activeTrendBar = null;
+  clearTimeout(trendTooltipTimer);
+  setOverlayOpen(trendTooltip, false);
   $('#providers').innerHTML = rows.map(row => {
     const { snapshot, warning, compactLines, canReauth, reauthAction, displayName } = row;
     const lines = compactLines.map((line, index) => renderMetric(line,
@@ -1115,6 +1191,10 @@ function render() {
   $('#metric-title').textContent = state.metric === 'tokens' ? 'Tokens' : state.metric === 'cost-mtok' ? 'Cost/MTok' : 'Cost';
   renderSpend();
   renderProvidersFinal();
+  // A refresh (or the background poll) can complete while the drill-down is open. Without this,
+  // the breakdown table, chart, and tooltip kept showing the pre-refresh data until the user
+  // clicked something. renderBreakdown is keyed, so an unchanged page is left completely alone.
+  if (state.view === 'breakdown') renderBreakdown();
   $('#updated').textContent = loading
     ? 'Refreshing...'
     : state.refreshStatusError || formatRefreshCountdown(state.nextRefreshAt);
@@ -1124,8 +1204,14 @@ function render() {
 // host is actually gone; one means the WPF side was busy for a second.
 let refreshStatusFailures = 0;
 let lastInitialDataRetryAt = 0;
+// The 1s poll and refresh()'s cleanup path both call syncRefreshStatus. A status request still
+// waiting on a slow host must not stack a second one on top of it — each carries a 3.5s bound,
+// so overlapping requests would keep firing into a host that is already behind on the poll.
+let refreshStatusInFlight = false;
 
 async function syncRefreshStatus() {
+  if (refreshStatusInFlight) return;
+  refreshStatusInFlight = true;
   try {
     // This runs from refresh()'s cleanup path.  A WebView2 startup race can leave an IPC
     // promise unresolved, so this must use the same bound as the usage request.  Otherwise
@@ -1146,6 +1232,8 @@ async function syncRefreshStatus() {
     refreshStatusFailures += 1;
     if (refreshStatusFailures >= 2) state.refreshStatusError = 'Refresh service unavailable';
     render();
+  } finally {
+    refreshStatusInFlight = false;
   }
 }
 
@@ -1173,9 +1261,10 @@ async function refresh(force = false) {
     if (force && errors) showStatus(`${errors} provider update${errors === 1 ? '' : 's'} need attention.`);
   } catch (error) {
     state.refreshStatusError = 'Provider update unavailable';
-    // Raw Rust/JS exception text used to reach the user verbatim. Keep the detail available for
-    // diagnostics via the title attribute, but lead with something a person can act on.
-    showStatus('Could not reach the local provider service.', STATUS_LONG, error?.toString?.());
+    // Raw Rust/JS exception text (URLs, HTTP codes, command names) used to reach the user
+    // verbatim through the status title attribute. That detail belongs in the diagnostics
+    // bundle, not on a user-facing element.
+    showStatus('Could not reach the local provider service. It will retry automatically.', STATUS_LONG);
   } finally {
     state.localLoading = false;
     render();
@@ -1223,6 +1312,13 @@ document.addEventListener('keydown', event => {
   const activePage = document.querySelector('.page-view.active');
   if (activePage) {
     closeSettingsPage(activePage);
+    return;
+  }
+  // The breakdown is a drill-down level like a settings page. Escape collapses it before it is
+  // allowed to dismiss the whole popup; closing the window from inside the drill-down skipped a
+  // level and landed the next open back on the dense wide view.
+  if (state.view === 'breakdown') {
+    setBreakdownView(false);
     return;
   }
   hidePopup();
@@ -1343,6 +1439,7 @@ document.querySelectorAll('[data-metric]').forEach(button => button.addEventList
   }
   if (state.view === 'breakdown') await setBreakdownView(false);
   closeSpendOtherTooltip();
+  userTouchedSettings = true;
   state.metric = normalizeSpendMetric(button.dataset.metric);
   state.compactMetric = state.metric;
   state.settings.spendMetric = state.metric;
@@ -1577,7 +1674,7 @@ async function applySettingsImmediately(name) {
     render();
     if (providersChanged) refresh(true);
   } catch (error) {
-    showStatus('Could not save that setting.', STATUS_LONG, error?.toString?.());
+    showStatus('Could not save that setting. The change was not applied; try again.', STATUS_LONG);
   } finally {
     settingsApplyInFlight = false;
     if (settingsApplyQueuedName) {
@@ -1589,13 +1686,23 @@ async function applySettingsImmediately(name) {
 }
 
 function scheduleSettingsApply(name) {
+  userTouchedSettings = true;
   clearTimeout(settingsApplyTimer);
   settingsApplyTimer = setTimeout(() => applySettingsImmediately(name), 160);
 }
 
+// Each settings page wires its change handler exactly once. The views are static in the shell,
+// so a per-view guard prevents the listener accumulation that repeated opens used to cause.
+// Delegation (not per-input listeners) keeps re-rendered inputs — the customize list rebuilds
+// its whole innerHTML — attached without rewiring on every render.
+const instantSettingsWired = new Set();
 function wireInstantSettings(name) {
+  if (instantSettingsWired.has(name)) return;
+  instantSettingsWired.add(name);
   const root = $(`#${name}-view`);
-  root.querySelectorAll('input, select').forEach(input => input.addEventListener('change', () => scheduleSettingsApply(name)));
+  root?.addEventListener('change', event => {
+    if (event.target?.closest?.('input, select')) scheduleSettingsApply(name);
+  });
 }
 
 function updateNotificationProviderSummary() {
@@ -1654,6 +1761,10 @@ $('#notification-provider-menu')?.addEventListener('keydown', event => {
   }
   if (event.key === 'Escape') {
     event.preventDefault();
+    // Stop the document-level Escape handler from ALSO closing the settings page. Without this,
+    // one Escape closed the picker and the whole page, skipping the in-between levels that the
+    // ordered handler (select -> picker -> tooltip -> overlays -> page -> popup) is meant to keep.
+    event.stopPropagation();
     closeNotificationProviderMenu();
     return;
   }
@@ -1865,7 +1976,10 @@ async function openSettingsPage(name) {
     try { await invoke('set_screen_share_privacy', { hidden: Boolean(state.settings.hideFromScreenShare) }); } catch (_) { /* older native host */ }
   } catch (error) {
     if (requestGeneration !== pageRequestGeneration) return;
-    showStatus('Settings are unavailable while the desktop host is starting.', STATUS_LONG, error?.toString?.());
+    // The host is usually still starting when this fires, but it can also be any other settings
+    // bridge failure. Claiming one specific cause would be misleading, so say what happened and
+    // what to do next instead of why.
+    showStatus('Settings could not be loaded. Close and reopen Settings to try again.', STATUS_LONG);
   }
 }
 
@@ -1892,7 +2006,7 @@ copyLogsButton?.addEventListener('click', async () => {
     await copyTextToClipboard(text);
     showStatus('Logs copied to clipboard.', STATUS_SHORT);
   } catch (error) {
-    showStatus('Could not copy logs.', STATUS_LONG, error?.toString?.());
+    showStatus('Could not copy logs. Try again in a moment.', STATUS_LONG);
   } finally {
     copyLogsButton.disabled = false;
   }
@@ -2075,7 +2189,7 @@ window.addEventListener('resize', () => {
   if (state.view === 'breakdown' && window.innerWidth < 720) {
     setBreakdownView(false, true);
   } else if (state.view === 'breakdown') {
-    renderBreakdown();
+    renderBreakdown(true);
   }
 });
 // The Rust side reveals the window with a raw ShowWindow and no fade, so the entrance happens in
@@ -2084,10 +2198,18 @@ window.addEventListener('resize', () => {
 // re-asserts it.
 let revealAnimationFrame = 0;
 let focusRevealTimer = 0;
+// One transitionend handler at a time. Each open used to attach a fresh finishOpening listener,
+// and a close that interrupted the transition removed the 'opening' class before any
+// transitionend could fire, so cancelled openings leaked one listener each.
+let popoverFinishHandler = null;
 function revealPopover(restart = false) {
   const popover = $('.popover');
   if (!popover) return;
   cancelAnimationFrame(revealAnimationFrame);
+  if (popoverFinishHandler) {
+    popover.removeEventListener('transitionend', popoverFinishHandler);
+    popoverFinishHandler = null;
+  }
   popover.classList.remove('closing');
   if (!restart || prefersReducedMotion()) {
     popover.classList.remove('opening');
@@ -2101,8 +2223,10 @@ function revealPopover(restart = false) {
     if (event.target === popover && event.propertyName === 'transform') {
       popover.classList.remove('opening');
       popover.removeEventListener('transitionend', finishOpening);
+      popoverFinishHandler = null;
     }
   };
+  popoverFinishHandler = finishOpening;
   popover.addEventListener('transitionend', finishOpening);
   // The forced layout above commits the offset state. Starting the transition immediately keeps
   // the web surface synchronized with the native HWND rise instead of spending two frames fully
@@ -2113,6 +2237,10 @@ function beginPopoverClose() {
   const popover = $('.popover');
   if (!popover) return;
   cancelAnimationFrame(revealAnimationFrame);
+  if (popoverFinishHandler) {
+    popover.removeEventListener('transitionend', popoverFinishHandler);
+    popoverFinishHandler = null;
+  }
   popover.classList.remove('opening');
   if (prefersReducedMotion()) {
     popover.classList.remove('shown');
@@ -2132,19 +2260,42 @@ window.addEventListener('focus', () => {
 });
 // Reset only while genuinely hidden, so the next open animates again. If WebView2 does not report
 // visibility for a hidden native window this simply never fires and we lose the entrance on
-// subsequent opens — degraded, not broken.
+// subsequent opens — degraded, not broken. The flag also stops the poll while hidden.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    popupHidden = true;
     $('.popover')?.classList.remove('shown', 'opening');
     if (state.view === 'breakdown') setBreakdownView(false, true);
+  } else {
+    popupHidden = false;
   }
 });
 
 window.__TAURI__?.event?.listen?.('poc-refresh', () => refresh(true));
-window.__TAURI__?.event?.listen?.('poc-closing', beginPopoverClose);
+window.__TAURI__?.event?.listen?.('poc-closing', () => {
+  popupHidden = true;
+  // A dismissal must invalidate any in-flight breakdown expansion (the 72ms entrance wait or the
+  // native widen round-trip). Without this, a close during the transition resumed the widen on the
+  // hidden window and paid a second geometry round-trip on every such reopen.
+  breakdownRequestGeneration++;
+  beginPopoverClose();
+});
 window.__TAURI__?.event?.listen?.('poc-opened', () => {
+  popupHidden = false;
   clearTimeout(focusRevealTimer);
   closeHeaderPopovers();
+  // A tooltip left over from the previous session is stale by definition: the cursor that
+  // requested it is long gone, and its data may no longer be rendered. Close both tooltip
+  // surfaces so the reopen never floats a dead popup over fresh content.
+  closeSpendOtherTooltip();
+  activeTrendBar = null;
+  clearTimeout(trendTooltipTimer);
+  setOverlayOpen(trendTooltip, false);
+  // The ring hover is the same class of stale state: the cursor never left the canvas while the
+  // window was hidden, so a reopen would repaint the ring/legend as if that phantom cursor were
+  // still hovering a slice.
+  state.hoveredSpendProviderId = null;
+  applyLegendHighlight();
   // A tray click means "show me my usage". Reopening onto whatever settings page happened to be
   // open when the popup was last dismissed is a wrong answer to that.
   document.querySelectorAll('.select-control.open').forEach(closeSelect);
@@ -2159,12 +2310,16 @@ window.__TAURI__?.event?.listen?.('poc-opened', () => {
 // instead of a second native window.
 window.__TAURI__?.event?.listen?.('open-page', event => openSettingsPage(event.payload));
 window.addEventListener('usage-monitor-open-page', event => openSettingsPage(event.detail));
+// A user change that happens before this startup response resolves must win over the stale
+// response: applying it would revert a fresh metric pick or settings edit the user just made.
+let userTouchedSettings = false;
 withTimeout(
   invoke('get_settings_data'),
   COMMAND_TIMEOUT_MS,
   'The settings command did not respond.'
 ).then(data => {
   if (!data?.settings) return;
+  if (userTouchedSettings) return;
   state.settings = data.settings;
   rememberMotionPreference();
   applyMotionPreference();
@@ -2176,7 +2331,19 @@ withTimeout(
 }).catch(() => { /* the native host can still be starting */ });
 refresh(false);
 syncRefreshStatus();
+// A hidden native window must not keep polling the host: every tick round-trips the desktop
+// bridge, and the WPF host is the primary refresh owner while the popup is closed. The Rust side
+// emits poc-closing/poc-opened reliably even where WebView2's visibilitychange is unreliable for
+// a hidden HWND, so both signals feed one flag. The popup starts hidden, so polling begins only
+// after the first real open.
+let popupHidden = true;
+function popupIsHidden() {
+  return popupHidden || document.hidden || document.visibilityState === 'hidden';
+}
 setInterval(async () => {
+  // A hidden popup has nothing to paint and no user to answer to; the reopen path resyncs
+  // immediately (poc-opened triggers a refresh), so skipping the poll while hidden loses nothing.
+  if (popupIsHidden()) return;
   const wasLoading = state.localLoading || state.hostLoading;
   await syncRefreshStatus();
   // A background WPF refresh can complete while the popup is open. Pull the new cached
@@ -2185,9 +2352,9 @@ setInterval(async () => {
   // The desktop API and WebView start independently. A first request can legitimately arrive
   // before the loopback listener is ready; without this retry, the popup kept rendering its
   // synthetic "not configured" placeholders forever even though the live API came up seconds
-  // later. Retrying only while no real snapshot exists keeps the normal five-minute refresh
-  // cadence untouched.
-  if (!state.localLoading && !state.hostLoading && !state.snapshots.length &&
+  // later. The retry stops after one successful load: a valid-but-empty provider list is real
+  // data, not a failed load, and retrying it forever would hammer the host with no user visible.
+  if (!state.localLoading && !state.hostLoading && state.lastGood === null &&
       Date.now() - lastInitialDataRetryAt >= 2000) {
     lastInitialDataRetryAt = Date.now();
     refresh(false);
@@ -2281,9 +2448,15 @@ function renderSpend() {
     .sort((a, b) => spendRowCompare(a, b, spendRowOrder()));
   const rootRows = groupSmallSpendRows(rows);
   lastSpendRootRows = rootRows;
-  lastSpendDisplayedRows = rootRows;
   if (state.hoveredSpendProviderId && !rootRows.some(row => row.id === state.hoveredSpendProviderId))
     state.hoveredSpendProviderId = null;
+  // A refresh can regroup or dissolve the Others tail while its tooltip is open. Re-paint the
+  // tooltip from the new aggregation, or close it if the aggregate no longer exists — a tooltip
+  // listing providers that vanished from the chart is a stale surface pointing at dead data.
+  if (state.spendTooltipRowId && $('#spend-other-tooltip')?.classList.contains('is-open')) {
+    const aggregate = rootRows.find(row => row.id === state.spendTooltipRowId && row.isAggregate);
+    if (!aggregate || !paintSpendOtherTooltip(aggregate)) closeSpendOtherTooltip();
+  }
   const totalCost = rootRows.reduce((sum, row) => sum + row.cost, 0);
   const totalTokens = rootRows.reduce((sum, row) => sum + row.tokens, 0);
   const centerValue = state.metric === 'tokens' ? compactNumber(totalTokens)
@@ -2487,7 +2660,21 @@ function buildShareImage() {
 // Writes the chart bitmap to the clipboard. The native command is the primary path because it
 // bypasses the WebView clipboard-permission quirks; the web ClipboardItem path covers older
 // binaries that predate the command. A null text writes the image formats only.
+let shareInFlight = false;
 async function copyShareToClipboard(text, canvas) {
+  // A double click would otherwise run two full canvas encodes and two clipboard writes. The
+  // encode alone stalls the main thread for hundreds of milliseconds, so a second click must not
+  // start a second encode while the first is still working.
+  if (shareInFlight) return true;
+  shareInFlight = true;
+  try {
+    return await copyShareToClipboardCore(text, canvas);
+  } finally {
+    shareInFlight = false;
+  }
+}
+
+async function copyShareToClipboardCore(text, canvas) {
   try {
     const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
     let binary = '';
@@ -2498,8 +2685,14 @@ async function copyShareToClipboard(text, canvas) {
       binary += String.fromCharCode.apply(null, pixels.subarray(index, index + chunk));
     }
     // Chromium paste targets (ChatGPT, browser uploads) read image data from the registered PNG
-    // clipboard format, so encode the same canvas as a PNG alongside the raw bitmap.
-    const pngBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    // clipboard format, so encode the same canvas as a PNG alongside the raw bitmap. The encode
+    // must be bounded too: a WebView2 that never invokes the toBlob callback would otherwise hang
+    // the share with no status and no fallback.
+    const pngBlob = await withTimeout(
+      new Promise(resolve => canvas.toBlob(resolve, 'image/png')),
+      COMMAND_TIMEOUT_MS,
+      'The chart image encode did not respond.'
+    );
     let pngBase64 = '';
     if (pngBlob) {
       pngBase64 = await new Promise((resolve, reject) => {
@@ -2524,7 +2717,11 @@ async function copyShareToClipboard(text, canvas) {
   }
   try {
     if (typeof ClipboardItem === 'undefined') return false;
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const blob = await withTimeout(
+      new Promise(resolve => canvas.toBlob(resolve, 'image/png')),
+      COMMAND_TIMEOUT_MS,
+      'The chart image encode did not respond.'
+    );
     if (!blob) return false;
     const payload = { 'image/png': blob };
     if (text) payload['text/plain'] = new Blob([text], { type: 'text/plain' });
@@ -2596,18 +2793,26 @@ function closeSpendOtherTooltip() {
   setOverlayOpen($('#spend-other-tooltip'), false);
 }
 
-function showSpendOtherTooltip(row, clientX, clientY) {
-  if (!row?.isAggregate || !row.children?.length) {
-    closeSpendOtherTooltip();
-    return;
-  }
-  clearTimeout(state.spendTooltipTimer);
+// Paints the tooltip body for an aggregate row without touching its open/closed state, so a data
+// refresh can re-sync an already visible tooltip in place. Returns false when the row is not a
+// usable aggregate.
+function paintSpendOtherTooltip(row) {
+  if (!row?.isAggregate || !row.children?.length) return false;
   state.spendTooltipRowId = row.id;
   $('#spend-other-total').textContent = legendLabel(row);
   $('#spend-other-list').innerHTML = row.children.map(child =>
     `<div class="spend-other-item"><span class="dot" style="background:${child.color}"></span><span>${esc(child.name)}</span><strong>${esc(legendLabel(child))}</strong></div>`
   ).join('');
   drawMiniSpendRing(row.children);
+  return true;
+}
+
+function showSpendOtherTooltip(row, clientX, clientY) {
+  clearTimeout(state.spendTooltipTimer);
+  if (!paintSpendOtherTooltip(row)) {
+    closeSpendOtherTooltip();
+    return;
+  }
   setOverlayOpen($('#spend-other-tooltip'), true);
   updateSpendOtherTooltipPosition(clientX, clientY);
 }

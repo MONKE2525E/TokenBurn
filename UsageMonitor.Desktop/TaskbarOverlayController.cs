@@ -21,6 +21,7 @@ public sealed class TaskbarOverlayController : IDisposable
     private readonly MainWindow _dashboard;
     private readonly MonitorPlacementService _placement = new();
     private readonly DispatcherTimer _safetyTimer;
+    private readonly DebouncedPlacementPersister _placementPersister;
     private readonly WidgetWindow _renderer = new();
     private readonly Window _rendererHost;
     private readonly NativeMethods.WinEventDelegate _winEventCallback;
@@ -36,6 +37,7 @@ public sealed class TaskbarOverlayController : IDisposable
     private IReadOnlyList<MetricDisplay> _metrics = Array.Empty<MetricDisplay>();
     private int _syncQueued;
     private string _queuedReason = "queued";
+    private readonly SyncPromoteState _promoteState = new();
     private bool _bitmapInvalidated = true;
     private double _renderedScale;
     private double _renderedWidthDip;
@@ -66,6 +68,9 @@ public sealed class TaskbarOverlayController : IDisposable
         _safetyTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(750) };
         _safetyTimer.Tick += (_, _) => QueueSynchronize("safety-timer");
         _safetyTimer.Start();
+        _placementPersister = new DebouncedPlacementPersister(
+            App.CurrentApp.PersistWidgetPlacement,
+            TimeSpan.FromMilliseconds(250));
         RegisterShellEvents();
     }
 
@@ -139,7 +144,7 @@ public sealed class TaskbarOverlayController : IDisposable
         }
         catch (Exception ex)
         {
-            new FileDiagnosticsLogger().Warning("Native taskbar overlay attach failed", exception: ex);
+            FileDiagnosticsLogger.Default.Warning("Native taskbar overlay attach failed", exception: ex);
             SetFallback($"Taskbar status strip could not attach ({ex.Message}). Tray mode remains available.");
             _retryPending = true;
             return false;
@@ -227,7 +232,8 @@ public sealed class TaskbarOverlayController : IDisposable
         _overlay = new NativeTaskbarOverlay(
             click: point => _dashboard.ToggleFromTaskbarIndicator(point),
             dragStart: point => BeginDrag(point),
-            drag: point => ApplyDragDelta(point));
+            drag: point => ApplyDragDelta(point),
+            dragEnd: () => _placementPersister.Flush());
     }
 
     private void ReconcileTaskbarStrip(string reason, bool promote = false)
@@ -291,7 +297,6 @@ public sealed class TaskbarOverlayController : IDisposable
         var reservedEdgeDip = TaskbarStripPlacement.CalculateReservedEdgeDip(bounds, trayNotify, dpi);
         var mainAxisPixels = bounds.Width < bounds.Height ? bounds.Height : bounds.Width;
         var layout = TaskbarLayoutDecision.Calculate(
-            _renderer.IdealWidthDip,
             mainAxisPixels / scale,
             reservedEdgeDip);
         _renderer.SetAvailableWidthDip(layout.AvailableWidthDip);
@@ -331,8 +336,19 @@ public sealed class TaskbarOverlayController : IDisposable
         var needsBitmap = _bitmapInvalidated || !_overlay.HasBitmap ||
             Math.Abs(_renderedScale - scale) > 0.001 ||
             Math.Abs(_renderedWidthDip - _renderer.IdealWidthDip) > 0.001;
-        var operation = needsBitmap ? "move/show/repaint" : "move/show";
-        LogState($"{reason}.before", operation, placement.Bounds, false, false, dpi, _edgeOffsetDip);
+        var shouldPromote = promote || (!_popupVisible && !NativeMethods.IsWindowAbove(_overlay.Handle, _taskbarHandle));
+        var positionMatches = NativeMethods.GetWindowRect(_overlay.Handle, out var actualOverlayRect) &&
+            actualOverlayRect.Left == placement.Bounds.Left && actualOverlayRect.Top == placement.Bounds.Top &&
+            actualOverlayRect.Right == placement.Bounds.Right && actualOverlayRect.Bottom == placement.Bounds.Bottom;
+        var needsPosition = needsBitmap || !positionMatches || !_overlay.IsVisible || shouldPromote;
+        // The 750 ms safety reconcile reaches this point on every heartbeat even when nothing
+        // moved or repainted. Writing a full state entry then was unbounded, always-hot logging:
+        // keep the placement log for real transitions (attach, detach, fallback, fullscreen,
+        // placement resets, moves, repaints) and stay silent for pure no-ops.
+        var changed = needsBitmap || needsPosition;
+        var operation = changed ? (needsBitmap ? "move/show/repaint" : "move/show") : "noop";
+        if (changed)
+            LogState($"{reason}.before", operation, placement.Bounds, false, false, dpi, _edgeOffsetDip);
         if (needsBitmap)
         {
             var image = _renderer.RenderToBitmap(scale);
@@ -341,18 +357,14 @@ public sealed class TaskbarOverlayController : IDisposable
             _renderedScale = scale;
             _renderedWidthDip = _renderer.IdealWidthDip;
         }
-        var shouldPromote = promote || (!_popupVisible && !NativeMethods.IsWindowAbove(_overlay.Handle, _taskbarHandle));
-        var positionMatches = NativeMethods.GetWindowRect(_overlay.Handle, out var actualOverlayRect) &&
-            actualOverlayRect.Left == placement.Bounds.Left && actualOverlayRect.Top == placement.Bounds.Top &&
-            actualOverlayRect.Right == placement.Bounds.Right && actualOverlayRect.Bottom == placement.Bounds.Bottom;
-        var needsPosition = needsBitmap || !positionMatches || !_overlay.IsVisible || shouldPromote;
         var layeredPresented = needsPosition
             ? _overlay.SetPosition(placement.Bounds, shouldPromote, needsBitmap)
             : _overlay.HasBitmap;
-        LogState($"{reason}.after", needsPosition
-                ? (layeredPresented ? operation : $"{operation}-failed")
-                : "noop",
-            placement.Bounds, needsBitmap, layeredPresented, dpi, _edgeOffsetDip);
+        if (changed || !layeredPresented)
+            LogState($"{reason}.after", needsPosition
+                    ? (layeredPresented ? operation : $"{operation}-failed")
+                    : "noop",
+                placement.Bounds, needsBitmap, layeredPresented, dpi, _edgeOffsetDip);
     }
 
     private void BeginDrag(System.Drawing.Point point)
@@ -397,7 +409,10 @@ public sealed class TaskbarOverlayController : IDisposable
             (delta.CurrentPoint.Y - _dragStartCursor.Y) / (dpi / 96.0),
             dpi,
             reservedEdgeDip);
-        App.CurrentApp.PersistWidgetPlacement(_monitorId, _edgeOffsetDip);
+        // The position itself still reconciles on every move so the strip tracks the cursor; only
+        // the settings write is debounced, so a drag persists at most a few times instead of once
+        // per mouse-move (each write is a synchronous settings.json rewrite on the UI thread).
+        _placementPersister.Request(_monitorId, _edgeOffsetDip);
         ReconcileTaskbarStrip("drag", promote: true);
     }
 
@@ -553,7 +568,25 @@ public sealed class TaskbarOverlayController : IDisposable
             };
             var directory = Path.GetDirectoryName(GetLogPath())!;
             Directory.CreateDirectory(directory);
+            RotateStripLogIfNeeded();
             File.AppendAllText(GetLogPath(), JsonSerializer.Serialize(entry) + Environment.NewLine);
+        }
+        catch { }
+    }
+
+    private const long StripLogMaxBytes = 1_000_000;
+
+    /// <summary>Bounded like the diagnostics log: once the strip log reaches its cap the old
+    /// contents rotate to a single sibling backup instead of growing forever.</summary>
+    private void RotateStripLogIfNeeded()
+    {
+        try
+        {
+            var path = GetLogPath();
+            if (!File.Exists(path) || new FileInfo(path).Length < StripLogMaxBytes) return;
+            var rotated = path + ".1";
+            if (File.Exists(rotated)) File.Delete(rotated);
+            File.Move(path, rotated);
         }
         catch { }
     }
@@ -568,12 +601,14 @@ public sealed class TaskbarOverlayController : IDisposable
         => handle == IntPtr.Zero ? null : $"0x{handle.ToInt64():X}";
 
     private static string GetLogPath()
-        => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UsageMonitor", "taskbar-strip.log");
+        => UsageMonitorPaths.Current.TaskbarStripLogFile;
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        // A placement requested during the last drag moments must survive shutdown.
+        _placementPersister.Flush();
         _safetyTimer.Stop();
         foreach (var hook in _eventHooks)
             NativeMethods.UnhookWinEvent(hook);
@@ -614,19 +649,88 @@ public sealed class TaskbarOverlayController : IDisposable
     private void QueueSynchronize(string reason, bool promote = false)
     {
         _queuedReason = reason;
+        // A promote request that arrives while a sync is already queued must survive the
+        // coalescing. The winning call used to capture its own promote flag, so a SHOW/
+        // LOCATIONCHANGE promote that arrived behind an already-queued non-promote sync was
+        // silently lost. The sticky counter is consumed when the sync actually runs.
+        if (promote) _promoteState.MarkPending();
         if (_disposed || Interlocked.Exchange(ref _syncQueued, 1) != 0) return;
         try
         {
             _dashboard.Dispatcher.BeginInvoke(new Action(() =>
             {
                 Interlocked.Exchange(ref _syncQueued, 0);
-                ReconcileTaskbarStrip(_queuedReason, promote);
+                ReconcileTaskbarStrip(_queuedReason, _promoteState.Consume());
             }), DispatcherPriority.Background);
         }
         catch (InvalidOperationException)
         {
             Interlocked.Exchange(ref _syncQueued, 0);
         }
+    }
+}
+
+/// <summary>
+/// Tracks whether any coalesced sync request carried a promote intent. <see cref="TaskbarOverlayController.QueueSynchronize"/>
+/// coalesces requests with a single queued flag; a later SHOW/LOCATIONCHANGE promote must not be
+/// dropped just because an earlier non-promote sync won the queue slot. A monotonic pending count
+/// makes the promote intent sticky until the sync actually runs, and later requests re-mark it.
+/// </summary>
+internal sealed class SyncPromoteState
+{
+    private int _pending;
+    private int _applied;
+
+    public void MarkPending() => Interlocked.Increment(ref _pending);
+
+    /// <summary>Consumes the pending promote intent. Returns true when at least one promote was
+    /// requested since the previous call. Safe to call repeatedly: a promote marked between the
+    /// read and the write is never lost and is returned by the next call.</summary>
+    public bool Consume()
+    {
+        var pending = Volatile.Read(ref _pending);
+        var shouldPromote = pending > Volatile.Read(ref _applied);
+        Volatile.Write(ref _applied, pending);
+        return shouldPromote;
+    }
+}
+
+/// <summary>
+/// Bounds how often a high-frequency source (drag mouse moves) writes settings. The drag path
+/// used to call SettingsStore.Save on every WndProc mouse-move — one synchronous full JSON rewrite
+/// of settings.json per message on the UI thread. Writes now coalesce behind a short timer and
+/// flush on drag release, so a drag writes at most a few times instead of once per mouse move.
+/// </summary>
+internal sealed class DebouncedPlacementPersister
+{
+    private readonly Action<string, double> _persist;
+    private readonly DispatcherTimer _timer;
+    private string _monitorId = string.Empty;
+    private double _edgeOffsetDip;
+
+    public DebouncedPlacementPersister(Action<string, double> persist, TimeSpan interval)
+    {
+        _persist = persist;
+        _timer = new DispatcherTimer { Interval = interval };
+        _timer.Tick += (_, _) => Flush();
+    }
+
+    public void Request(string monitorId, double edgeOffsetDip)
+    {
+        _monitorId = monitorId;
+        _edgeOffsetDip = edgeOffsetDip;
+        _timer.Stop();
+        _timer.Start();
+    }
+
+    public void Flush()
+    {
+        _timer.Stop();
+        if (_monitorId.Length == 0) return;
+        var monitorId = _monitorId;
+        var edgeOffsetDip = _edgeOffsetDip;
+        _monitorId = string.Empty;
+        _persist(monitorId, edgeOffsetDip);
     }
 }
 
@@ -679,6 +783,7 @@ internal sealed class NativeTaskbarOverlay : IDisposable
     private readonly Action<System.Drawing.Point> _click;
     private readonly Action<System.Drawing.Point> _dragStart;
     private readonly Action<WidgetDragDeltaEventArgs> _drag;
+    private readonly Action _dragEnd;
     private NativeMethods.POINT _down;
     private NativeMethods.POINT _last;
     private bool _capture;
@@ -700,11 +805,13 @@ internal sealed class NativeTaskbarOverlay : IDisposable
     public NativeTaskbarOverlay(
         Action<System.Drawing.Point> click,
         Action<System.Drawing.Point> dragStart,
-        Action<WidgetDragDeltaEventArgs> drag)
+        Action<WidgetDragDeltaEventArgs> drag,
+        Action dragEnd)
     {
         _click = click;
         _dragStart = dragStart;
         _drag = drag;
+        _dragEnd = dragEnd;
         Handle = Create();
         _selfHandle = GCHandle.Alloc(this);
         SetWindowLongPtr(Handle, -21, GCHandle.ToIntPtr(_selfHandle));
@@ -728,7 +835,12 @@ internal sealed class NativeTaskbarOverlay : IDisposable
         if (locked && _capture)
         {
             _capture = false;
-            _dragging = false;
+            if (_dragging)
+            {
+                _dragging = false;
+                // The last dragged position must not be lost when the lock interrupts the drag.
+                _dragEnd();
+            }
             // The user may still be holding the button down right now (lock toggled mid-drag).
             // Swallow the following mouse-up so releasing does not read as a click that toggles
             // the popup and leaves the strip looking "bugged out".
@@ -947,6 +1059,7 @@ internal sealed class NativeTaskbarOverlay : IDisposable
             if (_dragging)
             {
                 _dragging = false;
+                _dragEnd();
             }
             else
             {
@@ -958,7 +1071,11 @@ internal sealed class NativeTaskbarOverlay : IDisposable
         if (message == WmCaptureChanged)
         {
             _capture = false;
-            _dragging = false;
+            if (_dragging)
+            {
+                _dragging = false;
+                _dragEnd();
+            }
             return IntPtr.Zero;
         }
         if (message == WmDestroy) _visible = false;

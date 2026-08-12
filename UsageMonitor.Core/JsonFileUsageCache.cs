@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -20,7 +21,11 @@ public sealed class JsonFileUsageCache : IUsageCache, IDisposable
     private readonly IDiagnosticsLogger _logger;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, Task> _refreshes = new(StringComparer.Ordinal);
+    // One in-flight refresh per key. The task carries the refresh outcome so waiters share it
+    // instead of re-hitting the provider: the cold-miss winner sets the produced value (which may
+    // be a non-persisted provider error), and background stale refreshes set null (their value is
+    // persisted to disk, so waiters re-read the file).
+    private readonly ConcurrentDictionary<string, Task<object?>> _refreshes = new(StringComparer.Ordinal);
 
     public JsonFileUsageCache(string? directory = null, TimeSpan? freshness = null,
         IClock? clock = null, IDiagnosticsLogger? logger = null)
@@ -59,22 +64,64 @@ public sealed class JsonFileUsageCache : IUsageCache, IDisposable
             return new CacheReadResult<T>(envelope.Value, envelope.StoredAt, true, true, refreshStarted);
         }
 
-        try
+        // Cold miss: two concurrent readers (taskbar, popup, CLI) must not both hit the provider
+        // for the same empty cache key. The first caller registers itself in the refresh map and
+        // runs the refresh with no caller token (the shared refresh must not be aborted by one
+        // waiter's short timeout); every other caller waits for it and shares its outcome. If the
+        // winner produced no value, waiters re-read once before concluding the same.
+        while (true)
         {
-            var value = await refresh(cancellationToken).ConfigureAwait(false);
-            if (value is not null)
+            if (_refreshes.TryGetValue(key, out var inFlight))
             {
-                if (ShouldPersist(value))
-                    await WriteAsync(key, value, _clock.UtcNow, cancellationToken).ConfigureAwait(false);
-                return new CacheReadResult<T>(value, _clock.UtcNow, false, false, false);
+                object? shared;
+                try
+                {
+                    shared = await inFlight.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return new CacheReadResult<T>(default, null, false, false, false);
+                }
+                if (shared is { } value)
+                {
+                    if (shared is not T typed)
+                        return new CacheReadResult<T>(default, null, false, false, false);
+                    return new CacheReadResult<T>(typed, _clock.UtcNow, false, false, false);
+                }
+                envelope = await ReadEnvelopeAsync<T>(key, cancellationToken).ConfigureAwait(false);
+                if (envelope is not null)
+                    return new CacheReadResult<T>(envelope.Value, envelope.StoredAt, true, false, false);
+                // The winner already ran the provider refresh and produced nothing; re-running it
+                // here would serialize one provider hit per waiter instead of sharing the outcome.
+                return new CacheReadResult<T>(default, null, false, false, false);
             }
 
-            return new CacheReadResult<T>(default, null, false, false, false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.Warning("Cache refresh failed", new Dictionary<string, object?> { ["cacheKey"] = LogKey(key) }, ex);
-            return new CacheReadResult<T>(default, null, false, false, false, ex);
+            var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_refreshes.TryAdd(key, completion.Task)) continue;
+            object? produced = null;
+            try
+            {
+                var value = await refresh(CancellationToken.None).ConfigureAwait(false);
+                produced = value;
+                if (value is not null)
+                {
+                    if (ShouldPersist(value))
+                        await WriteAsync(key, value, _clock.UtcNow, cancellationToken).ConfigureAwait(false);
+                    return new CacheReadResult<T>(value, _clock.UtcNow, false, false, false);
+                }
+
+                return new CacheReadResult<T>(default, null, false, false, false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.Warning("Cache refresh failed", new Dictionary<string, object?> { ["cacheKey"] = LogKey(key) }, ex);
+                return new CacheReadResult<T>(default, null, false, false, false, ex);
+            }
+            finally
+            {
+                _refreshes.TryRemove(new KeyValuePair<string, Task<object?>>(key, completion.Task));
+                completion.TrySetResult(produced);
+            }
         }
     }
 
@@ -125,15 +172,18 @@ public sealed class JsonFileUsageCache : IUsageCache, IDisposable
 
     private bool StartRefresh<T>(string key, Func<CancellationToken, Task<T?>> refresh)
     {
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_refreshes.TryAdd(key, completion.Task)) return false;
         _ = Task.Run(async () =>
         {
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 var value = await refresh(CancellationToken.None).ConfigureAwait(false);
                 if (value is not null && ShouldPersist(value))
                     await WriteAsync(key, value, _clock.UtcNow).ConfigureAwait(false);
+                _logger.Debug("Background cache refresh completed",
+                    new Dictionary<string, object?> { ["cacheKey"] = LogKey(key), ["elapsedMs"] = stopwatch.ElapsedMilliseconds });
             }
             catch (Exception ex)
             {
@@ -141,8 +191,9 @@ public sealed class JsonFileUsageCache : IUsageCache, IDisposable
             }
             finally
             {
-                _refreshes.TryRemove(new KeyValuePair<string, Task>(key, completion.Task));
-                completion.TrySetResult();
+                // null marks "persisted to disk / nothing to share"; cold-miss waiters re-read.
+                _refreshes.TryRemove(new KeyValuePair<string, Task<object?>>(key, completion.Task));
+                completion.TrySetResult(null);
             }
         });
         return true;
