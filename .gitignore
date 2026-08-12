@@ -15,6 +15,9 @@ node_modules/
 UsageMonitor.TauriPoc/src-tauri/target/
 upstream-openusage/
 
+# Leftovers from the build-migration verification; not part of the product
+.build-migration-remainder/
+
 # Local secrets and signing material
 .env
 .env.*
