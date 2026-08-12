@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -16,10 +15,13 @@ public sealed class CodexLogUsageScanner
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly IProviderFileSystem _files;
     private readonly IModelCatalog _catalog;
-    public CodexLogUsageScanner(IProviderFileSystem? files = null, IModelCatalog? catalog = null)
+    private readonly TimeZoneInfo _localTimeZone;
+    public CodexLogUsageScanner(IProviderFileSystem? files = null, IModelCatalog? catalog = null,
+        TimeZoneInfo? localTimeZone = null)
     {
         _files = files ?? new LocalProviderFileSystem();
         _catalog = catalog ?? new CachedModelCatalog();
+        _localTimeZone = localTimeZone ?? TimeZoneInfo.Local;
     }
 
     public static ProviderUsageHistory ScanDirectory(string codexHome, DateTimeOffset since) => new CodexLogUsageScanner().Scan(codexHome, since);
@@ -36,66 +38,34 @@ public sealed class CodexLogUsageScanner
     public ProviderUsageHistory Scan(string codexHome, DateTimeOffset since,
         string? historyStoreDirectory, Action<HistoryScanReport>? report)
     {
-        var stopwatch = Stopwatch.StartNew();
-        var scanReport = new HistoryScanReport();
-        var store = string.IsNullOrWhiteSpace(historyStoreDirectory)
-            ? null
-            : new ProviderHistoryIndexStore(historyStoreDirectory);
-        var index = store?.TryLoad("codex") ?? new ProviderHistoryIndex();
-        if (store is not null)
-        {
-            var catalogFingerprint = HistorySourceFingerprint.Catalog(UsageMonitorPaths.Current.PricingDirectory);
-            if (index.CatalogFingerprint.Length > 0 && index.CatalogFingerprint != catalogFingerprint)
-                index = new ProviderHistoryIndex { CatalogFingerprint = catalogFingerprint };
-            index.CatalogFingerprint = catalogFingerprint;
-        }
-
         var files = DiscoverSessionFiles(codexHome).ToArray();
-        scanReport.FilesDiscovered = files.Length;
-        var knownPaths = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-        foreach (var stalePath in index.Sources.Keys.Where(path => !knownPaths.Contains(path)).ToArray())
-            index.Sources.Remove(stalePath);
-
-        foreach (var path in files)
-        {
-            var fingerprint = store is null ? string.Empty : HistorySourceFingerprint.Of(path);
-            if (index.Sources.TryGetValue(path, out var existing) && existing.Fingerprint == fingerprint)
+        return IncrementalHistoryScan.Run("codex", files, historyStoreDirectory, since, ParseSessionFile,
+            afterMerge: (merged, scanReport) =>
             {
-                scanReport.FilesUnchanged++;
-                continue;
-            }
-            scanReport.FilesChanged++;
-            index.Sources[path] = ParseSessionFile(path, since, scanReport);
-        }
-
-        var merged = HistoryIndexMerge.Merge(index.Sources.Values, sinceDate: DateOnly.FromDateTime(since.LocalDateTime));
-        var totals = merged.Points.ToDictionary(p => p.Date, p => (Tokens: p.Tokens, Cost: p.CostUsd));
-        var breakdown = merged.Breakdown.ToDictionary(p => (p.Date, Model: p.ModelId ?? string.Empty, p.CostBasis), p => p);
-        var unknownModels = new HashSet<string>(merged.UnknownModels, StringComparer.OrdinalIgnoreCase);
-        ScanDiagnosticsDatabase(codexHome, since, totals, breakdown, unknownModels, scanReport);
-        if (store is not null) store.Save("codex", index);
-        scanReport.Milliseconds = stopwatch.ElapsedMilliseconds;
-        report?.Invoke(scanReport);
-        return new ProviderUsageHistory(totals.OrderBy(p => p.Key)
-            .Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToArray())
-        {
-            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
-            Breakdown = breakdown.Values
-                .OrderBy(point => point.Date)
-                .ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase)
-                .ToArray()
-        };
+                var totals = merged.Points.ToDictionary(p => p.Date, p => (Tokens: p.Tokens, Cost: p.CostUsd));
+                var breakdown = merged.Breakdown.ToDictionary(p => (p.Date, Model: p.ModelId ?? string.Empty, p.CostBasis), p => p);
+                var unknownModels = new HashSet<string>(merged.UnknownModels, StringComparer.OrdinalIgnoreCase);
+                ScanDiagnosticsDatabase(codexHome, since, totals, breakdown, unknownModels, scanReport);
+                return new ProviderUsageHistory(totals.OrderBy(p => p.Key)
+                    .Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToArray())
+                {
+                    UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
+                    Breakdown = breakdown.Values
+                        .OrderBy(point => point.Date)
+                        .ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase)
+                        .ToArray()
+                };
+            },
+            report, _localTimeZone);
     }
 
-    private SourceHistoryContribution ParseSessionFile(string path, DateTimeOffset since, HistoryScanReport report)
+    private SourceHistoryContribution ParseSessionFile(string path, DateTimeOffset since, DateOnly sinceDate, HistoryScanReport report)
     {
         // Capture the fingerprint before reading. If the file is appended to mid-parse the stored
         // fingerprint will not match the file's final state, so the next scan re-parses it instead
         // of permanently missing the appended records.
         var fingerprint = HistorySourceFingerprint.Of(path);
-        var totals = new Dictionary<DateOnly, (double Tokens, double Cost)>();
-        var breakdown = new Dictionary<(DateOnly Date, string Model, UsageCostBasis Basis), UsageBreakdownPoint>();
-        var unknownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var aggregator = new HistoryAggregator(ProviderIds.Codex);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? model = null;
         RawUsage? previousTotals = null;
@@ -161,9 +131,11 @@ public sealed class CodexLogUsageScanner
                 continue;
             }
 
-            // Seed cumulative baselines with pre-window records. Without this, the first
-            // total-only event inside the 30-day window looks like the entire lifetime total.
-            if (timestamp < since)
+            // Seed cumulative baselines with records whose local day precedes the window. Without
+            // this, the first total-only event inside the window looks like the entire lifetime
+            // total. The window is day-granular: records on the boundary day itself are part of the
+            // window even before the `since` instant, matching what an earlier parse cached.
+            if (IncrementalHistoryScan.DayOf(timestamp.Value, _localTimeZone) < sinceDate)
             {
                 if (cumulative is not null) previousTotals = cumulative;
                 continue;
@@ -174,6 +146,20 @@ public sealed class CodexLogUsageScanner
                 : cumulative?.Subtract(previousTotals);
             if (usage is null) continue;
             if (cumulative is not null) previousTotals = cumulative;
+            // Corrupt or hostile records can carry NaN/Infinity (string-typed "1e999") or negative
+            // components. Clamp negatives to zero and drop the record when anything is non-finite
+            // so one bad line can neither poison the day totals nor the cumulative baseline.
+            usage = usage with
+            {
+                Input = Math.Max(0, usage.Input),
+                Cached = Math.Max(0, usage.Cached),
+                Output = Math.Max(0, usage.Output),
+                Reasoning = Math.Max(0, usage.Reasoning),
+                Total = Math.Max(0, usage.Total)
+            };
+            if (!double.IsFinite(usage.Input) || !double.IsFinite(usage.Cached) ||
+                !double.IsFinite(usage.Output) || !double.IsFinite(usage.Reasoning) ||
+                !double.IsFinite(usage.Total)) continue;
             usage = usage with { Cached = Math.Min(usage.Cached, usage.Input) };
             if (usage.Total <= 0) usage = usage with { Total = usage.Input + usage.Output + usage.Reasoning };
             if (usage.Total <= 0) continue;
@@ -186,53 +172,30 @@ public sealed class CodexLogUsageScanner
             var key = $"{timestamp:O}|{eventModel}|{input}|{cached}|{output}|{reasoning}|{tokens}";
             if (!seen.Add(key)) continue;
             report.RowsRead++;
-            TrackRecord(report, timestamp);
+            report.Track(timestamp);
             // The spend ring is selected by the user's local calendar day. Codex emits UTC
             // timestamps, so grouping by UTC makes evening usage appear under tomorrow on
             // west-of-UTC machines and makes Today/Yesterday look empty.
-            var day = DateOnly.FromDateTime(timestamp.Value.LocalDateTime);
+            var day = IncrementalHistoryScan.DayOf(timestamp.Value, _localTimeZone);
             var pricing = _catalog.ResolvePrice(ProviderIds.Codex, eventModel);
             var cost = pricing?.Estimate(Math.Max(0, input - cached), cached, output + reasoning);
             var cacheSavings = pricing is null ? 0 : cached / 1_000_000d * Math.Max(0, pricing.InputPerMillion - pricing.CachedInputPerMillion);
-            if (cost is null) unknownModels.Add(eventModel);
+            if (cost is null) aggregator.AddUnknownModel(eventModel);
             var knownCost = cost ?? 0;
-            if (totals.TryGetValue(day, out var prior)) totals[day] = (prior.Tokens + tokens, prior.Cost + knownCost);
-            else totals[day] = (tokens, knownCost);
             var basis = cost is null ? UsageCostBasis.Unpriced : UsageCostBasis.CatalogEstimated;
-            var breakdownKey = (day, eventModel, basis);
-            if (breakdown.TryGetValue(breakdownKey, out var existing))
-            {
-                breakdown[breakdownKey] = existing with
-                {
-                    UncachedInputTokens = existing.UncachedInputTokens + Math.Max(0, input - cached),
-                    CachedInputTokens = existing.CachedInputTokens + cached,
-                    OutputTokens = existing.OutputTokens + output,
-                    ReasoningTokens = existing.ReasoningTokens + reasoning,
-                    CostUsd = existing.CostUsd + knownCost,
-                    CacheSavingsUsd = existing.CacheSavingsUsd + cacheSavings
-                };
-            }
-            else
-            {
-                breakdown[breakdownKey] = new UsageBreakdownPoint(day, ProviderIds.Codex, eventModel,
-                    Math.Max(0, input - cached), cached, 0, output, reasoning, knownCost, basis,
-                    basis == UsageCostBasis.CatalogEstimated ? PricingBasis.LocalEstimate : PricingBasis.Unknown, true, cacheSavings);
-            }
+            aggregator.Add(day, eventModel, basis,
+                basis == UsageCostBasis.CatalogEstimated ? PricingBasis.LocalEstimate : PricingBasis.Unknown,
+                tokens: tokens,
+                uncachedInput: Math.Max(0, input - cached),
+                cachedInput: cached,
+                cacheCreation: 0,
+                output: output,
+                reasoning: reasoning,
+                cost: knownCost,
+                cacheSavings: cacheSavings,
+                estimated: true);
         }
-        return new SourceHistoryContribution
-        {
-            Fingerprint = fingerprint,
-            Points = totals.OrderBy(p => p.Key).Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToList(),
-            Breakdown = breakdown.Values.OrderBy(point => point.Date).ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase).ToList(),
-            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()
-        };
-    }
-
-    private static void TrackRecord(HistoryScanReport report, DateTimeOffset? timestamp)
-    {
-        if (timestamp is not { } value) return;
-        if (report.OldestRecord is null || value < report.OldestRecord) report.OldestRecord = value;
-        if (report.NewestRecord is null || value > report.NewestRecord) report.NewestRecord = value;
+        return aggregator.ToContribution(fingerprint);
     }
 
     private void ScanDiagnosticsDatabase(string codexHome, DateTimeOffset since,
@@ -341,11 +304,11 @@ public sealed class CodexLogUsageScanner
 
     private static RawUsage ParseUsage(JsonElement element)
         => new(
-            Number(element, "input_tokens", "prompt_tokens", "input"),
-            Number(element, "cached_input_tokens", "cache_read_input_tokens", "cached_tokens"),
-            Number(element, "output_tokens", "completion_tokens", "output"),
-            Number(element, "reasoning_output_tokens", "reasoning_tokens"),
-            Number(element, "total_tokens"));
+            ProviderJson.NumberOrZero(element, "input_tokens", "prompt_tokens", "input"),
+            ProviderJson.NumberOrZero(element, "cached_input_tokens", "cache_read_input_tokens", "cached_tokens"),
+            ProviderJson.NumberOrZero(element, "output_tokens", "completion_tokens", "output"),
+            ProviderJson.NumberOrZero(element, "reasoning_output_tokens", "reasoning_tokens"),
+            ProviderJson.NumberOrZero(element, "total_tokens"));
 
     private static bool IsChildSessionMeta(JsonElement payload)
     {
@@ -357,14 +320,6 @@ public sealed class CodexLogUsageScanner
         if (string.Equals(ProviderJson.String(ProviderJson.Property(payload, "thread_source")), "subagent", StringComparison.OrdinalIgnoreCase)) return true;
         var source = ProviderJson.Object(ProviderJson.Property(payload, "source"));
         return source is { } sourceValue && HasValue(ProviderJson.Property(sourceValue, "subagent"));
-    }
-
-    private static double Number(JsonElement element, params string[] names) => ProviderJson.Number(ProviderJson.Property(element, names)) ?? 0;
-
-    private double? EstimateCost(string model, double input, double cached, double output)
-    {
-        var pricing = _catalog.ResolvePrice(ProviderIds.Codex, model);
-        return pricing?.Estimate(input, cached, output) ?? 0;
     }
 
     private sealed record RawUsage(double Input, double Cached, double Output, double Reasoning, double Total)
