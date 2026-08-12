@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
@@ -248,27 +248,9 @@ public sealed class CodexLogUsageScanner
                             NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) || tokens <= 0) continue;
                     if (report is not null) report.RowsRead++;
                     var modelMatch = DiagnosticsModelPattern.Match(reader.GetString(1));
-                    var model = modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5";
-                    var pricing = _catalog.ResolvePrice(ProviderIds.Codex, model);
-                    var cost = pricing is null
-                        ? 0
-                        : pricing.Estimate(0, 0, tokens);
-                    if (pricing is null) unknownModels.Add(model);
-                    var day = DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeSeconds(timestamp).LocalDateTime);
-                    totals.TryGetValue(day, out var prior);
-                    totals[day] = (prior.Tokens + tokens, prior.Cost + cost);
-                    var basis = pricing is null ? UsageCostBasis.Unpriced : UsageCostBasis.CoarseEstimate;
-                    var key = (day, model, basis);
-                    if (breakdown.TryGetValue(key, out var existing))
-                    {
-                        breakdown[key] = existing with { OutputTokens = existing.OutputTokens + tokens, CostUsd = existing.CostUsd + cost };
-                    }
-                    else
-                    {
-                        breakdown[key] = new UsageBreakdownPoint(day, ProviderIds.Codex, model,
-                            0, 0, 0, tokens, 0, cost, basis,
-                            pricing is null ? PricingBasis.Unknown : PricingBasis.LocalEstimate, true);
-                    }
+                    if (report is not null) report.Track(DateTimeOffset.FromUnixTimeSeconds(timestamp));
+                    rows.Add((DateTimeOffset.FromUnixTimeSeconds(timestamp), (long)tokens,
+                        modelMatch.Success ? modelMatch.Groups["model"].Value : "gpt-5"));
                 }
             }
             catch (SqliteException) { }
