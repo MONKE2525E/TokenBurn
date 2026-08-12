@@ -9,6 +9,10 @@ using UsageMonitor.Core.Providers.Zai;
 
 namespace UsageMonitor.Tests;
 
+// The OpenCode provider tests resolve models through the process-wide ModelPricingCatalog static
+// state, so they must not run concurrently with the tests that mutate it (see
+// ModelPricingStaticCollection).
+[Collection("model-pricing-static")]
 public sealed class ProviderAdaptersTests
 {
     private static readonly DateTimeOffset Now = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
@@ -413,6 +417,28 @@ public sealed class ProviderAdaptersTests
         Assert.Equal("codex", snapshot.ProviderId);
         Assert.Equal(1, snapshot.GetLine("Session")!.Used);
         Assert.Equal("Bearer fixture-access", http.Authorization);
+    }
+
+    [Fact]
+    public void GrokBillingEndpointFallsBackToTheDefaultWhenTheConfiguredUrlIsMalformed()
+    {
+        var previous = Environment.GetEnvironmentVariable("GROK_CLI_CHAT_PROXY_BASE_URL");
+        try
+        {
+            foreach (var malformed in new[] { "not a url", "ftp://cli-chat-proxy.grok.com/v1", "https://cli-chat-proxy.grok.com/v1 ", "https://", "" })
+            {
+                Environment.SetEnvironmentVariable("GROK_CLI_CHAT_PROXY_BASE_URL", malformed);
+                Assert.Equal("https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+                    GrokProvider.BuildBillingEndpoint().ToString());
+            }
+            Environment.SetEnvironmentVariable("GROK_CLI_CHAT_PROXY_BASE_URL", "https://proxy.example/v2/");
+            Assert.Equal("https://proxy.example/v2/billing?format=credits",
+                GrokProvider.BuildBillingEndpoint().ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GROK_CLI_CHAT_PROXY_BASE_URL", previous);
+        }
     }
 
     [Fact]

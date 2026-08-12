@@ -16,11 +16,14 @@ public sealed class AntigravityCliUsageScanner
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly Func<string?> _dataDirectoryOverride;
     private readonly Func<string> _userProfile;
+    private readonly TimeZoneInfo _localTimeZone;
 
-    public AntigravityCliUsageScanner(Func<string?>? dataDirectoryOverride = null, Func<string>? userProfile = null)
+    public AntigravityCliUsageScanner(Func<string?>? dataDirectoryOverride = null, Func<string>? userProfile = null,
+        TimeZoneInfo? localTimeZone = null)
     {
         _dataDirectoryOverride = dataDirectoryOverride ?? (() => Environment.GetEnvironmentVariable("AGY_DATA_DIR"));
         _userProfile = userProfile ?? (() => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        _localTimeZone = localTimeZone ?? TimeZoneInfo.Local;
     }
 
     public ProviderUsageHistory Scan(DateTimeOffset now, IModelCatalog? catalog = null,
@@ -29,7 +32,13 @@ public sealed class AntigravityCliUsageScanner
         var databases = DiscoverDatabases();
         if (databases.Count == 0) return new ProviderUsageHistory(Array.Empty<UsageHistoryPoint>());
 
-        var cutoff = now.ToUniversalTime().AddDays(-29);
+        // The 30-day window shown by the ring and breakdown table is day-granular, so the cutoff
+        // is the first instant of the local day 29 days back instead of the `now - 29d` instant.
+        // An instant cutoff truncates the boundary day and makes Antigravity disagree with every
+        // other provider.
+        var cutoffDay = IncrementalHistoryScan.SinceDate(now, _localTimeZone).AddDays(-29);
+        var cutoff = DateTimeOffset.FromUnixTimeSeconds(
+            IncrementalHistoryScan.UtcSecondsAtLocalMidnight(cutoffDay, _localTimeZone));
         var rows = new List<AntigravityCliUsageRow>();
         foreach (var database in databases)
         {
@@ -46,16 +55,23 @@ public sealed class AntigravityCliUsageScanner
                 connection.Open();
                 var generationModels = ReadGenerationModels(connection);
                 using var command = connection.CreateCommand();
-                command.CommandText = "SELECT step_payload FROM steps WHERE step_payload IS NOT NULL ORDER BY idx";
+                // NULL-payload steps advance the generation pairing too: a step without a payload
+                // still has a gen_metadata row, so skipping it here would shift every later model
+                // attribution by one.
+                command.CommandText = "SELECT step_payload FROM steps ORDER BY idx";
                 using var reader = command.ExecuteReader();
                 var generationIndex = 0;
                 while (reader.Read())
                 {
+                    // Both tables are ordered by idx and generations are recorded regardless of
+                    // age, so the pairing must advance for every step row in raw order. Advancing
+                    // only for rows inside the scan window shifted every later model attribution
+                    // whenever a pre-window step was skipped.
+                    var modelId = generationIndex < generationModels.Count ? generationModels[generationIndex] : null;
+                    generationIndex++;
                     if (reader.IsDBNull(0)) continue;
                     var payload = reader.GetFieldValue<byte[]>(0);
                     if (!TryReadUsage(payload, out var timestamp, out var tokens) || timestamp < cutoff || tokens <= 0) continue;
-                    var modelId = generationIndex < generationModels.Count ? generationModels[generationIndex] : null;
-                    generationIndex++;
                     rows.Add(new AntigravityCliUsageRow(timestamp, tokens, modelId));
                 }
             }
@@ -65,10 +81,10 @@ public sealed class AntigravityCliUsageScanner
         }
 
         var priced = rows.Select(row => Price(row, catalog)).ToArray();
-        // Bucket by the Windows local calendar day so the dashboard's local "Today" selector
+        // Bucket by the local calendar day so the dashboard's local "Today" selector
         // matches. UTC bucketing pushes evening usage into tomorrow's date.
         var points = priced
-            .GroupBy(row => DateOnly.FromDateTime(row.Row.Timestamp.LocalDateTime))
+            .GroupBy(row => IncrementalHistoryScan.DayOf(row.Row.Timestamp, _localTimeZone))
             .OrderBy(group => group.Key)
             .Select(group =>
             {
@@ -77,7 +93,7 @@ public sealed class AntigravityCliUsageScanner
             })
             .ToArray();
         var breakdown = priced
-            .GroupBy(row => new { Date = DateOnly.FromDateTime(row.Row.Timestamp.LocalDateTime), row.Row.ModelId, row.CostBasis })
+            .GroupBy(row => new { Date = IncrementalHistoryScan.DayOf(row.Row.Timestamp, _localTimeZone), row.Row.ModelId, row.CostBasis })
             .OrderBy(group => group.Key.Date)
             .ThenBy(group => group.Key.ModelId, StringComparer.OrdinalIgnoreCase)
             .Select(group => new UsageBreakdownPoint(group.Key.Date, ProviderIds.Antigravity, group.Key.ModelId,
@@ -136,17 +152,33 @@ public sealed class AntigravityCliUsageScanner
     private IReadOnlyList<string> DiscoverDatabases()
     {
         var configured = _dataDirectoryOverride()?.Trim();
-        var directory = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(_userProfile(), ".gemini", "antigravity-cli", "conversations")
-            : Path.Combine(Environment.ExpandEnvironmentVariables(configured), "conversations");
-        if (!Directory.Exists(directory)) return Array.Empty<string>();
-        try
+        var cliRoot = Path.Combine(_userProfile(), ".gemini");
+        // The agy CLI's server reads conversations from `.gemini/antigravity/conversations` on
+        // current Windows builds (observed in the CLI's own log), while older layouts and the
+        // `AGY_DATA_DIR` override use `.gemini/antigravity-cli/conversations`. Use the first
+        // candidate that actually contains databases: conversation rows carry no message identity,
+        // so scanning two layouts that both contain data could double-count the same sessions.
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(configured))
+            candidates.Add(Path.Combine(Environment.ExpandEnvironmentVariables(configured), "conversations"));
+        candidates.Add(Path.Combine(cliRoot, "antigravity", "conversations"));
+        candidates.Add(Path.Combine(cliRoot, "antigravity-cli", "conversations"));
+
+        foreach (var directory in candidates)
         {
-            return Directory.EnumerateFiles(directory, "*.db", SearchOption.TopDirectoryOnly)
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+            if (!Directory.Exists(directory)) continue;
+            try
+            {
+                var databases = Directory.EnumerateFiles(directory, "*.db", SearchOption.TopDirectoryOnly)
+                    .Select(Path.GetFullPath)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                if (databases.Length > 0) return databases;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
-        catch (IOException) { return Array.Empty<string>(); }
-        catch (UnauthorizedAccessException) { return Array.Empty<string>(); }
+        return Array.Empty<string>();
     }
 
     private static bool TryGetNestedVarint(byte[] data, int[] path, out ulong value, int index = 0)

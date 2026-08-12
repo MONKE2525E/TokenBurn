@@ -43,13 +43,11 @@ public sealed class GrokProvider : IUsageProvider
                 "Not configured. Grok Build is not logged in. Run `grok login` first.",
                 ProviderErrorCategory.NotConfigured);
 
-        var proxyBase = Environment.GetEnvironmentVariable("GROK_CLI_CHAT_PROXY_BASE_URL");
-        if (string.IsNullOrWhiteSpace(proxyBase)) proxyBase = DefaultProxyBaseUrl;
-        var url = $"{proxyBase.TrimEnd('/')}/billing?format=credits";
+        var endpoint = BuildBillingEndpoint();
 
         try
         {
-            var response = await _http.SendAsync(HttpMethod.Get, new Uri(url),
+            var response = await _http.SendAsync(HttpMethod.Get, endpoint,
                 new Dictionary<string, string>
                 {
                     ["Authorization"] = $"Bearer {auth.Key}",
@@ -86,6 +84,22 @@ public sealed class GrokProvider : IUsageProvider
         {
             return ProviderSnapshot.Error(Provider, "Grok Build returned invalid quota data.", ProviderErrorCategory.Parse);
         }
+    }
+
+    /// <summary>
+    /// Builds the billing endpoint from the configured proxy base URL. A malformed
+    /// GROK_CLI_CHAT_PROXY_BASE_URL (unparseable, non-http scheme, embedded whitespace) falls back
+    /// to the documented default instead of turning the whole refresh into a generic parse error.
+    /// </summary>
+    internal static Uri BuildBillingEndpoint()
+    {
+        var proxyBase = Environment.GetEnvironmentVariable("GROK_CLI_CHAT_PROXY_BASE_URL");
+        if (!string.IsNullOrWhiteSpace(proxyBase) &&
+            Uri.TryCreate(proxyBase.Trim().TrimEnd('/') + "/billing?format=credits", UriKind.Absolute, out var candidate) &&
+            (candidate.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+             candidate.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)))
+            return candidate;
+        return new Uri(DefaultProxyBaseUrl + "/billing?format=credits");
     }
 
     internal static string ResolveDefaultGrokHome()

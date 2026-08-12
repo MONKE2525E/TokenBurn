@@ -29,10 +29,24 @@ internal static class ProviderJson
     public static double? Number(JsonElement? value)
     {
         if (value is not { } item) return null;
-        if (item.ValueKind == JsonValueKind.Number && item.TryGetDouble(out var n)) return n;
-        if (item.ValueKind == JsonValueKind.String && double.TryParse(item.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out n)) return n;
-        return null;
+        double number;
+        if (item.ValueKind == JsonValueKind.Number)
+        {
+            if (!item.TryGetDouble(out number)) return null;
+        }
+        else if (item.ValueKind == JsonValueKind.String)
+        {
+            if (!double.TryParse(item.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out number)) return null;
+        }
+        else return null;
+        // double.TryParse accepts "NaN"/"Infinity"/"1e999" strings; a corrupt provider field must
+        // not poison day totals or persist into the history index as a non-finite value.
+        return double.IsFinite(number) ? number : null;
     }
+
+    /// <summary>Number lookup with a zero default, shared by JSONL usage scanners.</summary>
+    public static double NumberOrZero(JsonElement element, params string[] names)
+        => Number(Property(element, names)) ?? 0;
 
     public static bool? Bool(JsonElement? value)
     {
