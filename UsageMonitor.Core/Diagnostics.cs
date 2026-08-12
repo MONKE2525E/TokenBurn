@@ -129,7 +129,7 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"(?i)(Bearer\s+)[^\s,;]+")]
     private static partial Regex BearerRegex();
 
-    [GeneratedRegex(@"(?i)(\b(?:token|access_token|refresh_token|client_secret|api[_-]?key|authorization|cookie|password|secret|credential|account|organization|user[_-]?id|account[_-]?id|organization[_-]?id|email)\s*""?\s*[:=]\s*""?)[^,;\s}]+")]
+    [GeneratedRegex(@"(?i)(\b(?:token|access_token|refresh_token|client_secret|api[_-]?key|authorization|cookie|password|secret|credential|account|organization|user[_-]?id|account[_-]?id|organization[_-]?id|email)\s*""?\s*[:=]\s*""?)[^,;\s}""]+")]
     private static partial Regex KeyValueRegex();
 }
 

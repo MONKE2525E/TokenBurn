@@ -92,10 +92,11 @@ public static class CliApplication
         catch (OperationCanceledException)
         {
             // The 120s one-shot cap and an external cancellation are different events; only the
-            // cap is a timeout.
-            await stderr.WriteLineAsync(timeout.IsCancellationRequested
-                ? "Usage refresh timed out after 120 seconds."
-                : "Usage refresh cancelled.").ConfigureAwait(false);
+            // cap is a timeout. The linked token fires for both, so the caller's own token is the
+            // discriminator.
+            await stderr.WriteLineAsync(cancellationToken.IsCancellationRequested
+                ? "Usage refresh cancelled."
+                : "Usage refresh timed out after 120 seconds.").ConfigureAwait(false);
             return RefreshFailed;
         }
         catch (Exception ex)

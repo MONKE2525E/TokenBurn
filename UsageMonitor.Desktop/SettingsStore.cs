@@ -29,6 +29,8 @@ internal static class SettingsStore
 
     public static UserSettings Load()
     {
+        // The flag reflects the most recent Load; a success (or an absent file) clears it.
+        LastLoadFailed = false;
         try
         {
             if (!File.Exists(FilePath)) return UserSettings.Default;

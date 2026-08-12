@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Shell;
@@ -45,7 +45,7 @@ public partial class App : System.Windows.Application
             new Dictionary<string, object?>
             {
                 ["version"] = ProductInfo.Version,
-                ["arguments"] = string.Join(" ", args.Select(arg => arg.StartsWith("-", StringComparison.Ordinal) ? arg : "[arg]")),
+                ["arguments"] = string.Join(" ", args.Select(arg => arg.StartsWith("-", StringComparison.Ordinal) ? MaskArgument(arg) : "[arg]")),
                 ["launchedAtLogin"] = args.Any(arg => string.Equals(arg, "--startup", StringComparison.OrdinalIgnoreCase))
             });
 
@@ -61,7 +61,7 @@ public partial class App : System.Windows.Application
         if (!isNew)
         {
             logger.Info("TokenBurn second instance activating the existing process",
-                new Dictionary<string, object?> { ["arguments"] = string.Join(" ", args.Select(arg => arg.StartsWith("-", StringComparison.Ordinal) ? arg : "[arg]")) });
+                new Dictionary<string, object?> { ["arguments"] = string.Join(" ", args.Select(arg => arg.StartsWith("-", StringComparison.Ordinal) ? MaskArgument(arg) : "[arg]")) });
             // A second launch is usually the user clicking the Start menu entry
             // while the login instance is minimized.  Exiting silently makes the
             // product feel dead, so restore and foreground the already-running
@@ -324,5 +324,13 @@ public partial class App : System.Windows.Application
             // The mutex still prevents duplicate monitoring, and the tray remains
             // available once Explorer has finished creating its shell surfaces.
         }
+    }
+
+    /// <summary>Masks a command-line argument for diagnostics: option names are kept, but any
+    /// value after "=" (e.g. --key=value) is replaced so secrets never reach the log.</summary>
+    private static string MaskArgument(string argument)
+    {
+        var equals = argument.IndexOf('=');
+        return equals > 0 ? argument[..equals] + "=[arg]" : argument;
     }
 }

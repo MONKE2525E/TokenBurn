@@ -246,15 +246,16 @@ public partial class MainWindow : Window
                     WindowState = WindowState.Minimized;
                 return true;
             }
-            // Do not reveal the legacy WPF dashboard. It is an integration host for the native
-            // taskbar strip and tray only; presenting it as a fallback made two wildly different
-            // dashboards compete for the same action.
-            _tray?.ShowFallbackNotification("The compact dashboard could not be opened. TokenBurn is still running in the tray; try again in a moment.");
         }
         catch (Exception exception)
         {
             FileDiagnosticsLogger.Default.Warning("The compact dashboard could not be shown", exception: exception);
         }
+        // Do not reveal the legacy WPF dashboard. It is an integration host for the native
+        // taskbar strip and tray only; presenting it as a fallback made two wildly different
+        // dashboards compete for the same action. The notification fires on both a failed show
+        // and a thrown exception so the user always gets feedback.
+        _tray?.ShowFallbackNotification("The compact dashboard could not be opened. TokenBurn is still running in the tray; try again in a moment.");
         return false;
     }
 

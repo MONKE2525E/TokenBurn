@@ -106,7 +106,10 @@ public sealed class JsonFileUsageCache : IUsageCache, IDisposable
                 if (value is not null)
                 {
                     if (ShouldPersist(value))
-                        await WriteAsync(key, value, _clock.UtcNow, cancellationToken).ConfigureAwait(false);
+                        // The persistence write is part of the shared refresh outcome: like the
+                        // refresh itself it must not be aborted by an individual caller's
+                        // cancellation, or waiters would receive the value while the winner throws.
+                        await WriteAsync(key, value, _clock.UtcNow, CancellationToken.None).ConfigureAwait(false);
                     return new CacheReadResult<T>(value, _clock.UtcNow, false, false, false);
                 }
 
@@ -119,8 +122,11 @@ public sealed class JsonFileUsageCache : IUsageCache, IDisposable
             }
             finally
             {
-                _refreshes.TryRemove(new KeyValuePair<string, Task<object?>>(key, completion.Task));
+                // Publish the shared outcome before removing the in-flight entry: a reader arriving
+                // between the two operations would otherwise miss the entry and start a duplicate
+                // refresh of the work that just completed.
                 completion.TrySetResult(produced);
+                _refreshes.TryRemove(new KeyValuePair<string, Task<object?>>(key, completion.Task));
             }
         }
     }
