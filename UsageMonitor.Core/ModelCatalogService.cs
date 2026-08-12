@@ -140,6 +140,9 @@ public sealed class CachedModelCatalog : IModelCatalog
                     fresh = null;
                 }
                 if (fresh is null || fresh.Models.Count > 10_000) continue;
+                // A successful fetch clears the failure backoff so the next scheduled refresh
+                // resumes normal freshness checks instead of staying on the stale snapshot.
+                _lastFailedAt = DateTimeOffset.MinValue;
                 _snapshot = fresh;
                 ModelPricingCatalog.ApplyRemote(fresh.Models);
                 try

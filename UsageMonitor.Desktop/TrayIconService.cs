@@ -89,7 +89,12 @@ public sealed class TrayIconService : IDisposable
                     : string.Empty;
                 return $"{v.Provider} {v.Value}{reset}";
             }));
-        return tooltip.Length > 63 ? tooltip[..60] + "..." : tooltip;
+        if (tooltip.Length <= 63) return tooltip;
+        // Slice on a UTF-16 boundary: truncating inside a surrogate pair would corrupt the
+        // tooltip with a lone surrogate instead of just shortening it.
+        var head = tooltip[..60];
+        if (char.IsHighSurrogate(head[^1])) head = head[..^1];
+        return head + "...";
     }
 
     public void ShowFallbackNotification(string message)

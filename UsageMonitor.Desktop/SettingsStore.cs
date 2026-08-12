@@ -38,6 +38,7 @@ internal static class SettingsStore
                 // A valid JSON document that is not a settings object is treated as corruption,
                 // not as a reset. Preserve the file so the user's previous values can be recovered.
                 PreserveUnreadableFile("empty settings document");
+                LastLoadFailed = true;
                 return UserSettings.Default;
             }
             settings.SelectedMonitor ??= MonitorPlacementService.PrimaryMonitorId;

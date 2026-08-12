@@ -18,8 +18,7 @@ public sealed class UsageMonitorPaths
     public string LogsDirectory => Path.Combine(LocalDataRoot, "Logs");
     public string DiagnosticsLogFile => Path.Combine(LogsDirectory, "usage-monitor.log");
     /// <summary>Native taskbar strip placement state log. Lives outside the Logs directory for historical reasons.</summary>
-    public string TaskbarStripLogFile => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UsageMonitor", "taskbar-strip.log");
+    public string TaskbarStripLogFile => Path.Combine(LocalDataRoot, "taskbar-strip.log");
     public string PricingDirectory => Path.Combine(LocalDataRoot, "Pricing");
     public string SettingsDirectory => RoamingDataRoot;
     public string SettingsFile => Path.Combine(SettingsDirectory, "settings.json");

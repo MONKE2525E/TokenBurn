@@ -62,7 +62,8 @@ public static class ProgressAnimationBehavior
     {
         if (sender is not WpfProgressBar bar) return;
         if (e.PreviousSize.Width.Equals(e.NewSize.Width)) return;
-        var indicator = bar.Template.FindName("PART_Indicator", bar) as FrameworkElement;
+        // A SizeChanged can arrive before the template is applied; skip the clock drop then.
+        var indicator = bar.Template?.FindName("PART_Indicator", bar) as FrameworkElement;
         indicator?.BeginAnimation(FrameworkElement.WidthProperty, null);
     }
 
