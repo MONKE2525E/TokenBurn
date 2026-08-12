@@ -109,7 +109,6 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .icon-button:hover, .title-button:hover { color: var(--text); background: rgba(255, 255, 255, .08); transition-duration: var(--dur-micro); }
 .icon-button:active:not(:disabled), .title-button:active { transform: scale(.94); transition-duration: 80ms; }
 .icon-button:disabled { cursor: default; opacity: .5; }
-.copy-icon { font-size: 18px; }
 .header-actions { margin-left: auto; display: flex; gap: 4px; }
 .hint, .metric-menu, .share-menu { position: absolute; z-index: 4; top: 45px; background: var(--frost-menu); border: 1px solid rgba(255,255,255,.28); border-radius: 10px; box-shadow: 0 10px 26px #0008; padding: 8px 10px; color: var(--muted); font-size: 12px; transform-origin: top left; }
 /* Anchored under the metric button it belongs to. */
@@ -304,6 +303,7 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 /* "Not configured" / "no limits returned" are neutral facts, not failures. Red is reserved for
    things the user should act on, otherwise the one urgent signal stops meaning anything. */
 .empty-line { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.providers-empty { padding: 24px 18px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .provider-action { margin-top: 8px; padding: 6px 9px; border: 1px solid rgba(255,255,255,.15); border-radius: 8px; background: rgba(255,255,255,.07); color: var(--text); font-size: 11px; font-weight: 600; transition: background 140ms ease, opacity var(--dur-micro) ease, transform 80ms var(--ease-out); }
 .provider-action:hover:not(:disabled) { background: rgba(255,255,255,.13); transition-duration: var(--dur-micro); }
 .provider-action:active:not(:disabled) { background: rgba(255,255,255,.18); transform: scale(.98); }
@@ -440,11 +440,8 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .notification-provider-option-name img { width: 18px; height: 18px; object-fit: contain; filter: brightness(0) invert(1); opacity: .82; }
 .notification-provider-select-all { border-bottom: 1px solid rgba(255,255,255,.1); border-radius: 7px 7px 4px 4px; margin-bottom: 3px; font-weight: 650; color: var(--text); }
 .notification-provider-empty { padding: 14px 10px; color: var(--muted); font-size: 11px; line-height: 1.4; }
-.notification-trigger > span { display: grid; gap: 3px; }
-.notification-trigger small { color: var(--muted); font-size: 10px; }
 .history-trend .trend { position: relative; }
 .trend i:hover { opacity: 1; filter: brightness(1.22); }
-.trend i.empty { background: rgba(255,255,255,.14); border-radius: 2px; }
 .trend i[aria-label$="No data"] { background: rgba(255,255,255,.14); border-radius: 2px; }
 .trend-tooltip { position: fixed; z-index: 100; max-width: 220px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.2); border-radius: 9px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.3; white-space: nowrap; pointer-events: none; transform-origin: bottom left; }
 .provider-status-tooltip { position: fixed; z-index: 100; max-width: 230px; padding: 8px 10px; border: 1px solid rgba(244,183,77,.42); border-radius: 8px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.35; pointer-events: none; transform-origin: top left; }

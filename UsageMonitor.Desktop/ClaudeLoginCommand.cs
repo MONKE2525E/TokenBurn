@@ -13,9 +13,12 @@ public static class ClaudeLoginCommand
 {
     private static readonly string[] CommandNames = ["claude.exe", "claude.cmd", "claude.bat", "claude.ps1"];
 
-    public static ProcessStartInfo CreateStartInfo()
+    public static ProcessStartInfo CreateStartInfo() => CreateStartInfo(ResolveCommandPath());
+
+    /// <summary>Builds the launcher for an explicitly resolved command path. Kept internal so
+    /// tests can exercise every shim variant deterministically without touching PATH.</summary>
+    internal static ProcessStartInfo CreateStartInfo(string? command)
     {
-        var command = ResolveCommandPath();
         if (string.IsNullOrWhiteSpace(command))
         {
             return new ProcessStartInfo
@@ -60,16 +63,20 @@ public static class ClaudeLoginCommand
         return direct;
     }
 
-    public static string? ResolveCommandPath()
+    public static string? ResolveCommandPath() => ResolveCommandPath(Environment.GetEnvironmentVariable("PATH"));
+
+    /// <summary>Walks an explicit PATH-style value; internal so tests can pin resolution logic.</summary>
+    internal static string? ResolveCommandPath(string? path) => FindInPath(path, CommandNames);
+
+    private static string? FindInPath(string? path, string[] names)
     {
-        var path = Environment.GetEnvironmentVariable("PATH");
         if (string.IsNullOrWhiteSpace(path)) return null;
 
         foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var root = directory.Trim().Trim('"');
             if (root.Length == 0) continue;
-            foreach (var name in CommandNames)
+            foreach (var name in names)
             {
                 try
                 {
@@ -86,25 +93,8 @@ public static class ClaudeLoginCommand
 
     private static string ResolvePowerShell()
     {
-        var path = Environment.GetEnvironmentVariable("PATH");
-        if (!string.IsNullOrWhiteSpace(path))
-        {
-            foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                var root = directory.Trim().Trim('"');
-                foreach (var name in new[] { "pwsh.exe", "powershell.exe" })
-                {
-                    try
-                    {
-                        var candidate = Path.Combine(root, name);
-                        if (File.Exists(candidate)) return candidate;
-                    }
-                    catch (ArgumentException) { }
-                    catch (NotSupportedException) { }
-                }
-            }
-        }
-
+        var found = FindInPath(Environment.GetEnvironmentVariable("PATH"), ["pwsh.exe", "powershell.exe"]);
+        if (found is not null) return found;
         var systemPowerShell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
         return File.Exists(systemPowerShell) ? systemPowerShell : "powershell.exe";
     }

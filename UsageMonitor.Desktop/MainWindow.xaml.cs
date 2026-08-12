@@ -46,6 +46,7 @@ public partial class MainWindow : Window
     private readonly System.Windows.Threading.DispatcherTimer _refreshTimer;
     private Task? _refreshTask;
     private bool _refreshInFlight;
+    private bool _forceRefreshQueued;
     private bool _refreshLoopStarted;
     // Keep the last successful provider envelope in memory so an auth or network failure cannot
     // erase a previously visible quota bar during the next five-minute refresh.
@@ -57,6 +58,7 @@ public partial class MainWindow : Window
     private DateTimeOffset _nextRefreshAt = DateTimeOffset.Now;
     internal IUsageProviderCatalog? SnapshotCatalog { get; private set; }
     internal IUsageCache? SnapshotCache => _cache;
+    internal CoreUsageSnapshotSource? SnapshotSource => _snapshotSource;
     private bool _allowShutdown;
 
     public MainWindow()
@@ -146,7 +148,8 @@ public partial class MainWindow : Window
             }
             UpdateTaskbarSurfaceStatus(state);
         };
-        _modelCatalog = new CachedModelCatalog(pricingDirectory: UsageMonitorPaths.Current.PricingDirectory);
+        var logger = FileDiagnosticsLogger.Default;
+        _modelCatalog = new CachedModelCatalog(pricingDirectory: UsageMonitorPaths.Current.PricingDirectory, logger: logger);
         _ = WarmModelCatalogAsync(_modelCatalog);
         var catalog = ProviderCatalog.CreateDefault([
             new CodexProvider(catalog: _modelCatalog),
@@ -155,7 +158,6 @@ public partial class MainWindow : Window
             new OpenCodeProvider()
         ]);
         SnapshotCatalog = catalog;
-        var logger = new FileDiagnosticsLogger();
         _cache = new JsonFileUsageCache(logger: logger);
         _secretStore = new CredentialManagerSecretStore(logger: logger);
         _snapshotSource = new CoreUsageSnapshotSource(catalog, _cache,
@@ -223,32 +225,59 @@ public partial class MainWindow : Window
     public void ShowFromTray() => ShowFromTray(null);
 
     public void ShowFromTray(DrawingPoint? requestedAnchor, bool useWidgetAvoidRect = true)
+        => _ = ShowFromTrayAsync(requestedAnchor, useWidgetAvoidRect);
+
+    /// <summary>
+    /// Opens the compact Tauri popup at the requested anchor. Returns true when the popup host
+    /// accepted the show. The wait for a slow first launch happens off the UI thread, so the
+    /// taskbar-strip WndProc (and with it the whole dispatcher) is never blocked.
+    /// </summary>
+    public async Task<bool> ShowFromTrayAsync(DrawingPoint? requestedAnchor, bool useWidgetAvoidRect = true)
     {
-        if (_tauriPopup is not null &&
-            _tauriPopup.TryShow(requestedAnchor ?? ResolvePopupAnchor(), useWidgetAvoidRect ? GetWidgetAvoidRect() : null))
+        try
         {
-            // The WPF dashboard remains loaded as a fallback and for settings, but it must not
-            // compete with the Tauri popover or create a second taskbar button.
-            if (IsVisible && WindowState == WindowState.Normal)
-                WindowState = WindowState.Minimized;
-            return;
+            if (_tauriPopup is not null &&
+                await _tauriPopup.TryShowAsync(requestedAnchor ?? ResolvePopupAnchor(),
+                    useWidgetAvoidRect ? GetWidgetAvoidRect() : null).ConfigureAwait(true))
+            {
+                // The WPF dashboard remains loaded as a fallback and for settings, but it must not
+                // compete with the Tauri popover or create a second taskbar button.
+                if (IsVisible && WindowState == WindowState.Normal)
+                    WindowState = WindowState.Minimized;
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            FileDiagnosticsLogger.Default.Warning("The compact dashboard could not be shown", exception: exception);
         }
         // Do not reveal the legacy WPF dashboard. It is an integration host for the native
         // taskbar strip and tray only; presenting it as a fallback made two wildly different
-        // dashboards compete for the same action.
-        _tray?.ShowFallbackNotification("The compact dashboard is starting. Try again in a moment.");
+        // dashboards compete for the same action. The notification fires on both a failed show
+        // and a thrown exception so the user always gets feedback.
+        _tray?.ShowFallbackNotification("The compact dashboard could not be opened. TokenBurn is still running in the tray; try again in a moment.");
+        return false;
     }
 
-    internal bool TryToggleTauriPopup(DrawingPoint anchor, bool useWidgetAvoidRect = true)
-        => _tauriPopup is not null && _tauriPopup.TryToggle(anchor, useWidgetAvoidRect ? GetWidgetAvoidRect() : null);
+    internal Task<bool> TryToggleTauriPopupAsync(DrawingPoint anchor, bool useWidgetAvoidRect = true)
+        => _tauriPopup is not null
+            ? _tauriPopup.TryToggleAsync(anchor, useWidgetAvoidRect ? GetWidgetAvoidRect() : null)
+            : Task.FromResult(false);
 
-    internal void ToggleFromTaskbarIndicator(DrawingPoint anchor)
+    internal async void ToggleFromTaskbarIndicator(DrawingPoint anchor)
     {
-        // Use the same native toggle as the tray. Focus loss can hide the popup just before this
-        // mouse-up reaches the overlay; the Rust-side suppression window treats that race as one
-        // dismissal instead of hiding and immediately showing the popup again.
-        if (!TryToggleTauriPopup(anchor))
-            ShowFromTray(anchor);
+        try
+        {
+            // Use the same native toggle as the tray. Focus loss can hide the popup just before this
+            // mouse-up reaches the overlay; the Rust-side suppression window treats that race as one
+            // dismissal instead of hiding and immediately showing the popup again.
+            if (!await TryToggleTauriPopupAsync(anchor).ConfigureAwait(true))
+                await ShowFromTrayAsync(anchor).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            FileDiagnosticsLogger.Default.Warning("The taskbar indicator could not toggle the popup", exception: exception);
+        }
     }
 
     private DrawingPoint ResolvePopupAnchor()
@@ -472,7 +501,17 @@ public partial class MainWindow : Window
 
     internal Task RefreshDataAsync(bool force = false, string? reason = null)
     {
-        if (_refreshTask is { IsCompleted: false }) return _refreshTask;
+        if (_refreshTask is { IsCompleted: false })
+        {
+            // A popup refresh or post-login refresh can race the five-minute schedule. Joining the
+            // in-flight run is correct; record it so a support bundle can tell the two apart.
+            FileDiagnosticsLogger.Default.Debug("Refresh already in flight; joining the existing refresh",
+                new Dictionary<string, object?> { ["reason"] = reason, ["force"] = force });
+            // A force request must not silently degrade into the joined (possibly cache-served)
+            // run: promote the intent so a real network refresh follows once this one finishes.
+            if (force) _forceRefreshQueued = true;
+            return _refreshTask;
+        }
         _refreshTask = RefreshDataCoreAsync(force, reason);
         return _refreshTask;
     }
@@ -483,13 +522,20 @@ public partial class MainWindow : Window
         RefreshButton.IsEnabled = false;
         UpdateRefreshCountdown();
         var stopwatch = Stopwatch.StartNew();
-        new FileDiagnosticsLogger().Info("Provider refresh started",
-            new Dictionary<string, object?> { ["force"] = force, ["reason"] = reason });
+        // One id links the started/completed envelope with every provider and scanner entry.
+        var refreshId = Guid.NewGuid().ToString("N")[..8];
+        FileDiagnosticsLogger.Default.Info("Provider refresh started",
+            new Dictionary<string, object?>
+            {
+                ["force"] = force,
+                ["reason"] = reason,
+                ["refreshId"] = refreshId
+            });
         try
         {
             var snapshots = _snapshotSource is null
                 ? Array.Empty<UsageSnapshotData>()
-                : await _snapshotSource.GetSnapshotsAsync(null, force);
+                : await _snapshotSource.GetSnapshotsAsync(null, force, cancellationToken: default, refreshId: refreshId);
             var snapshotFetchMs = stopwatch.ElapsedMilliseconds;
             var effectiveSnapshots = snapshots.Select(snapshot =>
             {
@@ -572,34 +618,49 @@ public partial class MainWindow : Window
             _taskbar?.UpdateMetrics(statusMetrics);
             var taskbarMs = taskbarStopwatch.ElapsedMilliseconds;
             LogProviderResults(effectiveSnapshots, stopwatch.ElapsedMilliseconds, statusMetrics.Count,
-                snapshotFetchMs, taskbarMs);
+                snapshotFetchMs, taskbarMs, refreshId);
         }
         catch (Exception ex)
         {
             // Back off briefly after a failed request, while keeping the last good data visible.
             _nextRefreshAt = DateTimeOffset.Now.AddMinutes(1);
             UpdateRefreshCountdown();
-            _tray?.ShowFallbackNotification("Provider refresh failed. Check the local diagnostics log.");
-            new FileDiagnosticsLogger().Warning("Desktop refresh failed",
-                new Dictionary<string, object?> { ["force"] = force, ["reason"] = reason, ["elapsedMs"] = stopwatch.ElapsedMilliseconds }, ex);
+            _tray?.ShowFallbackNotification("TokenBurn could not refresh usage data. Your last known values are still shown and it will retry automatically.");
+            FileDiagnosticsLogger.Default.Warning("Desktop refresh failed",
+                new Dictionary<string, object?>
+                {
+                    ["force"] = force,
+                    ["reason"] = reason,
+                    ["refreshId"] = refreshId,
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                }, ex);
         }
         finally
         {
             _refreshInFlight = false;
             RefreshButton.IsEnabled = true;
+            // Drain a force request that joined this run: the joined run may have served cached
+            // data, so the promoted intent must still get its real network refresh. One promote
+            // per in-flight run keeps the chain bounded (a new force must arrive to extend it).
+            if (_forceRefreshQueued)
+            {
+                _forceRefreshQueued = false;
+                _refreshTask = RefreshDataCoreAsync(true, $"{reason ?? "refresh"}-promoted");
+            }
         }
     }
 
     private static void LogProviderResults(IReadOnlyList<UsageSnapshotData> snapshots, long elapsedMs, int taskbarMetrics,
-        long snapshotFetchMs, long taskbarUpdateMs)
+        long snapshotFetchMs, long taskbarUpdateMs, string refreshId)
     {
-        new FileDiagnosticsLogger().Info("Provider refresh completed",
+        FileDiagnosticsLogger.Default.Info("Provider refresh completed",
             new Dictionary<string, object?>
             {
                 ["elapsedMs"] = elapsedMs,
                 ["snapshotFetchMs"] = snapshotFetchMs,
                 ["taskbarUpdateMs"] = taskbarUpdateMs,
                 ["taskbarMetrics"] = taskbarMetrics,
+                ["refreshId"] = refreshId,
                 ["providers"] = snapshots.Select(snapshot => new Dictionary<string, object?>
                 {
                     ["providerId"] = snapshot.ProviderId,
@@ -645,7 +706,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException or JsonException)
         {
-            new FileDiagnosticsLogger().Warning("Model catalog refresh failed", exception: ex);
+            FileDiagnosticsLogger.Default.Warning("Model catalog refresh failed", exception: ex);
         }
     }
 
@@ -671,8 +732,7 @@ public partial class MainWindow : Window
             var taskbar = placement.GetTaskbarBounds(taskbarHandle);
             var working = screen.WorkingArea;
             var hwnd = new WindowInteropHelper(this).Handle;
-            var dpi = hwnd == IntPtr.Zero ? 96u : NativeMethods.GetDpiForWindow(hwnd);
-            var scale = dpi is < 96 or > 480 ? 1d : dpi / 96d;
+            var scale = DpiScale(hwnd);
             var width = (ActualWidth > 0 ? ActualWidth : Width) * scale;
             var height = (ActualHeight > 0 ? ActualHeight : Height) * scale;
             var popup = PopupPlacement.NearTaskbar(
@@ -687,9 +747,17 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            new FileDiagnosticsLogger().Debug("Taskbar popover positioning was unavailable; retaining the previous window position.",
+            FileDiagnosticsLogger.Default.Debug("Taskbar popover positioning was unavailable; retaining the previous window position.",
                 new Dictionary<string, object?> { ["exceptionType"] = ex.GetType().Name });
         }
+    }
+
+    /// <summary>Physical-to-logical scale factor for this window's monitor, clamped to a sane
+    /// range so a broken DPI report cannot explode a popover size.</summary>
+    private static double DpiScale(IntPtr hwnd)
+    {
+        var dpi = hwnd == IntPtr.Zero ? 96u : NativeMethods.GetDpiForWindow(hwnd);
+        return dpi is < 96 or > 480 ? 1d : dpi / 96d;
     }
 
     private bool TryPositionPopoverNearCursor()
@@ -704,8 +772,7 @@ public partial class MainWindow : Window
         if (taskbar.IsEmpty || !taskbar.Contains(point)) return false;
 
         var hwnd = new WindowInteropHelper(this).Handle;
-        var dpi = hwnd == IntPtr.Zero ? 96u : NativeMethods.GetDpiForWindow(hwnd);
-        var scale = dpi is < 96 or > 480 ? 1d : dpi / 96d;
+        var scale = DpiScale(hwnd);
         var width = (ActualWidth > 0 ? ActualWidth : Width) * scale;
         var height = (ActualHeight > 0 ? ActualHeight : Height) * scale;
         var working = screen.WorkingArea;
@@ -728,8 +795,7 @@ public partial class MainWindow : Window
         var taskbar = placement.GetTaskbarBounds(placement.GetTaskbarHandle(screen));
         var working = screen.WorkingArea;
         var hwnd = new WindowInteropHelper(this).Handle;
-        var dpi = hwnd == IntPtr.Zero ? 96u : NativeMethods.GetDpiForWindow(hwnd);
-        var scale = dpi is < 96 or > 480 ? 1d : dpi / 96d;
+        var scale = DpiScale(hwnd);
         var width = (ActualWidth > 0 ? ActualWidth : Width) * scale;
         var height = (ActualHeight > 0 ? ActualHeight : Height) * scale;
         var popup = PopupPlacement.NearWidget(
@@ -786,12 +852,10 @@ public partial class MainWindow : Window
             progress is null ? 0 : Math.Clamp(progress.Limit <= 0 ? 0 : progress.Used / progress.Limit, 0, 1), provider.Accent, metrics);
         var canRepairClaude = provider.DisplayName.Equals("Claude Code", StringComparison.OrdinalIgnoreCase) &&
             hasError &&
-            Regex.IsMatch(snapshot.Error ?? string.Empty, "auth|login|expired|signed out|not configured",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            ReauthActionResolver.ShouldOfferReauth(snapshot.ErrorCategory, snapshot.Error);
         var canRepairAntigravity = provider.DisplayName.Equals("Antigravity", StringComparison.OrdinalIgnoreCase) &&
             hasError &&
-            Regex.IsMatch(snapshot.Error ?? string.Empty, "sign.?in|expired|auth|login",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            ReauthActionResolver.ShouldOfferReauth(snapshot.ErrorCategory, snapshot.Error);
         var hasAction = canRepairClaude || canRepairAntigravity;
         return card with
         {
@@ -844,9 +908,13 @@ public partial class MainWindow : Window
     {
         if (process is null) return;
         process.EnableRaisingEvents = true;
+        // The Exited handler runs on a thread-pool thread; marshal back to the UI dispatcher.
+        // The Process is disposed once its exit has been observed so the native handle does not
+        // linger for the rest of the session.
         process.Exited += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
             if (!_refreshInFlight) RefreshData(force: true, reason: "post-login");
+            try { process.Dispose(); } catch { }
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
@@ -1014,17 +1082,41 @@ public partial class MainWindow : Window
     /// Falls back to the native dialog only when the popup itself is turned off.
     /// </summary>
     public void ShowSettingsPage(DrawingPoint? anchor = null, bool useWidgetAvoidRect = true)
+        => _ = ShowSettingsPageAsync(anchor, useWidgetAvoidRect);
+
+    private async Task ShowSettingsPageAsync(DrawingPoint? anchor, bool useWidgetAvoidRect)
     {
-        if (_tauriPopup is not null && _tauriPopup.TryShow(anchor ?? ResolvePopupAnchor(), useWidgetAvoidRect ? GetWidgetAvoidRect() : null, "settings"))
-            return;
-        _tray?.ShowFallbackNotification("The compact dashboard is starting. Try again in a moment.");
+        try
+        {
+            if (_tauriPopup is not null &&
+                await _tauriPopup.TryShowAsync(anchor ?? ResolvePopupAnchor(),
+                    useWidgetAvoidRect ? GetWidgetAvoidRect() : null, "settings").ConfigureAwait(true))
+                return;
+        }
+        catch (Exception exception)
+        {
+            FileDiagnosticsLogger.Default.Warning("The settings page could not be shown", exception: exception);
+        }
+        _tray?.ShowFallbackNotification("The compact dashboard could not be opened. TokenBurn is still running in the tray; try again in a moment.");
     }
 
     public void ShowCustomizePage(DrawingPoint? anchor = null, bool useWidgetAvoidRect = true)
+        => _ = ShowCustomizePageAsync(anchor, useWidgetAvoidRect);
+
+    private async Task ShowCustomizePageAsync(DrawingPoint? anchor, bool useWidgetAvoidRect)
     {
-        if (_tauriPopup is not null && _tauriPopup.TryShow(anchor ?? ResolvePopupAnchor(), useWidgetAvoidRect ? GetWidgetAvoidRect() : null, "customize"))
-            return;
-        _tray?.ShowFallbackNotification("The compact dashboard is starting. Try again in a moment.");
+        try
+        {
+            if (_tauriPopup is not null &&
+                await _tauriPopup.TryShowAsync(anchor ?? ResolvePopupAnchor(),
+                    useWidgetAvoidRect ? GetWidgetAvoidRect() : null, "customize").ConfigureAwait(true))
+                return;
+        }
+        catch (Exception exception)
+        {
+            FileDiagnosticsLogger.Default.Warning("The customize page could not be shown", exception: exception);
+        }
+        _tray?.ShowFallbackNotification("The compact dashboard could not be opened. TokenBurn is still running in the tray; try again in a moment.");
     }
 
     public void ShowSettings()
@@ -1168,7 +1260,13 @@ public partial class MainWindow : Window
         {
             generatedAt = DateTimeOffset.UtcNow,
             sessionStartedAt = _sessionStartedAt,
+            appVersion = ProductInfo.Version,
+            osDescription = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+            processArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+            runtimeVersion = Environment.Version.ToString(),
             logTail = ReadDiagnosticsLogTail(),
+            logFile = DescribeFile(UsageMonitorPaths.Current.DiagnosticsLogFile),
+            taskbarStripLog = DescribeFile(UsageMonitorPaths.Current.TaskbarStripLogFile),
             refresh = new
             {
                 nextRefreshAt = _nextRefreshAt,
@@ -1291,7 +1389,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            new FileDiagnosticsLogger().Warning("Share screenshot export failed", exception: ex);
+            FileDiagnosticsLogger.Default.Warning("Share screenshot export failed", exception: ex);
             System.Windows.MessageBox.Show("The share card could not be exported.", "TokenBurn", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }

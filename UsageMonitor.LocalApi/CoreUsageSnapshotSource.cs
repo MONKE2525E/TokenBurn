@@ -1,7 +1,6 @@
 using UsageMonitor.Core;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Text.RegularExpressions;
 
 namespace UsageMonitor.LocalApi;
 
@@ -21,6 +20,14 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     private static readonly ConcurrentDictionary<string, (ProviderSnapshot Snapshot, DateTimeOffset At)> _lastAuthFailures =
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan AuthFailureVisibilityWindow = TimeSpan.FromMinutes(10);
+    // One in-flight network refresh per provider, shared by every caller of this source (the
+    // desktop refresh loop, API force requests from the popup/CLI, and cache-retry paths). A
+    // duplicate refresh — a force landing while the scheduled refresh is running — joins the
+    // shared run instead of hitting the provider twice. The shared run deliberately uses no
+    // caller token so one caller's cancellation cannot abort the work everyone else is waiting
+    // on, mirroring the cache's cold-miss coordinator.
+    private readonly ConcurrentDictionary<string, Task<ProviderSnapshot?>> _inFlightRefreshes =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public CoreUsageSnapshotSource(IUsageProviderCatalog catalog, IUsageCache? cache = null,
         ProviderContext? context = null)
@@ -41,8 +48,19 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     }
 
     public async Task<IReadOnlyList<UsageSnapshotData>> GetSnapshotsAsync(string? providerId, bool force,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? refreshId = null)
     {
+        // One correlation identifier per refresh operation. The logger is wrapped so provider and
+        // scanner diagnostics inherit the id without every provider needing to pass it around.
+        var id = string.IsNullOrWhiteSpace(refreshId) ? Guid.NewGuid().ToString("N")[..8] : refreshId;
+        var context = _context with
+        {
+            Now = DateTimeOffset.UtcNow,
+            ForceRefresh = force,
+            RefreshId = id,
+            Logger = CorrelatingDiagnosticsLogger.Wrap(_context.Logger, id)
+        };
+
         var providers = _catalog.Providers.AsEnumerable();
         if (!string.IsNullOrWhiteSpace(providerId))
         {
@@ -50,12 +68,43 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
             providers = providers.Where(p => string.Equals(p.Descriptor.Id, resolved, StringComparison.OrdinalIgnoreCase));
         }
 
-        var tasks = providers.Select(p => ReadProviderAsync(p, force, cancellationToken));
+        var tasks = providers.Select(p => ReadProviderAsync(p, context, cancellationToken));
         var snapshots = await Task.WhenAll(tasks).ConfigureAwait(false);
         return snapshots.Where(s => s is not null).Cast<UsageSnapshotData>().ToArray();
     }
 
-    private async Task<UsageSnapshotData?> ReadProviderAsync(IUsageProvider provider, bool force,
+    /// <summary>
+    /// Joins any in-flight network refresh of this provider, or starts one. The shared run is
+    /// token-free (see the field doc); the caller's own cancellation is honored by the await.
+    /// </summary>
+    private Task<ProviderSnapshot?> SharedRefreshAsync(IUsageProvider provider, ProviderContext context)
+    {
+        var key = provider.Descriptor.Id;
+        while (true)
+        {
+            if (_inFlightRefreshes.TryGetValue(key, out var inFlight)) return inFlight;
+            var completion = new TaskCompletionSource<ProviderSnapshot?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var shared = completion.Task;
+            if (!_inFlightRefreshes.TryAdd(key, shared)) continue;
+            _ = Task.Run(async () =>
+            {
+                ProviderSnapshot? result = null;
+                try
+                {
+                    result = await RefreshAsync(provider, context, CancellationToken.None).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _inFlightRefreshes.TryRemove(new KeyValuePair<string, Task<ProviderSnapshot?>>(key, shared));
+                    completion.TrySetResult(result);
+                }
+            });
+            return shared;
+        }
+    }
+
+    private async Task<UsageSnapshotData?> ReadProviderAsync(IUsageProvider provider, ProviderContext context,
         CancellationToken cancellationToken)
     {
         var key = $"provider:{provider.Descriptor.Id}";
@@ -64,9 +113,10 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         try
         {
             ProviderSnapshot? snapshot;
-            if (force || _cache is null)
+            if (context.ForceRefresh || _cache is null)
             {
-                snapshot = await RefreshAsync(provider, force, cancellationToken).ConfigureAwait(false);
+                snapshot = await SharedRefreshAsync(provider, context)
+                    .WaitAsync(cancellationToken).ConfigureAwait(false);
                 var usedFallbackCache = false;
                 if (snapshot is null && _cache is not null)
                 {
@@ -101,7 +151,7 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
             else
             {
                 var result = await _cache.GetAsync(key,
-                    ct => RefreshAndCacheAsync(provider, key, ct), cancellationToken).ConfigureAwait(false);
+                    ct => RefreshAndCacheAsync(provider, key, context, ct), cancellationToken).ConfigureAwait(false);
                 snapshot = result.Value;
                 servedFrom = result.IsFromCache ? "cache" : "network";
                 if (snapshot?.ErrorCategory == ProviderErrorCategory.RateLimited)
@@ -118,7 +168,8 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
                     // Older versions could have persisted an error envelope. Do not keep serving that
                     // fossilized failure for five minutes; retry once and only cache a successful value.
                     var cached = snapshot;
-                    var refreshed = await RefreshAsync(provider, false, cancellationToken).ConfigureAwait(false);
+                    var refreshed = await SharedRefreshAsync(provider, context with { ForceRefresh = false })
+                        .WaitAsync(cancellationToken).ConfigureAwait(false);
                     servedFrom = "network";
                     if (refreshed is not null && IsUsableCachedSnapshot(refreshed))
                     {
@@ -167,11 +218,11 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         }
         finally
         {
-            _context.Logger?.Info("Provider read completed",
+            context.Logger?.Info("Provider read completed",
                 new Dictionary<string, object?>
                 {
                     ["providerId"] = provider.Descriptor.Id,
-                    ["force"] = force,
+                    ["force"] = context.ForceRefresh,
                     ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
                     ["servedFrom"] = servedFrom
                 });
@@ -179,20 +230,19 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     }
 
     private async Task<ProviderSnapshot?> RefreshAndCacheAsync(IUsageProvider provider, string key,
-        CancellationToken cancellationToken)
+        ProviderContext context, CancellationToken cancellationToken)
     {
-        var snapshot = await RefreshAsync(provider, false, cancellationToken).ConfigureAwait(false);
+        var snapshot = await RefreshAsync(provider, context with { ForceRefresh = false }, cancellationToken).ConfigureAwait(false);
         if (snapshot is not null && snapshot.ErrorCategory is null && _cache is not null)
             await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
         return snapshot;
     }
 
-    private async Task<ProviderSnapshot?> RefreshAsync(IUsageProvider provider, bool force,
+    private async Task<ProviderSnapshot?> RefreshAsync(IUsageProvider provider, ProviderContext context,
         CancellationToken cancellationToken)
     {
         try
         {
-            var context = _context with { Now = DateTimeOffset.UtcNow, ForceRefresh = force };
             var snapshot = await provider.RefreshAsync(context, cancellationToken).ConfigureAwait(false);
             if (snapshot is not null)
             {
@@ -212,7 +262,7 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
             // A failed refresh never blanks a previous cached value, but it must remain visible as
             // a redacted provider error. Returning null here used to turn real bugs into a vague
             // "refresh failed" warning and made the root cause impossible to diagnose.
-            _context.Logger?.Warning("Provider refresh failed", exception: ex);
+            context.Logger?.Warning("Provider refresh failed", exception: ex);
             return ProviderSnapshot.Error(provider.Descriptor, ex, ProviderErrorCategory.Other);
         }
     }
@@ -225,10 +275,10 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         snapshot.RefreshedAt)
     {
         Error = snapshot.ErrorCategory is not null
-            ? RedactError(snapshot.Lines.FirstOrDefault(line => line.IsError)?.Text ?? "Provider refresh failed.")
+            ? SensitiveDataRedactor.Redact(snapshot.Lines.FirstOrDefault(line => line.IsError)?.Text ?? "Provider refresh failed.")
             : null,
         ErrorCategory = snapshot.ErrorCategory?.ToString(),
-        Warning = snapshot.Warning is null ? null : RedactError(snapshot.Warning),
+        Warning = snapshot.Warning is null ? null : SensitiveDataRedactor.Redact(snapshot.Warning),
         UsageHistory = snapshot.UsageHistory is null
             ? null
             : new UsageHistoryData(snapshot.UsageHistory.Points.Select(point =>
@@ -264,10 +314,6 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
                 .ToArray(),
             Warning = message
         };
-
-    private static string RedactError(string message) => Regex.Replace(message,
-        @"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[redacted-email]",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static UsageMetricData Convert(MetricLine line) => line.Type switch
     {
