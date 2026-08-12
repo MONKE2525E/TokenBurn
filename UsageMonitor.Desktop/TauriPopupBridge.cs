@@ -458,7 +458,10 @@ public sealed class TauriPopupBridge : IDisposable
         var path = page is null
             ? $"/show?x={anchor.X}&y={anchor.Y}{avoidQuery}"
             : $"/show?x={anchor.X}&y={anchor.Y}&page={page}{avoidQuery}";
-        return await TryShowPathAsync(path).ConfigureAwait(true);
+        // ConfigureAwait(false): the result is a plain bool; the synchronous overloads below
+        // block on this task from a UI thread, and capturing the caller's SynchronizationContext
+        // would deadlock them when that context cannot run the continuation.
+        return await TryShowPathAsync(path).ConfigureAwait(false);
     }
 
     /// <summary>

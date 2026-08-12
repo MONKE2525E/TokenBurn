@@ -286,13 +286,20 @@ public sealed class DesktopControlServerSecurityTests
         await stream.FlushAsync().ConfigureAwait(false);
         client.Client.ReceiveTimeout = 5000;
         using var reader = new StreamReader(stream, Encoding.ASCII, false, 4096, leaveOpen: true);
+        // Socket receive timeouts do not bound StreamReader async reads, so an explicit deadline
+        // keeps a stalling server from hanging the whole test run.
+        using var readDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try
         {
-            return await reader.ReadToEndAsync().ConfigureAwait(false);
+            return await reader.ReadToEndAsync(readDeadline.Token).ConfigureAwait(false);
         }
         catch (IOException)
         {
             // A connection dropped by the server is a valid outcome for framing abuse.
+            return string.Empty;
+        }
+        catch (OperationCanceledException)
+        {
             return string.Empty;
         }
     }

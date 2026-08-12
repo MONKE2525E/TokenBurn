@@ -101,6 +101,7 @@ public static class LoopbackRequestGate
     {
         if (string.IsNullOrWhiteSpace(host)) return true;
         var candidate = host.Trim();
+        string? portSuffix = null;
         if (candidate.StartsWith("[", StringComparison.Ordinal))
         {
             var end = candidate.IndexOf(']');
@@ -110,6 +111,7 @@ public static class LoopbackRequestGate
             // rejected rather than trimmed into one.
             var remainder = candidate[(end + 1)..];
             if (remainder.Length > 0 && !remainder.StartsWith(":", StringComparison.Ordinal)) return false;
+            portSuffix = remainder;
             candidate = candidate[..(end + 1)];
         }
         else if (candidate.Count(character => character == ':') > 1)
@@ -121,8 +123,16 @@ public static class LoopbackRequestGate
         else
         {
             var colon = candidate.IndexOf(':');
-            if (colon >= 0) candidate = candidate[..colon];
+            if (colon >= 0)
+            {
+                portSuffix = candidate[colon..];
+                candidate = candidate[..colon];
+            }
         }
+        // A port suffix, when present, must be a colon followed only by digits: anything else is
+        // a malformed Host header, not a loopback host with a port.
+        if (portSuffix is not null &&
+            (portSuffix.Length < 2 || !portSuffix[1..].All(char.IsAsciiDigit))) return false;
         return AllowedHostNames.Contains(candidate, StringComparer.OrdinalIgnoreCase);
     }
 }
