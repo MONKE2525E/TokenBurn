@@ -205,7 +205,12 @@ public sealed class OpenCodeProvider : IUsageProvider
         var nowUtc = now.ToUniversalTime();
         var sessionStart = nowUtc.AddHours(-5);
         var currentSession = goRows.Where(row => row.Timestamp >= sessionStart && row.Timestamp < nowUtc).ToArray();
-        var sessionResetsAt = (currentSession.Length == 0 ? nowUtc : currentSession.Min(row => row.Timestamp)).AddHours(5);
+        // The 5-hour session window boundary is derived from the first message in the current
+        // window. With no usage at all there is no boundary to report: a perpetual "resets in
+        // five hours" countdown would be fabricated data, so the meter gets no reset time.
+        var sessionResetsAt = currentSession.Length == 0
+            ? (DateTimeOffset?)null
+            : currentSession.Min(row => row.Timestamp).AddHours(5);
 
         var weekStart = StartOfUtcWeek(nowUtc);
         var weekEnd = weekStart.AddDays(7);
@@ -258,7 +263,8 @@ public sealed record OpenCodeUsageRow(
     double CacheWriteTokens = 0,
     double OutputTokens = 0,
     double ReasoningTokens = 0,
-    OpenCodeCostStatus CostStatus = OpenCodeCostStatus.ProviderReported);
+    OpenCodeCostStatus CostStatus = OpenCodeCostStatus.ProviderReported,
+    string? MessageId = null);
 
 public sealed record OpenCodeUsageScan(bool HasDatabase, bool HasGoCredential,
     DateTimeOffset? FirstGoUsageAt, IReadOnlyList<OpenCodeUsageRow> Rows)
@@ -322,6 +328,10 @@ public sealed class OpenCodeUsageScanner
 
         var cutoff = now.ToUniversalTime().AddDays(-HistoryDays).ToUnixTimeMilliseconds();
         var rows = new List<OpenCodeUsageRow>();
+        // A message can appear in more than one discovered database (release-channel copies,
+        // portable installs alongside default locations). Deduplicate by the message id the
+        // database itself persists so overlapping copies are never double-counted.
+        var seenMessageIds = new HashSet<string>(StringComparer.Ordinal);
         DateTimeOffset? firstGoUsageAt = null;
         var successfulReads = 0;
         var unsupportedSchemas = 0;
@@ -339,7 +349,11 @@ public sealed class OpenCodeUsageScanner
                 }.ToString());
                 connection.Open();
                 var table = DiscoverMessageTable(connection);
-                rows.AddRange(ReadRows(connection, table, cutoff));
+                foreach (var row in ReadRows(connection, table, cutoff))
+                {
+                    if (row.MessageId is { Length: > 0 } id && !seenMessageIds.Add(id)) continue;
+                    rows.Add(row);
+                }
                 var candidate = ReadFirstGoUsage(connection, table);
                 if (candidate is not null && (firstGoUsageAt is null || candidate < firstGoUsageAt)) firstGoUsageAt = candidate;
                 successfulReads++;
@@ -379,7 +393,7 @@ public sealed class OpenCodeUsageScanner
             if (!tables.Contains(tableName)) continue;
             var columns = ReadColumns(connection, tableName);
             if (columns.Contains("time_created") && columns.Contains("data"))
-                return new MessageTableDescriptor(tableName);
+                return new MessageTableDescriptor(tableName, columns.Contains("id"));
         }
 
         throw new OpenCodeDatabaseException("OpenCode message table schema is unsupported.");
@@ -426,6 +440,9 @@ public sealed class OpenCodeUsageScanner
     private static IEnumerable<OpenCodeUsageRow> ReadRows(
         SqliteConnection connection, MessageTableDescriptor table, long cutoff)
     {
+        // The message id lives in the table's own id column (OpenCode omits "id" from the data
+        // JSON), with json_extract(data,'$.id') kept as a fallback for sanitized or legacy copies.
+        var idColumn = table.HasIdColumn ? $", {QuoteIdentifier(table.Name)}.id" : string.Empty;
         using var command = connection.CreateCommand();
         command.CommandText = $"""
             SELECT time_created,
@@ -437,7 +454,9 @@ public sealed class OpenCodeUsageScanner
                    json_extract(data, '$.tokens.output'),
                    json_extract(data, '$.tokens.reasoning'),
                    json_extract(data, '$.providerID'),
-                   json_extract(data, '$.modelID')
+                   json_extract(data, '$.modelID'),
+                   json_extract(data, '$.id')
+                   {idColumn}
             FROM {QuoteIdentifier(table.Name)}
             WHERE time_created >= $cutoff
               AND json_valid(data)
@@ -469,6 +488,9 @@ public sealed class OpenCodeUsageScanner
 
             var providerId = ReadText(reader.GetValue(8)) ?? string.Empty;
             var modelId = ReadText(reader.GetValue(9));
+            var dataId = ReadText(reader.GetValue(10));
+            var tableId = table.HasIdColumn ? ReadText(reader.GetValue(11)) : null;
+            var messageId = !string.IsNullOrWhiteSpace(tableId) ? tableId : dataId;
             yield return new OpenCodeUsageRow(
                 createdAt,
                 cost,
@@ -480,7 +502,8 @@ public sealed class OpenCodeUsageScanner
                 cacheWrite,
                 output,
                 reasoning,
-                hasCost ? OpenCodeCostStatus.ProviderReported : OpenCodeCostStatus.Unpriced);
+                hasCost ? OpenCodeCostStatus.ProviderReported : OpenCodeCostStatus.Unpriced,
+                messageId);
         }
     }
 
@@ -555,7 +578,7 @@ public sealed class OpenCodeUsageScanner
         return string.IsNullOrEmpty(trimmed) ? null : trimmed;
     }
 
-    private sealed record MessageTableDescriptor(string Name);
+    private sealed record MessageTableDescriptor(string Name, bool HasIdColumn);
 }
 
 public sealed class OpenCodeDatabaseException : Exception

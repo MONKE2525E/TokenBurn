@@ -1,15 +1,16 @@
-using System.Diagnostics;
-
 namespace UsageMonitor.Core.Providers.Claude;
 
 public sealed class ClaudeLogUsageScanner
 {
     private readonly IProviderFileSystem _files;
     private readonly IModelCatalog _catalog;
-    public ClaudeLogUsageScanner(IProviderFileSystem? files = null, IModelCatalog? catalog = null)
+    private readonly TimeZoneInfo _localTimeZone;
+    public ClaudeLogUsageScanner(IProviderFileSystem? files = null, IModelCatalog? catalog = null,
+        TimeZoneInfo? localTimeZone = null)
     {
         _files = files ?? new LocalProviderFileSystem();
         _catalog = catalog ?? new CachedModelCatalog();
+        _localTimeZone = localTimeZone ?? TimeZoneInfo.Local;
     }
 
     public static ProviderUsageHistory ScanDirectory(string claudeHome, DateTimeOffset since) => new ClaudeLogUsageScanner().Scan(claudeHome, since);
@@ -26,44 +27,9 @@ public sealed class ClaudeLogUsageScanner
     public ProviderUsageHistory Scan(string claudeHome, DateTimeOffset since,
         string? historyStoreDirectory, Action<HistoryScanReport>? report)
     {
-        var stopwatch = Stopwatch.StartNew();
-        var scanReport = new HistoryScanReport();
-        var store = string.IsNullOrWhiteSpace(historyStoreDirectory)
-            ? null
-            : new ProviderHistoryIndexStore(historyStoreDirectory);
-        var index = store?.TryLoad("claude-code") ?? new ProviderHistoryIndex();
-        if (store is not null)
-        {
-            var catalogFingerprint = HistorySourceFingerprint.Catalog(UsageMonitorPaths.Current.PricingDirectory);
-            if (index.CatalogFingerprint.Length > 0 && index.CatalogFingerprint != catalogFingerprint)
-                index = new ProviderHistoryIndex { CatalogFingerprint = catalogFingerprint };
-            index.CatalogFingerprint = catalogFingerprint;
-        }
-
         var files = DiscoverFiles(claudeHome).ToArray();
-        scanReport.FilesDiscovered = files.Length;
-        var knownPaths = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-        foreach (var stalePath in index.Sources.Keys.Where(path => !knownPaths.Contains(path)).ToArray())
-            index.Sources.Remove(stalePath);
-
-        foreach (var path in files)
-        {
-            var fingerprint = store is null ? string.Empty : HistorySourceFingerprint.Of(path);
-            if (index.Sources.TryGetValue(path, out var existing) && existing.Fingerprint == fingerprint)
-            {
-                scanReport.FilesUnchanged++;
-                continue;
-            }
-            scanReport.FilesChanged++;
-            index.Sources[path] = ParseFile(path, since, scanReport);
-        }
-
-        var merged = HistoryIndexMerge.Merge(index.Sources.Values,
-            sinceDate: DateOnly.FromDateTime(since.LocalDateTime));
-        if (store is not null) store.Save("claude-code", index);
-        scanReport.Milliseconds = stopwatch.ElapsedMilliseconds;
-        report?.Invoke(scanReport);
-        return merged;
+        return IncrementalHistoryScan.Run("claude-code", files, historyStoreDirectory, since, ParseFile,
+            afterMerge: null, report, _localTimeZone);
     }
 
     private IReadOnlyList<string> DiscoverFiles(string claudeHome)
@@ -79,7 +45,7 @@ public sealed class ClaudeLogUsageScanner
             : _files.EnumerateFiles(claudeHome, "*.jsonl", SearchOption.AllDirectories).ToArray();
     }
 
-    private SourceHistoryContribution ParseFile(string path, DateTimeOffset since, HistoryScanReport report)
+    private SourceHistoryContribution ParseFile(string path, DateTimeOffset since, DateOnly sinceDate, HistoryScanReport report)
     {
         // Capture the fingerprint before reading. If the file is appended to mid-parse the stored
         // fingerprint will not match the file's final state, so the next scan re-parses it instead
@@ -96,7 +62,10 @@ public sealed class ClaudeLogUsageScanner
             if (doc is null) continue;
             var root = doc.RootElement;
             var timestamp = ProviderJson.Date(ProviderJson.Property(root, "timestamp", "created_at", "time"));
-            if (timestamp is null || timestamp < since || !IsValidEntry(root)) continue;
+            // The window is applied at local-day granularity: records on the boundary day are part
+            // of the window even before the `since` instant, so fresh parses and cached
+            // contributions can never disagree about the boundary day.
+            if (timestamp is null || IncrementalHistoryScan.DayOf(timestamp.Value, _localTimeZone) < sinceDate || !IsValidEntry(root)) continue;
             var message = ProviderJson.Object(ProviderJson.Property(root, "message"));
             var usage = ProviderJson.Object(message is { } msg ? ProviderJson.Property(msg, "usage") : ProviderJson.Property(root, "usage"));
             if (usage is null) continue;
@@ -104,62 +73,37 @@ public sealed class ClaudeLogUsageScanner
             if (parsed.Count > 0)
             {
                 report.RowsRead++;
-                TrackRecord(report, timestamp);
+                report.Track(timestamp);
             }
             entries.AddRange(parsed);
         }
 
         var deduped = Deduplicate(entries);
-        var totals = new Dictionary<DateOnly, (double Tokens, double Cost)>();
-        var breakdown = new Dictionary<(DateOnly Date, string Model, UsageCostBasis Basis), UsageBreakdownPoint>();
-        var unknownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in deduped.Where(entry => entry.Timestamp >= since))
+        var aggregator = new HistoryAggregator(ProviderIds.ClaudeCode);
+        foreach (var entry in deduped.Where(entry => IncrementalHistoryScan.DayOf(entry.Timestamp, _localTimeZone) >= sinceDate))
         {
-            if (!entry.PricingKnown && !string.IsNullOrWhiteSpace(entry.Model)) unknownModels.Add(entry.Model);
-            // Bucket by the Windows local calendar day like Codex, OpenCode, and the dashboard
+            if (!entry.PricingKnown && !string.IsNullOrWhiteSpace(entry.Model)) aggregator.AddUnknownModel(entry.Model);
+            // Bucket by the local calendar day like Codex, OpenCode, and the dashboard
             // selectors. UTC bucketing moves evening usage into tomorrow and makes "Today" empty
             // for west-of-UTC machines.
-            var day = DateOnly.FromDateTime(entry.Timestamp.LocalDateTime);
-            if (totals.TryGetValue(day, out var prior)) totals[day] = (prior.Tokens + entry.Tokens, prior.Cost + entry.Cost);
-            else totals[day] = (entry.Tokens, entry.Cost);
+            var day = IncrementalHistoryScan.DayOf(entry.Timestamp, _localTimeZone);
             var basis = entry.ReportedCost ? UsageCostBasis.ProviderReported
                 : entry.PricingKnown ? UsageCostBasis.CatalogEstimated : UsageCostBasis.Unpriced;
-            var key = (day, entry.Model, basis);
-            if (breakdown.TryGetValue(key, out var existing))
-            {
-                breakdown[key] = existing with
-                {
-                    UncachedInputTokens = existing.UncachedInputTokens + entry.Input,
-                    CachedInputTokens = existing.CachedInputTokens + entry.Cached,
-                    CacheCreationTokens = existing.CacheCreationTokens + entry.CacheCreation,
-                    OutputTokens = existing.OutputTokens + entry.Output,
-                    CostUsd = existing.CostUsd + entry.Cost,
-                    CacheSavingsUsd = existing.CacheSavingsUsd + entry.CacheSavings
-                };
-            }
-            else
-            {
-                breakdown[key] = new UsageBreakdownPoint(day, ProviderIds.ClaudeCode, entry.Model,
-                    entry.Input, entry.Cached, entry.CacheCreation, entry.Output, 0, entry.Cost, basis,
-                    basis == UsageCostBasis.ProviderReported ? PricingBasis.ProviderCredits
-                        : basis == UsageCostBasis.CatalogEstimated ? PricingBasis.LocalEstimate : PricingBasis.Unknown,
-                    basis != UsageCostBasis.ProviderReported, entry.CacheSavings);
-            }
+            var pricingBasis = basis == UsageCostBasis.ProviderReported ? PricingBasis.ProviderCredits
+                : basis == UsageCostBasis.CatalogEstimated ? PricingBasis.LocalEstimate
+                : PricingBasis.Unknown;
+            aggregator.Add(day, entry.Model, basis, pricingBasis,
+                tokens: entry.Tokens,
+                uncachedInput: entry.Input,
+                cachedInput: entry.Cached,
+                cacheCreation: entry.CacheCreation,
+                output: entry.Output,
+                reasoning: 0,
+                cost: entry.Cost,
+                cacheSavings: entry.CacheSavings,
+                estimated: basis != UsageCostBasis.ProviderReported);
         }
-        return new SourceHistoryContribution
-        {
-            Fingerprint = fingerprint,
-            Points = totals.OrderBy(p => p.Key).Select(p => new UsageHistoryPoint(p.Key, p.Value.Tokens, p.Value.Cost, true)).ToList(),
-            Breakdown = breakdown.Values.OrderBy(point => point.Date).ThenBy(point => point.ModelId, StringComparer.OrdinalIgnoreCase).ToList(),
-            UnknownModels = unknownModels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()
-        };
-    }
-
-    private static void TrackRecord(HistoryScanReport report, DateTimeOffset? timestamp)
-    {
-        if (timestamp is not { } value) return;
-        if (report.OldestRecord is null || value < report.OldestRecord) report.OldestRecord = value;
-        if (report.NewestRecord is null || value > report.NewestRecord) report.NewestRecord = value;
+        return aggregator.ToContribution(fingerprint);
     }
 
     private static IReadOnlyList<ClaudeUsageEntry> Deduplicate(IReadOnlyList<ClaudeUsageEntry> entries)
@@ -171,11 +115,7 @@ public sealed class ClaudeLogUsageScanner
         for (var i = 0; i < entries.Count; i++)
         {
             var entry = entries[i];
-            var exactKey = entry.MessageId is { Length: > 0 } messageId
-                ? $"message:{messageId}|request:{entry.RequestId}"
-                : entry.RequestId is { Length: > 0 } requestId
-                    ? $"request:{requestId}"
-                    : $"line:{entry.Timestamp:O}|{entry.Tokens}|{entry.Cost:0.########}";
+            var exactKey = ExactKeyOf(entry);
             var collision = exact.TryGetValue(exactKey, out var exactIndex)
                 ? exactIndex
                 : entry.MessageId is { Length: > 0 } id && messages.TryGetValue(id, out var messageIndex)
@@ -187,8 +127,21 @@ public sealed class ClaudeLogUsageScanner
             {
                 if (ShouldReplace(entry, result[collision]))
                 {
+                    // Drop the replaced entry's identity pointers so a later distinct message
+                    // sharing the old request id is not wrongly merged into this slot.
+                    var replaced = result[collision];
+                    if (replaced.MessageId is { Length: > 0 } replacedMessage &&
+                        messages.TryGetValue(replacedMessage, out var staleMessageSlot) && staleMessageSlot == collision)
+                        messages.Remove(replacedMessage);
+                    if (replaced.RequestId is { Length: > 0 } replacedRequest &&
+                        requests.TryGetValue(replacedRequest, out var staleRequestSlot) && staleRequestSlot == collision)
+                        requests.Remove(replacedRequest);
+                    if (exact.TryGetValue(ExactKeyOf(replaced), out var staleExactSlot) && staleExactSlot == collision)
+                        exact.Remove(ExactKeyOf(replaced));
                     result[collision] = entry;
                     exact[exactKey] = collision;
+                    if (entry.MessageId is { Length: > 0 } entryMessage) messages[entryMessage] = collision;
+                    if (entry.RequestId is { Length: > 0 } entryRequest) requests[entryRequest] = collision;
                 }
                 continue;
             }
@@ -202,10 +155,20 @@ public sealed class ClaudeLogUsageScanner
         return result;
     }
 
+    private static string ExactKeyOf(ClaudeUsageEntry entry) =>
+        entry.MessageId is { Length: > 0 } messageId
+            ? $"message:{messageId}|request:{entry.RequestId}"
+            : entry.RequestId is { Length: > 0 } requestId
+                ? $"request:{requestId}"
+                : $"line:{entry.Timestamp:O}|{entry.Tokens}|{entry.Cost:0.########}";
+
     private static bool ShouldReplace(ClaudeUsageEntry candidate, ClaudeUsageEntry existing)
     {
         if (candidate.IsSidechain != existing.IsSidechain) return existing.IsSidechain;
         if (candidate.Tokens != existing.Tokens) return candidate.Tokens > existing.Tokens;
+        // On token-equal duplicates prefer the line that carries a provider-reported cost over a
+        // local estimate: Claude can re-emit the same message with its final cost annotated later.
+        if (candidate.ReportedCost != existing.ReportedCost) return candidate.ReportedCost;
         return candidate.HasSpeed && !existing.HasSpeed;
     }
 
@@ -280,12 +243,12 @@ public sealed class ClaudeLogUsageScanner
         if (inputValue is not { } input || outputValue is not { } output) return false;
         if (!IsFiniteNonNegative(input) || !IsFiniteNonNegative(output)) return false;
 
-        var cached = Number(usage, "cache_read_input_tokens", "cached_input_tokens", "cache_read_tokens");
-        var cacheCreation = Number(usage, "cache_creation_input_tokens", "cache_write_input_tokens");
+        var cached = ProviderJson.NumberOrZero(usage, "cache_read_input_tokens", "cached_input_tokens", "cache_read_tokens");
+        var cacheCreation = ProviderJson.NumberOrZero(usage, "cache_creation_input_tokens", "cache_write_input_tokens");
         if (ProviderJson.Object(ProviderJson.Property(usage, "cache_creation")) is { } cacheObject)
         {
-            cacheCreation = Number(cacheObject, "ephemeral_5m_input_tokens", "cache_write_5m_input_tokens") +
-                            Number(cacheObject, "ephemeral_1h_input_tokens", "cache_write_1h_input_tokens");
+            cacheCreation = ProviderJson.NumberOrZero(cacheObject, "ephemeral_5m_input_tokens", "cache_write_5m_input_tokens") +
+                            ProviderJson.NumberOrZero(cacheObject, "ephemeral_1h_input_tokens", "cache_write_1h_input_tokens");
         }
         if (!IsFiniteNonNegative(cached) || !IsFiniteNonNegative(cacheCreation)) return false;
         var tokens = input + cached + cacheCreation + output;
@@ -301,8 +264,13 @@ public sealed class ClaudeLogUsageScanner
         var requestId = requestIdOverride
             ?? ProviderJson.String(ProviderJson.Property(root, "requestId", "request_id"))
             ?? (message is { } requestObject ? ProviderJson.String(ProviderJson.Property(requestObject, "requestId", "request_id")) : null);
-        var reportedCost = ProviderJson.Number(ProviderJson.Property(root, "costUSD", "cost_usd"))
-            ?? (message is { } costMessage ? ProviderJson.Number(ProviderJson.Property(costMessage, "costUSD", "cost_usd")) : null);
+        // Advisor iterations carry their own token counts but the record root's costUSD belongs
+        // to the parent turn alone. Inheriting it priced every advisor entry at the parent's full
+        // message cost; only entries without a model override may use the root-reported cost.
+        var reportedCost = modelOverride is null
+            ? ProviderJson.Number(ProviderJson.Property(root, "costUSD", "cost_usd"))
+                ?? (message is { } costMessage ? ProviderJson.Number(ProviderJson.Property(costMessage, "costUSD", "cost_usd")) : null)
+            : ProviderJson.Number(ProviderJson.Property(usage, "costUSD", "cost_usd"));
         var hasReportedCost = reportedCost is { } exactCost && IsFiniteNonNegative(exactCost);
         var pricing = _catalog.ResolvePrice(ProviderIds.ClaudeCode, model);
         var cost = hasReportedCost
@@ -352,6 +320,4 @@ public sealed class ClaudeLogUsageScanner
     }
 
     private static bool IsFiniteNonNegative(double value) => double.IsFinite(value) && value >= 0;
-
-    private static double Number(System.Text.Json.JsonElement element, params string[] names) => ProviderJson.Number(ProviderJson.Property(element, names)) ?? 0;
 }

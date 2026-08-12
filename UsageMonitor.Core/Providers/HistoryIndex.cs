@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -27,6 +28,13 @@ public sealed class ProviderHistoryIndex
     public DateTimeOffset StoredAt { get; set; }
     /// <summary>Fingerprint of the pricing catalog when the index was built.</summary>
     public string CatalogFingerprint { get; set; } = string.Empty;
+    /// <summary>Boundary day the sources were parse-time filtered with. A later value than the
+    /// current window boundary means the window moved backward and the cached contributions are
+    /// missing days, so the index must be rebuilt.</summary>
+    public DateOnly SinceDate { get; set; }
+    /// <summary>Timezone id the contributions were day-bucketed with. A change invalidates every
+    /// day label, so the index must be rebuilt.</summary>
+    public string TimeZoneId { get; set; } = string.Empty;
     public Dictionary<string, SourceHistoryContribution> Sources { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
@@ -36,7 +44,11 @@ public sealed class ProviderHistoryIndex
 /// </summary>
 public sealed class ProviderHistoryIndexStore
 {
-    public const int Version = 1;
+    // Version 2: sources are parse-time filtered at local-day granularity (and the index records
+    // the window boundary day and bucketing timezone). Version 1 indices were filtered at the
+    // `since` instant, so reusing them would silently disagree with fresh parses on the boundary
+    // day; they are rejected and rebuilt.
+    public const int Version = 2;
     private readonly string _directory;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -143,8 +155,117 @@ public sealed class HistoryScanReport
     public DateTimeOffset? OldestRecord { get; set; }
     public DateTimeOffset? NewestRecord { get; set; }
 
-    public long FilesParsed => FilesChanged;
-    public long FilesReused => FilesUnchanged;
+    public void Track(DateTimeOffset? timestamp)
+    {
+        if (timestamp is not { } value) return;
+        if (OldestRecord is null || value < OldestRecord) OldestRecord = value;
+        if (NewestRecord is null || value > NewestRecord) NewestRecord = value;
+    }
+}
+
+/// <summary>
+/// Shared orchestration behind every incremental history scan: load the persisted index, reset it
+/// when the pricing catalog changed, drop sources that disappeared, skip sources whose fingerprint
+/// is unchanged, parse the rest, merge, run the provider-specific post-merge step, and persist.
+/// The sliding window is applied at local-day granularity everywhere: the merge drops points whose
+/// local day is before the cutoff day, and <paramref name="parseFile"/> must apply the identical
+/// day predicate so a freshly parsed file and a cached contribution can never disagree about which
+/// records belong to the boundary day.
+/// </summary>
+public static class IncrementalHistoryScan
+{
+    public static ProviderUsageHistory Run(
+        string providerKey,
+        IReadOnlyList<string> files,
+        string? historyStoreDirectory,
+        DateTimeOffset since,
+        Func<string, DateTimeOffset, DateOnly, HistoryScanReport, SourceHistoryContribution> parseFile,
+        Func<ProviderUsageHistory, HistoryScanReport, ProviderUsageHistory>? afterMerge,
+        Action<HistoryScanReport>? report,
+        TimeZoneInfo? localTimeZone = null)
+    {
+        var timeZone = localTimeZone ?? TimeZoneInfo.Local;
+        var sinceDate = SinceDate(since, timeZone);
+        var stopwatch = Stopwatch.StartNew();
+        var scanReport = new HistoryScanReport();
+        var store = string.IsNullOrWhiteSpace(historyStoreDirectory)
+            ? null
+            : new ProviderHistoryIndexStore(historyStoreDirectory);
+        var index = store?.TryLoad(providerKey) ?? new ProviderHistoryIndex();
+        if (store is not null)
+        {
+            var catalogFingerprint = HistorySourceFingerprint.Catalog(UsageMonitorPaths.Current.PricingDirectory);
+            if (index.CatalogFingerprint.Length > 0 && index.CatalogFingerprint != catalogFingerprint)
+                index = new ProviderHistoryIndex { CatalogFingerprint = catalogFingerprint };
+            // Contributions are parse-time filtered at the then-current window boundary, so a
+            // window that moved backward (clock rollback, shortened interval) leaves cached
+            // contributions permanently missing the days that re-entered the window. A timezone
+            // change re-labels every day, so bucketed points from the old zone must be rebuilt.
+            // The empty-string sentinel keeps freshly created indices (and any future format that
+            // omits the field) compatible.
+            if (index.SinceDate > sinceDate ||
+                (index.TimeZoneId.Length > 0 && !string.Equals(index.TimeZoneId, timeZone.Id, StringComparison.Ordinal)))
+                index = new ProviderHistoryIndex { CatalogFingerprint = catalogFingerprint };
+            index.CatalogFingerprint = catalogFingerprint;
+            index.SinceDate = sinceDate;
+            index.TimeZoneId = timeZone.Id;
+        }
+
+        scanReport.FilesDiscovered = files.Count;
+        var knownPaths = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+        foreach (var stalePath in index.Sources.Keys.Where(path => !knownPaths.Contains(path)).ToArray())
+            index.Sources.Remove(stalePath);
+
+        foreach (var path in files)
+        {
+            var fingerprint = store is null ? string.Empty : HistorySourceFingerprint.Of(path);
+            if (index.Sources.TryGetValue(path, out var existing) && existing.Fingerprint == fingerprint)
+            {
+                scanReport.FilesUnchanged++;
+                continue;
+            }
+            scanReport.FilesChanged++;
+            index.Sources[path] = parseFile(path, since, sinceDate, scanReport);
+        }
+
+        var merged = HistoryIndexMerge.Merge(index.Sources.Values, sinceDate: sinceDate);
+        if (afterMerge is not null) merged = afterMerge(merged, scanReport);
+        if (store is not null) store.Save(providerKey, index);
+        scanReport.Milliseconds = stopwatch.ElapsedMilliseconds;
+        report?.Invoke(scanReport);
+        return merged;
+    }
+
+    /// <summary>The local calendar day a timestamp falls into for the configured timezone.</summary>
+    public static DateOnly DayOf(DateTimeOffset value, TimeZoneInfo timeZone) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, timeZone).Date);
+
+    /// <summary>Start of the local day that contains <paramref name="since"/> (the window boundary day).</summary>
+    public static DateOnly SinceDate(DateTimeOffset since, TimeZoneInfo timeZone) =>
+        DayOf(since, timeZone);
+
+    /// <summary>
+    /// The UTC instant of the first moment of <paramref name="day"/> in the local timezone, used by
+    /// SQL-side sources that cannot filter by day without an explicit cutoff. DST transitions at
+    /// local midnight are handled: on fall-back days the earlier (repeated) midnight wins so the
+    /// whole boundary day is inside the window, and on spring-forward days the cutoff is the first
+    /// valid local time after the gap so the previous day cannot leak in.
+    /// </summary>
+    public static long UtcSecondsAtLocalMidnight(DateOnly day, TimeZoneInfo timeZone)
+    {
+        var localMidnight = day.ToDateTime(TimeOnly.MinValue);
+        // Spring-forward at midnight (e.g. America/Havana): local midnight never occurs, so the
+        // day's first instant is the first valid local time after the gap. Quarter-hour steps
+        // land on the first valid instant for every real-world gap size (30-minute Lord Howe,
+        // 45-minute Chatham, 60-minute Havana) instead of overshooting past it.
+        while (timeZone.IsInvalidTime(localMidnight)) localMidnight = localMidnight.AddMinutes(15);
+        // Fall-back with midnight repeated (e.g. America/Havana): the larger offset is the earlier
+        // instant, which keeps the whole repeated first hour inside the window.
+        var offset = timeZone.IsAmbiguousTime(localMidnight)
+            ? timeZone.GetAmbiguousTimeOffsets(localMidnight).Max()
+            : timeZone.GetUtcOffset(localMidnight);
+        return new DateTimeOffset(localMidnight, offset).ToUnixTimeSeconds();
+    }
 }
 
 /// <summary>

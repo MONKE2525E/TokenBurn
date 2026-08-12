@@ -7,6 +7,10 @@ using UsageMonitor.LocalApi;
 
 namespace UsageMonitor.Tests;
 
+// OpenCodeProvider without an explicit catalog resolves models through the process-wide
+// ModelPricingCatalog static, so these tests must not run concurrently with the tests that
+// mutate it (see ModelPricingStaticCollection).
+[Collection("model-pricing-static")]
 public sealed class OpenCodeHistoryTests
 {
     private static readonly TimeZoneInfo Pacific =

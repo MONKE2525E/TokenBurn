@@ -4,6 +4,16 @@ using System.Text.Json.Serialization;
 
 namespace UsageMonitor.Tests;
 
+/// <summary>
+/// Serializes every test that reads or mutates <see cref="ModelPricingCatalog"/>'s process-wide
+/// static state. CachedModelCatalog writes into that static via ApplyRemote, and provider tests
+/// resolve built-in/remote prices through TryResolve, so the mutators and readers must never run
+/// concurrently under xUnit's per-class parallelization.
+/// </summary>
+[CollectionDefinition("model-pricing-static", DisableParallelization = true)]
+public sealed class ModelPricingStaticCollection { }
+
+[Collection("model-pricing-static")]
 public sealed class ModelPricingCatalogTests
 {
     [Fact]
