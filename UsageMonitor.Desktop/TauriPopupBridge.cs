@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net.Http;
@@ -21,6 +21,8 @@ public sealed class TauriPopupBridge : IDisposable
     private const int ControlPort = 6737;
     private const int DesktopControlPort = 6738;
     private readonly int _desktopControlPort;
+    /// <summary>Bridge-local diagnostics sink; keeps the bridge independent of host log wiring.</summary>
+    private static readonly FileDiagnosticsLogger Diagnostics = new();
     /// <summary>Hard cap for any desktop control request (headers plus body).</summary>
     private const int MaxRequestBytes = 64 * 1024;
     /// <summary>Read/write bound so a stalled peer cannot pin a handler task indefinitely.</summary>
@@ -405,7 +407,7 @@ public sealed class TauriPopupBridge : IDisposable
 
     private static int ParseContentLength(byte[] buffer, int headerEnd)
     {
-        // Only a single Content-Length is honored. Duplicates (RFC 7230 §3.3.2 treats multiple
+        // Only a single Content-Length is honored. Duplicates (RFC 7230 Â§3.3.2 treats multiple
         // Content-Length fields as malformed, identical values included) and garbage yield -1,
         // which drops the connection via the caller's size/framing checks.
         var header = Encoding.ASCII.GetString(buffer, 0, headerEnd);
@@ -467,6 +469,15 @@ public sealed class TauriPopupBridge : IDisposable
     public Task<bool> TryShowAsync(Point anchor, string? page)
         => TryShowAsync(anchor, avoidRect: null, page);
 
+    // Synchronous overloads kept for the WPF shell entry points that still call the pre-async
+    // bridge API; they delegate to the async implementation.
+    public bool TryShow(Point anchor) => TryShow(anchor, avoidRect: null, page: null);
+
+    public bool TryShow(Point anchor, Rectangle? avoidRect, string? page = null)
+        => TryShowAsync(anchor, avoidRect, page).GetAwaiter().GetResult();
+
+    public bool TryShow(Point anchor, string? page) => TryShow(anchor, avoidRect: null, page);
+
     private async Task<bool> TryShowPathAsync(string path)
     {
         if (await TrySendAsync(path).ConfigureAwait(false)) return true;
@@ -483,7 +494,7 @@ public sealed class TauriPopupBridge : IDisposable
         }
         // A tray click that visibly does nothing is a support case, not a silent no-op. The path
         // carries only anchor coordinates and page names, never provider data.
-        FileDiagnosticsLogger.Default.Debug("Compact popup could not be reached",
+        Diagnostics.Debug("Compact popup could not be reached",
             new Dictionary<string, object?>
             {
                 ["path"] = path,
@@ -495,6 +506,11 @@ public sealed class TauriPopupBridge : IDisposable
 
     public Task<bool> TryToggleAsync(Point anchor)
         => TryToggleAsync(anchor, avoidRect: null);
+
+    public bool TryToggle(Point anchor) => TryToggle(anchor, avoidRect: null);
+
+    public bool TryToggle(Point anchor, Rectangle? avoidRect)
+        => TryToggleAsync(anchor, avoidRect).GetAwaiter().GetResult();
 
     public async Task<bool> TryToggleAsync(Point anchor, Rectangle? avoidRect)
     {
@@ -508,7 +524,7 @@ public sealed class TauriPopupBridge : IDisposable
             await Task.Delay(80).ConfigureAwait(false);
             if (await TrySendAsync(path).ConfigureAwait(false)) return true;
         }
-        FileDiagnosticsLogger.Default.Debug("Compact popup could not be toggled",
+        Diagnostics.Debug("Compact popup could not be toggled",
             new Dictionary<string, object?>
             {
                 ["path"] = path,
@@ -550,14 +566,14 @@ public sealed class TauriPopupBridge : IDisposable
                 });
                 _ownsProcess = _process is not null;
                 if (_ownsProcess)
-                    FileDiagnosticsLogger.Default.Info("TokenBurn popup host started.");
+                    Diagnostics.Info("TokenBurn popup host started.");
                 return _process is not null;
             }
             catch (Exception exception)
             {
                 _process = null;
                 _ownsProcess = false;
-                FileDiagnosticsLogger.Default.Warning("TokenBurn popup host failed to start.", exception: exception);
+                Diagnostics.Warning("TokenBurn popup host failed to start.", exception: exception);
                 return false;
             }
         }
