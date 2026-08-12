@@ -117,4 +117,64 @@ public sealed class IncrementalHistoryTests : IDisposable
         Assert.Single(merged.Points);
         Assert.Equal(200, merged.Points[0].Tokens);
     }
+
+    /// <summary>
+    /// A pricing-catalog change re-prices every record, so contributions cached under the old
+    /// catalog must be rebuilt instead of keeping stale estimates forever.
+    /// </summary>
+    [Fact]
+    public void CatalogChangeRebuildsTheIndex()
+    {
+        WriteFile("a.jsonl", SessionLine("2030-01-01T10:00:00Z", 100, 20));
+        var path = Path.Combine(_tempDirectory, "a.jsonl");
+        Directory.CreateDirectory(_storeDirectory);
+        var stale = new ProviderHistoryIndex
+        {
+            Version = ProviderHistoryIndexStore.Version,
+            // A fingerprint that matches nothing the current pricing directory produces forces
+            // the rebuild path; an index built under any earlier catalog state looks exactly like
+            // this to the store.
+            CatalogFingerprint = "stale-catalog-fingerprint",
+            Sources =
+            {
+                [path] = new SourceHistoryContribution
+                {
+                    Fingerprint = HistorySourceFingerprint.Of(path),
+                    Points = [new UsageHistoryPoint(new DateOnly(2030, 1, 1), 999, 0, true)]
+                }
+            }
+        };
+        File.WriteAllText(Path.Combine(_storeDirectory, "history-codex.json"),
+            System.Text.Json.JsonSerializer.Serialize(stale, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+
+        var history = new CodexLogUsageScanner(localTimeZone: TimeZoneInfo.Utc)
+            .Scan(_tempDirectory, new DateTimeOffset(2029, 12, 20, 12, 0, 0, TimeSpan.Zero), _storeDirectory, report =>
+            {
+                Assert.Equal(1, report.FilesChanged);
+                Assert.Equal(0, report.FilesUnchanged);
+            });
+
+        Assert.Equal(120, history.TotalTokens);
+    }
+
+    /// <summary>
+    /// A corrupt index file must fall back to a full rescan instead of serving nothing or keeping
+    /// stale contributions, so totals can never silently drift from the real logs.
+    /// </summary>
+    [Fact]
+    public void CorruptIndexFallsBackToFullRescan()
+    {
+        WriteFile("a.jsonl", SessionLine("2030-01-01T10:00:00Z", 100, 20));
+        Directory.CreateDirectory(_storeDirectory);
+        File.WriteAllText(Path.Combine(_storeDirectory, "history-codex.json"), "{ this is not valid json !!!");
+
+        var history = new CodexLogUsageScanner(localTimeZone: TimeZoneInfo.Utc)
+            .Scan(_tempDirectory, new DateTimeOffset(2029, 12, 20, 12, 0, 0, TimeSpan.Zero), _storeDirectory, report =>
+            {
+                Assert.Equal(1, report.FilesChanged);
+                Assert.Equal(0, report.FilesUnchanged);
+            });
+
+        Assert.Equal(120, history.TotalTokens);
+    }
 }
