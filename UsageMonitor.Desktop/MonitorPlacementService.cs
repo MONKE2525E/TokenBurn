@@ -3,7 +3,7 @@ using System.Windows.Forms;
 
 namespace UsageMonitor.Desktop;
 
-public sealed record MonitorOption(string Id, string DisplayName, bool IsPrimary)
+public sealed record MonitorOption(string Id, string DisplayName)
 {
     public override string ToString() => DisplayName;
 }
@@ -22,7 +22,7 @@ public sealed class MonitorPlacementService
             var label = screen.Primary
                 ? $"Primary display ({screen.Bounds.Width} x {screen.Bounds.Height})"
                 : $"{screen.DeviceName.TrimStart('\\', '.') } ({screen.Bounds.Width} x {screen.Bounds.Height})";
-            result.Add(new MonitorOption(id, label, screen.Primary));
+            result.Add(new MonitorOption(id, label));
         }
         return result;
     }

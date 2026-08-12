@@ -12,8 +12,6 @@ public sealed record OpenRouterMappedUsage(
 /// <summary>Maps the management-key-only GET /api/v1/credits response.</summary>
 public static class OpenRouterUsageMapper
 {
-    public static OpenRouterMappedUsage MapCreditsResponse(ProviderHttpResponse response, DateTimeOffset now) => Map(response, now);
-
     public static OpenRouterMappedUsage Map(ProviderHttpResponse response, DateTimeOffset now)
     {
         if (response.StatusCode is 401)

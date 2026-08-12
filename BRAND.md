@@ -88,7 +88,7 @@ The standalone mark has **no background**.
 
 Raster PNG exports are included under `exports/` at:
 
-`1024, 512, 256, 128, 64, 32, 24, and 16 px`.
+`256, 128, 64, 48, 32, 24, and 16 px`, plus ICO versions of the app and tray icons.
 
 The SVG files are the source of truth. Use PNG only when the destination does not support SVG.
 
@@ -528,7 +528,7 @@ For raster exports:
 
 ```text
 tokenburn-app-icon-256.png
-tokenburn-mark-coral-64.png
+tokenburn-mark-gray-32.png
 ```
 
 Avoid names such as:
@@ -574,12 +574,17 @@ TokenBurn-Brand/
     ├── tokenburn-app-icon-16.png
     ├── tokenburn-app-icon-24.png
     ├── tokenburn-app-icon-32.png
+    ├── tokenburn-app-icon-48.png
     ├── tokenburn-app-icon-64.png
     ├── tokenburn-app-icon-128.png
     ├── tokenburn-app-icon-256.png
-    ├── tokenburn-app-icon-512.png
-    ├── tokenburn-app-icon-1024.png
-    └── tokenburn-mark-coral-[same sizes].png
+    ├── tokenburn-app-icon.ico
+    ├── tokenburn-mark-gray-16.png
+    ├── tokenburn-mark-gray-20.png
+    ├── tokenburn-mark-gray-24.png
+    ├── tokenburn-mark-gray-32.png
+    ├── tokenburn-mark-gray.ico
+    └── tokenburn-tray-icon.ico
 ```
 
 ---

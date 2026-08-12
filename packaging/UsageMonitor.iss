@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.0.1"
 #endif
 #ifndef MyRuntime
   #define MyRuntime "win-x64"
@@ -36,7 +36,7 @@ Name: "{group}\TokenBurn"; Filename: "{app}\TokenBurn.exe"; WorkingDir: "{app}"
 Name: "{group}\TokenBurn CLI"; Filename: "{app}\cli\usage-monitor.exe"; WorkingDir: "{app}\cli"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""$existing = Get-AppxPackage -Name MicrosoftCorporationII.WinAppRuntime.Singleton -ErrorAction SilentlyContinue; if ($null -eq $existing -or [version]$existing.Version -lt [version]'8002.3.0.0') { Add-AppxPackage -Path '{app}\WindowsAppRuntime\Microsoft.WindowsAppRuntime.Singleton.2.msix' -ErrorAction Stop }"""; Description: "Install TokenBurn notification support"; Flags: runhidden waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""$existing = Get-AppxPackage -Name MicrosoftCorporationII.WinAppRuntime.Singleton -ErrorAction SilentlyContinue; if ($null -eq $existing -or [version]$existing.Version -lt [version]'8002.3.0.0') {{ Add-AppxPackage -Path '{app}\WindowsAppRuntime\Microsoft.WindowsAppRuntime.Singleton.2.msix' -ErrorAction Stop }"""; Description: "Install TokenBurn notification support"; Flags: runhidden waituntilterminated
 Filename: "{app}\TokenBurn.exe"; Description: "Launch TokenBurn"; Flags: nowait postinstall skipifsilent
 
 [Registry]

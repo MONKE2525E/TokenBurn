@@ -21,7 +21,6 @@ public sealed record CodexAuth
 public sealed record CodexAuthState(string Path, CodexAuth Auth)
 {
     public bool HasAccessToken => !string.IsNullOrWhiteSpace(Auth.Tokens?.AccessToken);
-    public bool HasRefreshToken => !string.IsNullOrWhiteSpace(Auth.Tokens?.RefreshToken);
 }
 
 /// <summary>Reads Codex's Windows-native file login without ever logging token contents.</summary>

@@ -2,8 +2,6 @@ using System.Text.Json;
 
 namespace UsageMonitor.Core.Providers.Antigravity;
 
-public sealed record AntigravityMappedUsage(string? Plan, IReadOnlyList<MetricLine> Lines);
-
 public sealed record AntigravityModelConfig(string Label, string? ModelId, double RemainingFraction, DateTimeOffset? ResetAt);
 
 /// <summary>Pure response mapping for Antigravity pool data.</summary>

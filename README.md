@@ -59,7 +59,7 @@ dotnet run --project UsageMonitor.Desktop
 To create a self-contained Windows publish and per-user installer:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version 0.1.39
+powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version 0.0.1
 ```
 
 The installer is written to `artifacts\installer`. It creates Start menu entries, supports uninstall, and offers an opt-in per-user PATH entry for the bundled CLI. Release signing and an in-app update feed are not enabled yet.

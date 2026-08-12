@@ -46,13 +46,6 @@ public static partial class ProviderCatalog
             candidate.DisplayName.Equals(trimmed, StringComparison.OrdinalIgnoreCase));
         return descriptor?.Id ?? trimmed.ToLowerInvariant();
     }
-
-    public static ProviderDescriptor? FindDescriptor(string? value)
-    {
-        var id = NormalizeId(value);
-        return DefaultDescriptors.FirstOrDefault(candidate =>
-            candidate.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
-    }
 }
 
 public sealed class StubUsageProvider : IUsageProvider

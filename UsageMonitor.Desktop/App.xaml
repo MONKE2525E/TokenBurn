@@ -15,7 +15,6 @@
         <SolidColorBrush x:Key="TextMutedBrush" Color="#77777D" po:Freeze="False"/>
         <SolidColorBrush x:Key="AccentBrush" Color="#17A889" po:Freeze="False"/>
         <SolidColorBrush x:Key="AccentBlueBrush" Color="#119CF3" po:Freeze="False"/>
-        <SolidColorBrush x:Key="AccentPurpleBrush" Color="#9A8CFF" po:Freeze="False"/>
         <SolidColorBrush x:Key="WarnBrush" Color="#FFB340" po:Freeze="False"/>
         <SolidColorBrush x:Key="DangerBrush" Color="#F27987" po:Freeze="False"/>
 
