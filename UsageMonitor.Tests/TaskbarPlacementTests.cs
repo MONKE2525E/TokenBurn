@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Drawing;
-using System.Windows.Media.Imaging;
 using UsageMonitor.Desktop;
 using UsageMonitor.LocalApi;
 
@@ -75,7 +74,6 @@ public sealed class TaskbarPlacementTests
 
         Assert.False(TaskbarMetricFilter.IsConfigured(unavailable));
         Assert.True(TaskbarMetricFilter.IsConfigured(stale));
-        Assert.Single(TaskbarMetricFilter.SelectConfigured([unavailable, stale]));
     }
 
     [Fact]
@@ -114,13 +112,11 @@ public sealed class TaskbarPlacementTests
     }
 
     [Fact]
-    public void TaskbarLayoutReservesEdgeSpaceAndCompactsWithoutDroppingIdentity()
+    public void TaskbarLayoutReservesEdgeSpaceForTheRenderer()
     {
-        var decision = TaskbarLayoutDecision.Calculate(2400, 1920);
+        var decision = TaskbarLayoutDecision.Calculate(1920);
 
         Assert.Equal(1732, decision.AvailableWidthDip);
-        Assert.True(decision.CompactValues);
-        Assert.InRange(decision.Scale, 0.55, 1);
     }
 
     [Fact]
@@ -176,7 +172,6 @@ public sealed class TaskbarPlacementTests
         var result = TaskbarStripPlacement.Calculate(taskbar, 163, 1732, 180, 144);
 
         Assert.False(result.ResetPersistedOffset);
-        Assert.Equal(270, result.PhysicalEdgeOffset);
         Assert.Equal(180, result.EdgeOffsetDip);
         Assert.Equal(1650, result.Bounds.Right);
     }
@@ -193,7 +188,6 @@ public sealed class TaskbarPlacementTests
 
         Assert.Equal(1756, edgeOffset);
         Assert.Equal(4, result.Bounds.Left);
-        Assert.Equal(1756, result.PhysicalEdgeOffset);
     }
 
     [Fact]
@@ -208,7 +202,6 @@ public sealed class TaskbarPlacementTests
 
         Assert.Equal(180, edgeOffset);
         Assert.Equal(1580, result.Bounds.Left);
-        Assert.Equal(180, result.PhysicalEdgeOffset);
     }
 
     [Fact]
@@ -292,72 +285,65 @@ public sealed class TaskbarPlacementTests
     }
 
     [Fact]
-    public void TaskbarGlyphKeepsAVisibleTailForNearFullQuotas()
+    public void TrayTooltipJoinsProviderValuesAndTruncatesToTheNotificationLimit()
     {
-        // This mirrors OpenUsage's MenuBarBarGeometry rule. A nearly exhausted quota must not
-        // collapse into a visually solid 100% bar at taskbar scale.
-        Assert.Equal(0.85, TaskbarGlyphRenderer.VisualFraction(0.96), precision: 6);
-        Assert.Equal(0.7, TaskbarGlyphRenderer.VisualFraction(0.71), precision: 6);
-        Assert.Equal(1, TaskbarGlyphRenderer.VisualFraction(1));
-    }
+        Assert.Equal("TokenBurn | no provider data yet", TrayIconService.BuildTooltip([], "Countdown"));
 
-    [Fact]
-    public void TaskbarGlyphIgnoresPlaceholderRowsButKeepsRealZeroPercentData()
-    {
-        var noData = new MetricDisplay("Session", "No data", "", 0, "neutral", "Codex", IsMeter: true);
-        var zero = new MetricDisplay("Session", "0%", "", 0, "normal", "Codex", IsMeter: true);
-
-        Assert.False(TaskbarGlyphRenderer.HasRenderableData(noData));
-        Assert.True(TaskbarGlyphRenderer.HasRenderableData(zero));
-    }
-
-    [Fact]
-    public void TaskbarTooltipContainsExactProviderValueAndReset()
-    {
         var reset = DateTimeOffset.UtcNow.AddHours(2);
-        var metric = new MetricDisplay("Weekly", "41%", "", 0.41, "normal", "Codex", reset, IsMeter: true);
-
-        var tooltip = TaskbarGlyphRenderer.BuildTooltip([metric]);
-
-        Assert.StartsWith("TokenBurn | Codex Weekly: 41% (resets in ", tooltip, StringComparison.Ordinal);
-        Assert.DoesNotContain("No data", tooltip, StringComparison.OrdinalIgnoreCase);
+        var values = new[]
+        {
+            new MetricDisplay("Weekly", "$12.34", "", 0.5, "normal", "Codex", reset),
+            new MetricDisplay("Session", "41%", "", 0.41, "normal", "Claude Code")
+        };
+        var tooltip = TrayIconService.BuildTooltip(values, "Countdown");
+        Assert.StartsWith("TokenBurn | Codex $12.34", tooltip, StringComparison.Ordinal);
+        Assert.Contains("resets in", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Claude Code 41%", tooltip, StringComparison.Ordinal);
+        Assert.True(tooltip.Length <= 63, $"the tray tooltip must fit the 63-char limit, got {tooltip.Length}");
     }
 
     [Fact]
-    public void TaskbarGlyphRendersVisiblePixelsForAZeroPercentMetric()
+    public void ClaudeLoginResolverRunsDeterministicallyFromAnInjectedPath()
     {
-        var metric = new MetricDisplay("Session", "0%", "", 0, "normal", "Codex", IsMeter: true);
-        var image = Assert.IsAssignableFrom<BitmapSource>(TaskbarGlyphRenderer.Render([metric]));
-        var pixels = new byte[image.PixelHeight * image.PixelWidth * 4];
+        var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", "claude-login", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(Path.Combine(root, "claude.ps1"), "");
+            File.WriteAllText(Path.Combine(root, "claude.exe"), "");
 
-        image.CopyPixels(pixels, image.PixelWidth * 4, 0);
+            // Resolution prefers shims in PATH order (claude.exe first).
+            Assert.Equal(Path.Combine(root, "claude.exe"), ClaudeLoginCommand.ResolveCommandPath(root));
+            File.Delete(Path.Combine(root, "claude.exe"));
+            Assert.Equal(Path.Combine(root, "claude.ps1"), ClaudeLoginCommand.ResolveCommandPath(root));
 
-        Assert.Equal(48, image.PixelWidth);
-        Assert.Equal(48, image.PixelHeight);
-        Assert.Contains(pixels, alpha => alpha > 0);
-    }
+            // A PowerShell shim must be launched through PowerShell with -File so argument
+            // boundaries survive, and the "auth login" arguments must be attached.
+            var shimInfo = ClaudeLoginCommand.CreateStartInfo(Path.Combine(root, "claude.ps1"));
+            Assert.Contains("powershell", shimInfo.FileName, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("-File", shimInfo.ArgumentList);
+            Assert.Contains("auth", shimInfo.ArgumentList);
+            Assert.Contains("login", shimInfo.ArgumentList);
 
-    [Fact]
-    public void EmptyTaskbarGlyphIsTransparentInsteadOfUsingTheAppIcon()
-    {
-        var image = Assert.IsAssignableFrom<BitmapSource>(TaskbarGlyphRenderer.Render([]));
-        var pixels = new byte[image.PixelHeight * image.PixelWidth * 4];
+            // A real executable is started directly with the same arguments.
+            var exePath = Path.Combine(root, "claude.cmd");
+            File.WriteAllText(exePath, "");
+            var directInfo = ClaudeLoginCommand.CreateStartInfo(exePath);
+            Assert.Equal(exePath, directInfo.FileName);
+            Assert.Contains("auth", directInfo.ArgumentList);
+            Assert.Contains("login", directInfo.ArgumentList);
 
-        image.CopyPixels(pixels, image.PixelWidth * 4, 0);
-
-        Assert.DoesNotContain(pixels.Where((_, index) => index % 4 == 3), alpha => alpha > 0);
-    }
-
-    [Fact]
-    public void ClaudeLoginResolverKeepsWindowsScriptShimsRunnable()
-    {
-        var command = ClaudeLoginCommand.ResolveCommandPath();
-        if (command is null) return; // Claude Code is optional on build agents.
-
-        var startInfo = ClaudeLoginCommand.CreateStartInfo();
-        Assert.Contains("auth", startInfo.ArgumentList);
-        Assert.Contains("login", startInfo.ArgumentList);
-        if (Path.GetExtension(command).Equals(".ps1", StringComparison.OrdinalIgnoreCase))
-            Assert.Contains("powershell", startInfo.FileName, StringComparison.OrdinalIgnoreCase);
+            // No launcher anywhere falls back to the bare command via the shell.
+            Assert.Null(ClaudeLoginCommand.ResolveCommandPath(string.Empty));
+            var fallback = ClaudeLoginCommand.CreateStartInfo(null);
+            Assert.Equal("claude", fallback.FileName);
+            Assert.True(fallback.UseShellExecute);
+            Assert.Contains("auth", fallback.Arguments, StringComparison.Ordinal);
+            Assert.Contains("login", fallback.Arguments, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 }

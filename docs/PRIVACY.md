@@ -24,6 +24,8 @@ TokenBurn does not send prompts, transcripts, raw session records, local history
 
 Diagnostics use bounded line-delimited JSON and redact credentials, account identifiers, email addresses, and Windows user paths. Do not add raw prompts, transcripts, session IDs, full local paths, or provider response bodies to logs.
 
+The main diagnostics log (`usage-monitor.log`) rotates at 2 MB with a single sibling backup; the native taskbar strip placement log (`taskbar-strip.log`) rotates at 1 MB with a single sibling backup and only records actual shell transitions, not the recurring safety-timer heartbeats. Every provider refresh is tagged with a short per-refresh correlation identifier (`refreshId`) that links the refresh start, per-provider reads, history scans, and refresh completion into one traceable unit.
+
 If a bug report needs logs, remove private values first. Screenshots and fixture files must use synthetic data.
 
 Any change to storage, network calls, provider inputs, logging, export behavior, or updater behavior must update this document and the relevant tests.

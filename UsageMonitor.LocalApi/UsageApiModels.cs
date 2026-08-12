@@ -96,7 +96,7 @@ public interface IUsageSnapshotSource
 {
     IReadOnlySet<string> KnownProviderIds { get; }
     Task<IReadOnlyList<UsageSnapshotData>> GetSnapshotsAsync(string? providerId, bool force,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default, string? refreshId = null);
 }
 
 public sealed class EmptyUsageSnapshotSource : IUsageSnapshotSource
@@ -107,7 +107,7 @@ public sealed class EmptyUsageSnapshotSource : IUsageSnapshotSource
 
     public IReadOnlySet<string> KnownProviderIds => Known;
     public Task<IReadOnlyList<UsageSnapshotData>> GetSnapshotsAsync(string? providerId, bool force,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default, string? refreshId = null) =>
         Task.FromResult<IReadOnlyList<UsageSnapshotData>>([]);
 }
 

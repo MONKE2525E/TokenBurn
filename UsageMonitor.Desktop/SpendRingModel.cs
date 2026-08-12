@@ -168,11 +168,15 @@ public static class SpendRingModel
     {
         if (total <= 0 || double.IsNaN(total) || double.IsInfinity(total))
             return metric == SpendRingMetric.Tokens ? "0" : "$0.00";
+        // Invariant culture keeps the ring text identical on every system locale; the values are
+        // derived from numeric data and must not pick up a locale's decimal separator.
         return metric switch
         {
             SpendRingMetric.Tokens => FormatTokens(total),
-            SpendRingMetric.CostPerMillionTokens => $"${total:0.00}",
-            _ => total >= 1000 ? $"${total / 1000:0.0}K" : $"${total:0.00}"
+            SpendRingMetric.CostPerMillionTokens => "$" + total.ToString("0.00", CultureInfo.InvariantCulture),
+            _ => total >= 1000
+                ? "$" + (total / 1000).ToString("0.0", CultureInfo.InvariantCulture) + "K"
+                : "$" + total.ToString("0.00", CultureInfo.InvariantCulture)
         };
     }
 
@@ -187,9 +191,9 @@ public static class SpendRingModel
 
     public static string FormatTokens(double tokens)
     {
-        if (tokens >= 1_000_000_000) return $"{tokens / 1_000_000_000:0.##}B";
-        if (tokens >= 1_000_000) return $"{tokens / 1_000_000:0.##}M";
-        if (tokens >= 1_000) return $"{tokens / 1_000:0.##}K";
+        if (tokens >= 1_000_000_000) return (tokens / 1_000_000_000).ToString("0.##", CultureInfo.InvariantCulture) + "B";
+        if (tokens >= 1_000_000) return (tokens / 1_000_000).ToString("0.##", CultureInfo.InvariantCulture) + "M";
+        if (tokens >= 1_000) return (tokens / 1_000).ToString("0.##", CultureInfo.InvariantCulture) + "K";
         return Math.Round(tokens).ToString("N0", CultureInfo.InvariantCulture);
     }
 
