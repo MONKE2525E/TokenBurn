@@ -13,7 +13,11 @@ dotnet build UsageMonitor.slnx --configuration Release -m:1 /p:BuildInParallel=f
 
 TokenBurn does not convert provider failures into zero usage. Check the provider's own login state, wait for rate limits to clear, then refresh. Codex and Claude local history can remain visible when live usage calls fail.
 
-A manual Refresh uses the same stale-while-revalidate pipeline as the scheduler: it serves the last-good/cached values immediately and only re-reads a provider after its five-minute cache expires, so a failed authentication attempt never blanks a provider's last-known-good bars. The error is carried as a badge next to those bars instead of removing the provider from the taskbar strip.
+A manual Refresh requests a live provider read. If that read fails, TokenBurn keeps the last-good/cached values and carries the error as a badge next to those bars instead of removing the provider from the taskbar strip. Scheduled reads still use the stale-while-revalidate cache.
+
+## Refresh stays on loading
+
+Provider refreshes have a 30-second per-provider deadline. A provider or local history scanner that does not return is reported as unavailable after the deadline, while the other providers and last-good values remain usable. If the native host is restarting, the popup also clears stale loading state on its next failed status poll; close/reopen should no longer be required to recover the dashboard.
 
 Historical spend is now scanned incrementally. Unchanged Codex/Claude session files (same size and last-write time) are not re-read on later refreshes; their previously computed daily totals are reused from `%LOCALAPPDATA%\UsageMonitor\Cache\history-*.json` and only changed files are re-parsed. The index is rebuilt automatically when the pricing catalog changes, so updated model rates still apply to old records.
 

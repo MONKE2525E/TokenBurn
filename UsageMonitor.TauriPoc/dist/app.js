@@ -1179,7 +1179,11 @@ function renderLocalHistory(snapshot) {
 }
 
 function render() {
-  const loading = state.localLoading || state.hostLoading;
+  // The WPF host refreshes in the background during resume/startup. Its status is useful for
+  // deciding when to pull fresh cached data, but it must not block the popup: a host refresh can
+  // remain active while the API already has usable cached snapshots, and a restarted host can
+  // report the old loading state until its first status response completes.
+  const loading = state.localLoading;
   document.body.classList.toggle('refreshing', loading);
   // The reentrancy guard in refresh() silently drops a second click. Disabling the button is what
   // makes that no-op legible instead of looking like a dead control.
@@ -1221,7 +1225,13 @@ async function syncRefreshStatus() {
       COMMAND_TIMEOUT_MS,
       'The refresh-status command did not respond.'
     );
-    if (!status) return;
+    if (!status) {
+      // A missing response can happen while the native host is restarting. Do not retain a
+      // loading flag from the old process across that boundary; the next successful poll will
+      // restore the real state.
+      state.hostLoading = false;
+      return;
+    }
     refreshStatusFailures = 0;
     state.refreshStatusError = '';
     state.nextRefreshAt = status.nextRefreshAt || null;
@@ -1230,6 +1240,9 @@ async function syncRefreshStatus() {
   } catch (_) {
     // The popup can still render cached provider data while the WPF host is starting.
     refreshStatusFailures += 1;
+    // Never let a failed/restarted native host strand the popup in its previous loading state.
+    // The next successful status poll repopulates this value if a refresh is still active.
+    state.hostLoading = false;
     if (refreshStatusFailures >= 2) state.refreshStatusError = 'Refresh service unavailable';
     render();
   } finally {
@@ -1239,8 +1252,9 @@ async function syncRefreshStatus() {
 
 async function refresh(force = false) {
   if (state.localLoading) return;
-  state.localLoading = true; render();
+  state.localLoading = true;
   try {
+    render();
     if (force) {
       // The desktop host owns the cache and refresh timestamp. Asking it to refresh first keeps
       // the taskbar strip, WPF fallback, and Tauri popup on the same generation of data.
@@ -2354,7 +2368,7 @@ setInterval(async () => {
   // synthetic "not configured" placeholders forever even though the live API came up seconds
   // later. The retry stops after one successful load: a valid-but-empty provider list is real
   // data, not a failed load, and retrying it forever would hammer the host with no user visible.
-  if (!state.localLoading && !state.hostLoading && state.lastGood === null &&
+  if (!state.localLoading && state.lastGood === null &&
       Date.now() - lastInitialDataRetryAt >= 2000) {
     lastInitialDataRetryAt = Date.now();
     refresh(false);

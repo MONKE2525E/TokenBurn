@@ -1865,6 +1865,46 @@ test('status polling never stacks overlapping requests', async () => {
   assert.ok(after > during, 'the poll resumes once the in-flight request settles');
 });
 
+test('a lost native status bridge cannot strand the popup in refreshing state', async () => {
+  const harness = createHarness({
+    snapshots: [snapshot('codex', { costUsd: 10 })],
+  });
+  const { emitNative, tick, flushAsync, defaults, state, invokeCalls } = harness;
+  await flushAsync();
+  emitNative('poc-opened');
+  await flushAsync();
+
+  defaults.fetch_refresh_status = () => Promise.reject(new Error('native host restarted'));
+  state.hostLoading = true;
+  const statusCallsBefore = invokeCalls.filter(call => call.command === 'fetch_refresh_status').length;
+  tick(1000);
+  await flushAsync();
+
+  assert.ok(
+    invokeCalls.filter(call => call.command === 'fetch_refresh_status').length > statusCallsBefore,
+    'a status poll was attempted after the host disappeared'
+  );
+  assert.equal(state.hostLoading, false, 'the stale native loading flag is cleared');
+});
+
+test('a background startup refresh does not block a usable popup', async () => {
+  const harness = createHarness({
+    snapshots: [snapshot('codex', { costUsd: 10 })],
+  });
+  const { emitNative, flushAsync, defaults, state, byId } = harness;
+  defaults.fetch_refresh_status = () => ({ loading: true, nextRefreshAt: null });
+  await flushAsync();
+  emitNative('poc-opened');
+  await flushAsync();
+
+  assert.equal(state.hostLoading, true, 'the native host can still report a startup refresh');
+  assert.equal(state.localLoading, false, 'the popup request has completed');
+  assert.equal(byId('updated').textContent, 'Waiting for update schedule',
+    'host loading does not replace the usable popup countdown');
+  assert.equal(byId('refresh-button').disabled, false,
+    'host loading does not disable the popup refresh action');
+});
+
 test('Escape with the notification picker menu focused closes only the picker, keeping the settings page open', async () => {
   const harness = createHarness({
     snapshots: [snapshot('codex', { costUsd: 10 })],
