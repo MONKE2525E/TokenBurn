@@ -138,12 +138,88 @@ public sealed class RefreshDedupeTests
         });
     }
 
+    [Fact]
+    public async Task AProviderThatNeverCompletesCannotHoldAColdRefreshForever()
+    {
+        var cachePath = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", Guid.NewGuid().ToString("N"));
+        using var cache = new JsonFileUsageCache(cachePath);
+        var never = new TaskCompletionSource<ProviderSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new CountingProvider(() => never.Task);
+        var source = new CoreUsageSnapshotSource(
+            new FakeCatalog(provider), cache,
+            providerRefreshTimeout: TimeSpan.FromMilliseconds(25));
+
+        var result = Assert.Single(await source.GetSnapshotsAsync(null, force: false));
+
+        Assert.Equal("Network", result.ErrorCategory);
+        Assert.Contains("timed out", result.Error, StringComparison.OrdinalIgnoreCase);
+        never.SetResult(ProviderSnapshot.Success(Descriptor, [MetricLine.TextLine("Session", "1")]));
+    }
+
+    [Fact]
+    public async Task AProviderThatHonorsCancellationStillProducesATimeoutSnapshot()
+    {
+        var provider = new CancellationAwareProvider();
+        var source = new CoreUsageSnapshotSource(
+            new FakeCatalog(provider),
+            providerRefreshTimeout: TimeSpan.FromMilliseconds(25));
+
+        var result = Assert.Single(await source.GetSnapshotsAsync(null, force: true));
+
+        Assert.Equal("Network", result.ErrorCategory);
+        Assert.Contains("timed out", result.Error, StringComparison.OrdinalIgnoreCase);
+        await provider.CancellationObservedTask.WaitAsync(TimeSpan.FromSeconds(5));
+        provider.Release();
+        Assert.True(await provider.TokenAccessSucceededTask.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
     private sealed class CountingProvider(Func<Task<ProviderSnapshot>> refresh) : IUsageProvider
     {
         public ProviderDescriptor Descriptor { get; } = new("codex", "Codex", "primary");
 
         public Task<ProviderSnapshot> RefreshAsync(ProviderContext context, CancellationToken cancellationToken = default)
             => refresh();
+    }
+
+    private sealed class CancellationAwareProvider : IUsageProvider
+    {
+        public ProviderDescriptor Descriptor { get; } = new("codex", "Codex", "primary");
+        public Task CancellationObservedTask => _cancellationObserved.Task;
+        public Task<bool> TokenAccessSucceededTask => _tokenAccessSucceeded.Task;
+        private readonly TaskCompletionSource _cancellationObserved =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _tokenAccessSucceeded =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task<ProviderSnapshot> RefreshAsync(ProviderContext context,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _cancellationObserved.TrySetResult();
+                await _release.Task;
+                try
+                {
+                    using var registration = cancellationToken.Register(static () => { });
+                    _tokenAccessSucceeded.TrySetResult(true);
+                }
+                catch (ObjectDisposedException)
+                {
+                    _tokenAccessSucceeded.TrySetResult(false);
+                }
+                throw;
+            }
+
+            throw new InvalidOperationException("The test provider should not complete normally.");
+        }
     }
 
     private sealed class FakeCatalog(IUsageProvider provider) : IUsageProviderCatalog

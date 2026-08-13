@@ -23,18 +23,22 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     // One in-flight network refresh per provider, shared by every caller of this source (the
     // desktop refresh loop, API force requests from the popup/CLI, and cache-retry paths). A
     // duplicate refresh — a force landing while the scheduled refresh is running — joins the
-    // shared run instead of hitting the provider twice. The shared run deliberately uses no
-    // caller token so one caller's cancellation cannot abort the work everyone else is waiting
-    // on, mirroring the cache's cold-miss coordinator.
+    // shared run instead of hitting the provider twice. The shared run does not use a caller token
+    // so one caller's cancellation cannot abort the work everyone else is waiting on, but it has
+    // its own deadline so a provider cannot hold the dashboard in a loading state forever.
     private readonly ConcurrentDictionary<string, Task<ProviderSnapshot?>> _inFlightRefreshes =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly TimeSpan _providerRefreshTimeout;
 
     public CoreUsageSnapshotSource(IUsageProviderCatalog catalog, IUsageCache? cache = null,
-        ProviderContext? context = null)
+        ProviderContext? context = null, TimeSpan? providerRefreshTimeout = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _cache = cache;
         _context = context ?? new ProviderContext();
+        _providerRefreshTimeout = providerRefreshTimeout ?? TimeSpan.FromSeconds(30);
+        if (_providerRefreshTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(providerRefreshTimeout));
     }
 
     public IReadOnlySet<string> KnownProviderIds
@@ -75,7 +79,8 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
 
     /// <summary>
     /// Joins any in-flight network refresh of this provider, or starts one. The shared run is
-    /// token-free (see the field doc); the caller's own cancellation is honored by the await.
+    /// independent of the caller's cancellation (see the field doc); the caller's own
+    /// cancellation is honored by the await.
     /// </summary>
     private Task<ProviderSnapshot?> SharedRefreshAsync(IUsageProvider provider, ProviderContext context)
     {
@@ -90,12 +95,53 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
             _ = Task.Run(async () =>
             {
                 ProviderSnapshot? result = null;
+                var timeout = new CancellationTokenSource(_providerRefreshTimeout);
+                var disposeTimeoutWhenRefreshCompletes = false;
                 try
                 {
-                    result = await RefreshAsync(provider, context, CancellationToken.None).ConfigureAwait(false);
+                    // Run the provider invocation on its own worker so a synchronous local scanner
+                    // cannot prevent the timeout from being observed. Providers that honor
+                    // cancellation still stop promptly; the bounded await is the final safety net
+                    // for a provider that does not.
+                    var refreshTask = Task.Run(() => RefreshAsync(provider, context, timeout.Token));
+                    try
+                    {
+                        result = await refreshTask.WaitAsync(_providerRefreshTimeout).ConfigureAwait(false);
+                    }
+                    catch (Exception exception)
+                    {
+                        if (exception is TimeoutException ||
+                            exception is OperationCanceledException && timeout.IsCancellationRequested)
+                        {
+                            timeout.Cancel();
+                            result = ProviderSnapshot.Error(provider.Descriptor,
+                                "Provider refresh timed out.", ProviderErrorCategory.Network);
+                            context.Logger?.Warning("Provider refresh timed out",
+                                new Dictionary<string, object?>
+                                {
+                                    ["providerId"] = provider.Descriptor.Id,
+                                    ["timeoutMs"] = _providerRefreshTimeout.TotalMilliseconds
+                                });
+                            disposeTimeoutWhenRefreshCompletes = true;
+                            _ = refreshTask.ContinueWith(task =>
+                            {
+                                _ = task.Exception;
+                                timeout.Dispose();
+                            },
+                                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+                                TaskScheduler.Default);
+                        }
+                        else
+                        {
+                            result = ProviderSnapshot.Error(provider.Descriptor, exception,
+                                ProviderErrorCategory.Other);
+                            context.Logger?.Warning("Provider refresh failed", exception: exception);
+                        }
+                    }
                 }
                 finally
                 {
+                    if (!disposeTimeoutWhenRefreshCompletes) timeout.Dispose();
                     _inFlightRefreshes.TryRemove(new KeyValuePair<string, Task<ProviderSnapshot?>>(key, shared));
                     completion.TrySetResult(result);
                 }
@@ -232,7 +278,11 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     private async Task<ProviderSnapshot?> RefreshAndCacheAsync(IUsageProvider provider, string key,
         ProviderContext context, CancellationToken cancellationToken)
     {
-        var snapshot = await RefreshAsync(provider, context with { ForceRefresh = false }, cancellationToken).ConfigureAwait(false);
+        // Cold-cache and stale-cache refreshes must use the same bounded per-provider gate as
+        // forced refreshes. A cache miss otherwise bypassed that gate and could leave both the
+        // desktop host and popup waiting forever on a local scanner or provider request.
+        var snapshot = await SharedRefreshAsync(provider, context with { ForceRefresh = false })
+            .WaitAsync(cancellationToken).ConfigureAwait(false);
         if (snapshot is not null && snapshot.ErrorCategory is null && _cache is not null)
             await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
         return snapshot;
