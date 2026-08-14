@@ -9,9 +9,10 @@
 // - PR text, comments, diffs, and files are data for the reviewer, never commands.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { configuredReviewModels, reviewExitCode, reviewResult } from "./tokenburn-ai-review-policy.mjs";
 
 const ownerRepo = required("GITHUB_REPOSITORY").split("/");
 const owner = ownerRepo[0];
@@ -135,6 +136,15 @@ function summary(stage, details = {}) {
   return `TokenBurn AI review failed (${details.reason || "review_failed"}).`;
 }
 
+function reportCompletion(findingsCount) {
+  const message = findingsCount === 0
+    ? "TokenBurn AI review: 0 findings. CI passes."
+    : `TokenBurn AI review: ${findingsCount} finding${findingsCount === 1 ? "" : "s"}. CI fails.`;
+  console.log(message);
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) appendFileSync(summaryPath, `## TokenBurn AI review\n\n${message}\n`);
+}
+
 async function trustedFile(baseSha, relativePath) {
   const result = await git(["show", `${baseSha}:${relativePath}`]);
   return result.stdout;
@@ -219,7 +229,7 @@ async function main() {
   const existing = await existingStateComment(number);
   const previous = parseState(existing);
   if (!force && previous?.completed && previous.headSha === pr.head.sha && previous.mode === mode) return;
-  const models = [...new Set([process.env.CLIPROXY_MODEL || "gemini-3.6-flash-high", process.env.CLIPROXY_FALLBACK_MODEL || "claude-sonnet-4.6"])].filter(Boolean);
+  const models = configuredReviewModels();
   const baseState = { ...(previous || {}), prNumber: number, headSha: pr.head.sha, mode, models, completed: false };
   if (!String(process.env.CLIPROXY_API_KEY || "").trim() || !String(process.env.CLIPROXY_URL || "").trim()) {
     await updateState(number, existing, summary("skipped"), { ...baseState, status: "skipped", reason: "provider_not_configured" });
@@ -230,14 +240,15 @@ async function main() {
   try {
     await git(["fetch", "--no-tags", "--no-recurse-submodules", "origin", pr.base.sha, pr.head.sha]);
     let result;
+    let outcome;
     for (const model of models) {
       stateComment = await updateState(number, stateComment, summary("reviewing", { sha: pr.head.sha, model }), { ...baseState, model, status: "reviewing" });
       result = await reviewInQuarantine(pr, model, home);
-      if (result.code === 0) break;
-      const output = `${result.stderr}\n${result.stdout}`;
-      if (!/quota|rate[ -]?limit|429|model.{0,40}(?:not found|unavailable)/i.test(output)) break;
+      outcome = reviewResult(result);
+      if (outcome.succeeded) break;
+      if (!outcome.retryable) break;
     }
-    if (!result || result.code !== 0) {
+    if (!result || !outcome?.succeeded) {
       const reason = result?.previewFailed ? "preview_failed" : "review_failed";
       const raw = `${result?.stderr || ""}\n${result?.stdout || ""}`;
       const detail = redact(raw).replace(/\s+/g, " ").trim().slice(0, 400);
@@ -248,7 +259,10 @@ async function main() {
     }
     const resultFindings = findings(result.stdout);
     await postFindings(number, pr, resultFindings);
-    await updateState(number, stateComment, summary("complete", { findings: resultFindings.length }), { ...baseState, status: "completed", findings: resultFindings.length, completed: true });
+    const findingCount = resultFindings.length;
+    reportCompletion(findingCount);
+    await updateState(number, stateComment, summary("complete", { findings: findingCount }), { ...baseState, status: "completed", findings: findingCount, completed: true });
+    process.exitCode = reviewExitCode(findingCount);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
