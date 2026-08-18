@@ -44,7 +44,7 @@ public sealed class OpenCodeProvider : IUsageProvider
             var lines = new List<MetricLine>();
             var goRows = scan.Rows.Where(row => row.ProviderId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase)).ToArray();
             if (scan.HasGoCredential || goRows.Length > 0)
-                AddGoMeters(lines, goRows, scan.FirstGoUsageAt, context.Now);
+                AddGoMeters(lines, goRows, scan.FirstGoUsageAt, context.Now, context.ModelCatalog ?? _catalog);
 
             if (history.Points.Count > 0)
             {
@@ -197,11 +197,16 @@ public sealed class OpenCodeProvider : IUsageProvider
     }
 
     private static void AddGoMeters(ICollection<MetricLine> lines, IReadOnlyList<OpenCodeUsageRow> goRows,
-        DateTimeOffset? firstGoUsageAt, DateTimeOffset now)
+        DateTimeOffset? firstGoUsageAt, DateTimeOffset now, IModelCatalog? catalog)
     {
         const double sessionCap = 12;
         const double weeklyCap = 30;
         const double monthlyCap = 60;
+        // The meters price rows from the catalog exactly like the history total does. OpenCode's
+        // persisted per-message cost is unreliable (half the market rate for some models), so
+        // mixing it into the quota bars while the history uses the catalog rate made the meters
+        // disagree with both the history and the OpenCode Go billing dashboard.
+        double SessionCost(OpenCodeUsageRow row) => Price(row, catalog).CostUsd;
         var nowUtc = now.ToUniversalTime();
         var sessionStart = nowUtc.AddHours(-5);
         var currentSession = goRows.Where(row => row.Timestamp >= sessionStart && row.Timestamp < nowUtc).ToArray();
@@ -217,16 +222,18 @@ public sealed class OpenCodeProvider : IUsageProvider
         var monthStart = AnchoredMonthStart(nowUtc, firstGoUsageAt);
         var monthEnd = AnchoredMonthStart(monthStart.AddMonths(1), firstGoUsageAt);
 
-        lines.Add(MetricLine.Progress("Session", currentSession.Sum(row => row.CostUsd), sessionCap, MetricKind.Dollars,
+        lines.Add(MetricLine.Progress("Session", currentSession.Sum(SessionCost), sessionCap, MetricKind.Dollars,
             sessionResetsAt, TimeSpan.FromHours(5)));
-        lines.Add(MetricLine.Progress("Weekly", SumBetween(goRows, weekStart, weekEnd), weeklyCap, MetricKind.Dollars,
+        lines.Add(MetricLine.Progress("Weekly", SumBetween(goRows, weekStart, weekEnd, catalog), weeklyCap, MetricKind.Dollars,
             weekEnd, TimeSpan.FromDays(7)));
-        lines.Add(MetricLine.Progress("Monthly", SumBetween(goRows, monthStart, monthEnd), monthlyCap, MetricKind.Dollars,
+        lines.Add(MetricLine.Progress("Monthly", SumBetween(goRows, monthStart, monthEnd, catalog), monthlyCap, MetricKind.Dollars,
             monthEnd, monthEnd - monthStart));
     }
 
-    private static double SumBetween(IEnumerable<OpenCodeUsageRow> rows, DateTimeOffset start, DateTimeOffset end) =>
-        Math.Round(rows.Where(row => row.Timestamp >= start && row.Timestamp < end).Sum(row => row.CostUsd), 4);
+    private static double SumBetween(IEnumerable<OpenCodeUsageRow> rows, DateTimeOffset start, DateTimeOffset end,
+        IModelCatalog? catalog) =>
+        rows.Where(row => row.Timestamp >= start && row.Timestamp < end)
+            .Sum(row => Price(row, catalog).CostUsd);
 
     private static DateTimeOffset StartOfUtcWeek(DateTimeOffset value)
     {

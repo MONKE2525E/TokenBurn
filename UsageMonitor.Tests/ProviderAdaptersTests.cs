@@ -226,6 +226,28 @@ public sealed class ProviderAdaptersTests
     }
 
     [Fact]
+    public async Task AntigravityProviderReportsSignOutOnlyWhenTheRefreshTokenIsRejected()
+    {
+        var fs = new FixtureFileSystem(new Dictionary<string, string>
+        {
+            ["C:\\profile\\.gemini\\oauth_creds.json"] =
+                "{\"access_token\":\"expired-access\",\"refresh_token\":\"revoked-token\",\"expiry_date\":1,\"client_id\":\"fixture-client\",\"client_secret\":\"fixture-secret\"}"
+        });
+        var auth = new AntigravityAuthStore(fs, () => "C:\\profile", () => null);
+        var http = new QueueHttpClient(new Dictionary<string, IEnumerable<ProviderHttpResponse>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"] =
+                [new(401, new Dictionary<string, string>(), "{}")],
+            ["https://oauth2.googleapis.com/token"] =
+                [new(400, new Dictionary<string, string>(), "{\"error\":\"invalid_grant\"}")]
+        });
+
+        var snapshot = await new AntigravityProvider(auth, http).RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.Authentication, snapshot.ErrorCategory);
+    }
+
+    [Fact]
     public void CodexScannerDeduplicatesRepeatedTokenEvents()
     {
         var fs = new FixtureFileSystem(new Dictionary<string, string> { ["C:\\fixture\\codex.jsonl"] = File.ReadAllText(Fixture("codex_session.jsonl")) });
