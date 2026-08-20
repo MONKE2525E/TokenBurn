@@ -28,7 +28,7 @@ const makeElement = () => new Proxy({}, {
     if (property === 'getBoundingClientRect') return () => ({ left: 0, top: 0, width: 0, height: 0 });
     if (property === 'getContext') return () => ({
       setTransform: noop, clearRect: noop, beginPath: noop, arc: noop, stroke: noop, fill: noop,
-      moveTo: noop, lineTo: noop, quadraticCurveTo: noop, closePath: noop, fillText: noop, save: noop, restore: noop,
+      moveTo: noop, lineTo: noop, quadraticCurveTo: noop, bezierCurveTo: noop, closePath: noop, fillText: noop, save: noop, restore: noop,
       createLinearGradient: () => ({ addColorStop: noop }),
     });
     if (property in target) return target[property];
