@@ -913,7 +913,10 @@ public partial class MainWindow : Window
         // linger for the rest of the session.
         process.Exited += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (!_refreshInFlight) RefreshData(force: true, reason: "post-login");
+            // Always request the post-login refresh. If a scheduled refresh is already running,
+            // RefreshDataAsync joins it and promotes a force (via _forceRefreshQueued) so the fresh
+            // credential is actually read instead of silently dropping the request.
+            RefreshData(force: true, reason: "post-login");
             try { process.Dispose(); } catch { }
         }), System.Windows.Threading.DispatcherPriority.Background);
     }

@@ -96,16 +96,20 @@ public static class ModelPricingCatalog
         }
         // Codex's local model id is not guaranteed to be present in the remote catalog before
         // the first refresh. Keep the known local price available so Codex history is not
-        // silently assigned $0 and omitted from the spend ring on startup or offline.
+        // silently assigned $0 and omitted from the spend ring on startup or offline. The pin is
+        // half the market rate for Codex; OpenCode Go bills the full rate, so its rows get the
+        // official off-peak figure instead.
         if (value.Contains("gpt-5.6-luna", StringComparison.OrdinalIgnoreCase))
-            return new ModelPrice(.1, .01, .6);
+            return IsOpenCodeProvider(provider)
+                ? new ModelPrice(.2, .02, 1.2, .25)
+                : new ModelPrice(.1, .01, .6);
         // OpenCode persists a zero provider cost for subscription and free-routed responses.
         // Keep their cash-equivalent estimates meaningful when no fresh remote catalog entry is
         // available. Reasoning tokens are priced as generated output by the OpenCode reader.
         if (value.Contains("kimi-k3", StringComparison.OrdinalIgnoreCase))
             return new ModelPrice(3, .3, 15);
         if (value.Contains("deepseek-v4-flash", StringComparison.OrdinalIgnoreCase))
-            return new ModelPrice(.14, .0028, .28);
+            return new ModelPrice(.22, .007, .66);
         if (value.Contains("big-pickle", StringComparison.OrdinalIgnoreCase))
             return new ModelPrice(0, 0, 0);
         if (value.Contains("mini", StringComparison.OrdinalIgnoreCase)) return new ModelPrice(.25, .025, 2);
@@ -122,6 +126,9 @@ public static class ModelPricingCatalog
             "grok" => catalog is "grok" or "xai",
             _ => requested.Length > 0 && requested == Normalize(catalog)
         };
+
+    private static bool IsOpenCodeProvider(string provider) =>
+        provider is "opencode" or "opencode-go";
 
     private static bool ModelMatches(string catalogModel, string requestedModel)
     {

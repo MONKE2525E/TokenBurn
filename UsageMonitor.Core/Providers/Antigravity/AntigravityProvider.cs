@@ -62,6 +62,7 @@ public sealed class AntigravityProvider : IUsageProvider
             try
             {
                 var token = candidate.AccessToken?.Trim();
+                var refreshAttempted = false;
                 if (!AntigravityAuthStore.IsUsable(candidate, context.Now) && candidate.HasRefreshToken)
                 {
                     // Try a still-present access token first. Some Antigravity builds leave the
@@ -69,26 +70,32 @@ public sealed class AntigravityProvider : IUsageProvider
                     token = GetCachedToken(candidate.RefreshToken!, context.Now) ?? token;
                     if (string.IsNullOrWhiteSpace(token))
                     {
-                        var refreshed = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
-                        if (refreshed is not null)
+                        refreshAttempted = true;
+                        var outcome = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
+                        if (outcome.Result is { } refreshed)
                         {
                             token = refreshed.AccessToken;
                             CacheToken(refreshed, candidate.RefreshToken!);
                         }
-                        else
+                        else if (outcome.RefreshTokenRejected)
                         {
                             sawAuthFailure = true;
                             continue;
                         }
                     }
                 }
-                if (string.IsNullOrWhiteSpace(token) && candidate.HasRefreshToken)
+                if (!refreshAttempted && string.IsNullOrWhiteSpace(token) && candidate.HasRefreshToken)
                 {
-                    var refreshed = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
-                    if (refreshed is not null)
+                    var outcome = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
+                    if (outcome.Result is { } refreshed)
                     {
                         token = refreshed.AccessToken;
                         CacheToken(refreshed, candidate.RefreshToken!);
+                    }
+                    else if (outcome.RefreshTokenRejected)
+                    {
+                        sawAuthFailure = true;
+                        continue;
                     }
                 }
                 if (string.IsNullOrWhiteSpace(token)) continue;
@@ -119,8 +126,8 @@ public sealed class AntigravityProvider : IUsageProvider
                 {
                     try
                     {
-                        var refreshed = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
-                        if (refreshed is not null)
+                        var outcome = await RefreshGoogleTokenAsync(candidate, context, cancellationToken).ConfigureAwait(false);
+                        if (outcome.Result is { } refreshed)
                         {
                             CacheToken(refreshed, candidate.RefreshToken!);
                             var recovered = await FetchUsageAsync(refreshed.AccessToken, context, cancellationToken).ConfigureAwait(false);
@@ -136,10 +143,20 @@ public sealed class AntigravityProvider : IUsageProvider
                             return ProviderSnapshot.Success(Provider, recovered.Lines, recovered.Plan, context.Now,
                                 history: recoveredHistory);
                         }
+                        // A refresh token that is genuinely rejected (invalid_grant) means the
+                        // session ended; only then is "sign-in expired" truthful. Otherwise the
+                        // access token failed but the session is intact, which is a transient
+                        // condition rather than a signed-out state.
+                        sawAuthFailure |= outcome.RefreshTokenRejected;
                     }
                     catch (AntigravityAuthenticationException) { }
                 }
-                sawAuthFailure = true;
+                else
+                {
+                    // No refresh token to recover with, so a rejected access token is a real
+                    // sign-out even though the credential envelope still exists.
+                    sawAuthFailure = true;
+                }
             }
             catch (AntigravityRequestException ex)
             {
@@ -232,23 +249,64 @@ public sealed class AntigravityProvider : IUsageProvider
         return last ?? new ProviderHttpResponse(503, new Dictionary<string, string>(), string.Empty);
     }
 
-    private async Task<GoogleRefreshResult?> RefreshGoogleTokenAsync(AntigravityToken candidate, ProviderContext context, CancellationToken cancellationToken)
+    private async Task<GoogleRefreshOutcome> RefreshGoogleTokenAsync(AntigravityToken candidate, ProviderContext context, CancellationToken cancellationToken)
     {
-        var clientId = candidate.ClientId ?? Environment.GetEnvironmentVariable(GoogleClientIdEnvironmentVariable);
-        var clientSecret = candidate.ClientSecret ?? Environment.GetEnvironmentVariable(GoogleClientSecretEnvironmentVariable);
-        if (string.IsNullOrWhiteSpace(candidate.RefreshToken) || string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
-            return null;
+        if (string.IsNullOrWhiteSpace(candidate.RefreshToken))
+            return new GoogleRefreshOutcome(null, RefreshTokenRejected: false);
 
-        var form = $"client_id={Uri.EscapeDataString(clientId)}&client_secret={Uri.EscapeDataString(clientSecret)}&refresh_token={Uri.EscapeDataString(candidate.RefreshToken)}&grant_type=refresh_token";
-        var response = await _http.SendAsync(HttpMethod.Post, new Uri(GoogleTokenUri),
-            new Dictionary<string, string> { ["Accept"] = "application/json" }, form, "application/x-www-form-urlencoded", context.Proxy, cancellationToken).ConfigureAwait(false);
-        if (response.StatusCode is 400 or 401) return null;
-        if (response.StatusCode < 200 || response.StatusCode >= 300) throw new AntigravityRequestException(response.StatusCode);
-        using var document = ProviderJson.Parse(response.Body);
-        var access = ProviderJson.String(ProviderJson.Property(document?.RootElement ?? default, "access_token", "accessToken"));
-        if (string.IsNullOrWhiteSpace(access)) return null;
-        var expiresIn = ProviderJson.Number(ProviderJson.Property(document?.RootElement ?? default, "expires_in", "expiresIn")) ?? 3600;
-        return new GoogleRefreshResult(access.Trim(), context.Now.AddSeconds(Math.Max(60, expiresIn)));
+        // The refresh token is bound to the OAuth client that issued it. Try the credential's own
+        // client credentials, then the environment override. An invalid_grant response means the
+        // refresh token itself was rejected (the session is genuinely over), which no other client
+        // can fix, so that stops the loop.
+        var candidates = new List<(string ClientId, string ClientSecret)>();
+        var credentialClientId = candidate.ClientId;
+        var credentialClientSecret = candidate.ClientSecret;
+        if (!string.IsNullOrWhiteSpace(credentialClientId) && !string.IsNullOrWhiteSpace(credentialClientSecret))
+            candidates.Add((credentialClientId.Trim(), credentialClientSecret.Trim()));
+        var environmentClientId = Environment.GetEnvironmentVariable(GoogleClientIdEnvironmentVariable);
+        var environmentClientSecret = Environment.GetEnvironmentVariable(GoogleClientSecretEnvironmentVariable);
+        if (!string.IsNullOrWhiteSpace(environmentClientId) && !string.IsNullOrWhiteSpace(environmentClientSecret) &&
+            !candidates.Any(pair => pair.ClientId == environmentClientId.Trim() && pair.ClientSecret == environmentClientSecret.Trim()))
+            candidates.Add((environmentClientId.Trim(), environmentClientSecret.Trim()));
+        foreach (var client in candidates)
+        {
+            var form = $"client_id={Uri.EscapeDataString(client.ClientId)}&client_secret={Uri.EscapeDataString(client.ClientSecret)}&refresh_token={Uri.EscapeDataString(candidate.RefreshToken)}&grant_type=refresh_token";
+            var response = await _http.SendAsync(HttpMethod.Post, new Uri(GoogleTokenUri),
+                new Dictionary<string, string> { ["Accept"] = "application/json" }, form, "application/x-www-form-urlencoded", context.Proxy, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode is >= 200 and < 300)
+            {
+                using var document = ProviderJson.Parse(response.Body);
+                var access = ProviderJson.String(ProviderJson.Property(document?.RootElement ?? default, "access_token", "accessToken"));
+                if (!string.IsNullOrWhiteSpace(access))
+                {
+                    var expiresIn = ProviderJson.Number(ProviderJson.Property(document?.RootElement ?? default, "expires_in", "expiresIn")) ?? 3600;
+                    return new GoogleRefreshOutcome(
+                        new GoogleRefreshResult(access.Trim(), context.Now.AddSeconds(Math.Max(60, expiresIn))),
+                        RefreshTokenRejected: false);
+                }
+            }
+            if (response.StatusCode is 400 or 401 && IsInvalidGrant(response.Body))
+                return new GoogleRefreshOutcome(null, RefreshTokenRejected: true);
+            if (response.StatusCode < 200 || response.StatusCode >= 300)
+            {
+                if (response.StatusCode is 400 or 401) continue;
+                throw new AntigravityRequestException(response.StatusCode);
+            }
+        }
+
+        return new GoogleRefreshOutcome(null, RefreshTokenRejected: false);
+    }
+
+    private static bool IsInvalidGrant(string body)
+    {
+        try
+        {
+            using var document = ProviderJson.Parse(body);
+            var error = ProviderJson.String(ProviderJson.Property(document?.RootElement ?? default, "error"));
+            return error is not null &&
+                   error.Contains("invalid_grant", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (AntigravityParseException) { return false; }
     }
 
     private string? GetCachedToken(string refreshToken, DateTimeOffset now)
@@ -270,6 +328,8 @@ public sealed class AntigravityProvider : IUsageProvider
         => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)))[..16];
 
     private sealed record GoogleRefreshResult(string AccessToken, DateTimeOffset ExpiresAt);
+
+    private sealed record GoogleRefreshOutcome(GoogleRefreshResult? Result, bool RefreshTokenRejected);
 
     private static string? ParseProject(string body)
     {
