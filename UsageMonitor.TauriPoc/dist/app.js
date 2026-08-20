@@ -1609,6 +1609,17 @@ function collectSettingsForm(base) {
   return result;
 }
 
+// Recoverable issues — sign-in or key setup, transient rate limits, network trouble — get the
+// amber "needs attention" treatment. Everything else (not installed, unsupported plan or scope,
+// unparsable data, unknown failures) blocks the provider outright and shows red. Categories arrive
+// as ProviderErrorCategory names from the desktop host; a status without one is a warning-only
+// snapshot, and an unrecognized category fails toward red rather than pretending it is minor.
+const RECOVERABLE_STATUS_CATEGORIES = new Set(['NotConfigured', 'Authentication', 'RateLimited', 'Network']);
+
+function providerStatusSeverity(status) {
+  return status?.category && !RECOVERABLE_STATUS_CATEGORIES.has(status.category) ? 'error' : 'warning';
+}
+
 function renderCustomizeForm(data) {
   const disabled = new Set((data.settings.disabledProviders || []).map(name => name.toLowerCase()));
   const expanded = new Set(Array.from(document.querySelectorAll('#customize-providers [data-metric-disclosure][aria-expanded="true"]')).map(button => button.dataset.providerId));
@@ -1625,7 +1636,7 @@ function renderCustomizeForm(data) {
   const starredList = data.settings.starredMetrics || [];
   const statusByProvider = new Map((data.providerStatuses || [])
     .filter(status => status?.id && status.reason)
-    .map(status => [status.id.toLowerCase(), status.reason]));
+    .map(status => [status.id.toLowerCase(), status]));
   $('#customize-providers').innerHTML = data.providers.map(p => {
     const checked = !disabled.has(p.id.toLowerCase());
     const metricNames = metricsByProvider.get(p.id.toLowerCase()) || [];
@@ -1641,8 +1652,10 @@ function renderCustomizeForm(data) {
     }).join('');
     const metricWord = metricNames.length === 1 ? 'metric' : 'metrics';
     const disclosureLabel = isExpanded ? 'Hide' : 'Show';
+    const severity = issue ? providerStatusSeverity(issue) : '';
+    const attentionLabel = severity === 'error' ? 'is unavailable' : 'needs attention';
     const logo = issue
-      ? `<button type="button" class="provider-status-trigger" data-provider-status="${esc(issue)}" aria-label="${esc(p.displayName)} needs attention" aria-describedby="provider-status-tooltip"><span class="provider-customize-logo has-issue">${providerLogo(p.id)}<span class="provider-status-badge" aria-hidden="true">!</span></span></button>`
+      ? `<button type="button" class="provider-status-trigger" data-provider-status="${esc(issue.reason)}" data-provider-severity="${severity}" aria-label="${esc(p.displayName)} ${attentionLabel}" aria-describedby="provider-status-tooltip"><span class="provider-customize-logo has-issue${severity === 'error' ? ' is-error' : ''}">${providerLogo(p.id)}<span class="provider-status-badge" aria-hidden="true">!</span></span></button>`
       : `<span class="provider-customize-logo">${providerLogo(p.id)}</span>`;
     return `<div class="provider-customize-group" data-provider-group="${esc(p.id)}"><div class="provider-customize-row"><div class="provider-name-label">${logo}<span>${esc(p.displayName)}</span></div><button type="button" class="metric-disclosure" data-metric-disclosure data-provider-id="${esc(p.id)}" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="${panelId}" aria-label="${disclosureLabel} ${esc(p.displayName)} metrics"><span class="metric-counts"><span class="metric-count">Exposes ${metricNames.length} ${metricWord}</span><span class="metric-selected">${selectedCount} visible</span></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5"></path></svg></button><label class="provider-switch" aria-label="Enable ${esc(p.displayName)}"><input class="toggle-input" type="checkbox" data-provider="${esc(p.id)}" ${checked ? 'checked' : ''}><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span></label></div><div id="${panelId}" class="provider-metric-options${isExpanded ? ' is-open' : ''}"><div class="metric-options-inner">${metricRows || '<div class="field-note">No catalog metrics yet.</div>'}</div></div></div>`;
   }).join('');
@@ -2047,16 +2060,36 @@ async function copyTextToClipboard(text) {
 }
 
 const providerStatusTooltip = $('#provider-status-tooltip');
-function positionProviderStatusTooltip(clientX, clientY) {
-  const gap = 12;
+const PROVIDER_STATUS_TOOLTIP_ICONS = {
+  warning: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.8 14.2 13.2H1.8Z"></path><path d="M8 6.7v2.5"></path><path d="M8 11.5h.01"></path></svg>',
+  error: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"></circle><path d="m5.9 5.9 4.2 4.2m0-4.2-4.2 4.2"></path></svg>'
+};
+
+function positionProviderStatusTooltip(trigger) {
+  const gap = 9;
   const bounds = providerStatusTooltip.getBoundingClientRect();
-  providerStatusTooltip.style.left = `${Math.min(window.innerWidth - bounds.width - 10, Math.max(10, clientX + gap))}px`;
-  providerStatusTooltip.style.top = `${Math.min(window.innerHeight - bounds.height - 10, Math.max(10, clientY + gap))}px`;
+  const rect = trigger.getBoundingClientRect();
+  // Anchor to the badge rather than the cursor: a cursor-following tooltip repositions on every
+  // mousemove and lands on top of the rows underneath. Flip above the trigger when the row sits
+  // too close to the bottom of the window for the tooltip to fit below.
+  const left = Math.min(window.innerWidth - bounds.width - 10, Math.max(10, rect.left));
+  const below = rect.bottom + gap;
+  const top = below + bounds.height > window.innerHeight - 10
+    ? Math.max(10, rect.top - gap - bounds.height)
+    : below;
+  providerStatusTooltip.style.left = `${left}px`;
+  providerStatusTooltip.style.top = `${top}px`;
 }
-function showProviderStatusTooltip(trigger, clientX, clientY) {
+
+function showProviderStatusTooltip(trigger) {
   if (!trigger?.dataset.providerStatus) return;
-  providerStatusTooltip.textContent = trigger.dataset.providerStatus;
-  positionProviderStatusTooltip(clientX, clientY);
+  const severity = trigger.dataset.providerSeverity === 'error' ? 'error' : 'warning';
+  providerStatusTooltip.classList.toggle('is-error', severity === 'error');
+  // The title carries the severity in words (state must not rely on color alone); the message is
+  // the host's redacted, already-actionable reason.
+  const title = severity === 'error' ? 'Unavailable' : 'Needs attention';
+  providerStatusTooltip.innerHTML = `<div class="provider-status-tooltip-title"><span class="provider-status-tooltip-icon">${PROVIDER_STATUS_TOOLTIP_ICONS[severity]}</span>${title}</div><div class="provider-status-tooltip-message">${esc(trigger.dataset.providerStatus)}</div>`;
+  positionProviderStatusTooltip(trigger);
   setOverlayOpen(providerStatusTooltip, true);
 }
 function hideProviderStatusTooltip() {
@@ -2077,19 +2110,27 @@ $('#customize-providers').addEventListener('click', event => {
   // been animating on its own since before this pass.
   panel.classList.toggle('is-open', !expanded);
 });
+// The tooltip is anchored to the badge, so it only needs to be (re)shown when the pointer enters
+// a different trigger; moving within one trigger must not reposition anything.
+let activeStatusTrigger = null;
 $('#customize-providers').addEventListener('mousemove', event => {
   const trigger = event.target.closest('[data-provider-status]');
-  if (trigger) showProviderStatusTooltip(trigger, event.clientX, event.clientY);
-  else hideProviderStatusTooltip();
+  if (trigger && trigger !== activeStatusTrigger) showProviderStatusTooltip(trigger);
+  else if (!trigger) hideProviderStatusTooltip();
+  activeStatusTrigger = trigger;
 });
-$('#customize-providers').addEventListener('mouseleave', hideProviderStatusTooltip);
+$('#customize-providers').addEventListener('mouseleave', () => {
+  activeStatusTrigger = null;
+  hideProviderStatusTooltip();
+});
 $('#customize-providers').addEventListener('focusin', event => {
   const trigger = event.target.closest('[data-provider-status]');
   if (!trigger) return;
-  const rect = trigger.getBoundingClientRect();
-  showProviderStatusTooltip(trigger, rect.right, rect.top);
+  activeStatusTrigger = trigger;
+  showProviderStatusTooltip(trigger);
 });
 $('#customize-providers').addEventListener('focusout', event => {
+  activeStatusTrigger = null;
   if (!event.relatedTarget?.closest?.('[data-provider-status]')) hideProviderStatusTooltip();
 });
 

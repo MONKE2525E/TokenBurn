@@ -370,7 +370,12 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .provider-name-label img { width: 18px; height: 18px; object-fit: contain; filter: brightness(0) invert(1); opacity: .8; }
 .provider-customize-logo { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; }
 .provider-customize-logo.has-issue img { filter: brightness(0) saturate(100%) invert(79%) sepia(64%) saturate(520%) hue-rotate(343deg) brightness(103%) contrast(91%); opacity: 1; }
+/* Blocking failures tint the logo brand red instead of amber. The invert/sepia/saturate/hue chain
+   below is computed to land exactly on --orange #F8293D from black (same pipeline as the amber
+   tint above); hand-tuning the angles visually does not survive logo changes. */
+.provider-customize-logo.has-issue.is-error img { filter: brightness(0) invert(80%) sepia(44%) saturate(850%) hue-rotate(296deg) brightness(65%) contrast(315%); }
 .provider-status-badge { position: absolute; top: -6px; right: -7px; width: 13px; height: 13px; display: grid; place-items: center; border: 2px solid #242426; border-radius: 50%; background: var(--warning); color: #242426; font-size: 9px; font-weight: 900; line-height: 0; }
+.provider-customize-logo.is-error .provider-status-badge { background: var(--orange); color: #fff; }
 /* line-height 0 keeps the glyph box itself centered in the badge: with a normal line box the
    "!" renders against the top of the circle because its em-box has no descender space. */
 .provider-status-trigger { border: 0; padding: 0; background: transparent; cursor: pointer; }
@@ -444,7 +449,12 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .trend i:hover { opacity: 1; filter: brightness(1.22); }
 .trend i[aria-label$="No data"] { background: rgba(255,255,255,.14); border-radius: 2px; }
 .trend-tooltip { position: fixed; z-index: 100; max-width: 220px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.2); border-radius: 9px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.3; white-space: nowrap; pointer-events: none; transform-origin: bottom left; }
-.provider-status-tooltip { position: fixed; z-index: 100; max-width: 230px; padding: 8px 10px; border: 1px solid rgba(244,183,77,.42); border-radius: 8px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.35; pointer-events: none; transform-origin: top left; }
+.provider-status-tooltip { position: fixed; z-index: 100; max-width: 240px; padding: 9px 11px; border: 1px solid rgba(244,183,77,.42); border-radius: 9px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.35; pointer-events: none; transform-origin: top left; }
+.provider-status-tooltip.is-error { border-color: rgba(248,41,61,.5); }
+.provider-status-tooltip-title { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--warning); }
+.provider-status-tooltip.is-error .provider-status-tooltip-title { color: #f8556a; }
+.provider-status-tooltip-icon { display: inline-grid; place-items: center; }
+.provider-status-tooltip-icon svg { width: 12px; height: 12px; }
 .metric-option { display: flex; align-items: center; gap: 9px; }
 .metric-option .toggle-label { display: grid; gap: 2px; }
 .metric-option small { color: var(--muted); font-size: 10px; line-height: 1.3; }

@@ -1198,6 +1198,74 @@ test('out-of-order settings requests: a slower older request cannot activate its
   assert.equal(query('#settings-view.active').length, 0, 'stale response cannot activate settings');
 });
 
+test('customize statuses: blocking failures render red, recoverable ones amber', async () => {
+  const harness = createHarness({
+    snapshots: [snapshot('codex', { costUsd: 10 })],
+    settingsData: {
+      settings: { usageDisplay: 'Used', resetTimeDisplay: 'Countdown', taskbarPositionLocked: true, motionPreference: 'system', notificationsEnabled: true, notificationProviderIds: [], disabledProviders: [], starredMetrics: [], spendMetric: 'cost' },
+      providers: [
+        { id: 'codex', displayName: 'Codex', available: true },
+        { id: 'cursor', displayName: 'Cursor', available: false },
+        { id: 'antigravity', displayName: 'Antigravity', available: true },
+        { id: 'claude-code', displayName: 'Claude Code', available: true },
+      ],
+      metricNames: ['codex:weekly'],
+      providerStatuses: [
+        { id: 'cursor', reason: 'Cursor was not detected on this Windows account.', category: 'NotInstalled' },
+        { id: 'antigravity', reason: 'Antigravity sign-in expired. Open Antigravity or Gemini CLI and sign in again.', category: 'Authentication' },
+        // A status without a category is a warning-only snapshot from an older host build.
+        { id: 'claude-code', reason: 'Claude usage is temporarily unavailable.' },
+      ],
+    },
+  });
+  const { fire, emitNative, byId, query, tick, flushAsync } = harness;
+  await flushAsync();
+  tick(250);
+  emitNative('poc-opened');
+  await flushAsync();
+
+  fire(query('[data-options="customize"]')[0], 'click');
+  await flushAsync();
+  assert.ok(byId('customize-view').classList.contains('active'), 'customize page open');
+
+  // The harness selector engine splits segments on whitespace, so match triggers through their
+  // provider group rather than an attribute value containing spaces.
+  const cursorTrigger = query('[data-provider-group="cursor"] [data-provider-status]')[0];
+  const antigravityTrigger = query('[data-provider-group="antigravity"] [data-provider-status]')[0];
+  assert.ok(cursorTrigger, 'cursor status trigger rendered');
+  assert.equal(cursorTrigger.dataset.providerSeverity, 'error', 'NotInstalled classifies as blocking');
+  assert.ok(cursorTrigger.querySelector('.provider-customize-logo').classList.contains('is-error'), 'blocking logo gets the red variant');
+  assert.ok(cursorTrigger.getAttribute('aria-label').includes('unavailable'), 'blocking trigger says unavailable');
+
+  const warningTriggers = query('[data-provider-severity="warning"]');
+  assert.equal(warningTriggers.length, 2, 'Authentication and category-less statuses classify as recoverable');
+  assert.ok(antigravityTrigger, 'antigravity status trigger rendered');
+  assert.ok(!antigravityTrigger.querySelector('.provider-customize-logo').classList.contains('is-error'), 'recoverable logo keeps the amber variant');
+  assert.ok(antigravityTrigger.getAttribute('aria-label').includes('needs attention'), 'recoverable trigger says needs attention');
+
+  // Hover a blocking trigger: the tooltip anchors to it and carries the red title.
+  fire(cursorTrigger, 'mousemove', { clientX: 30, clientY: 30 });
+  const tooltip = byId('provider-status-tooltip');
+  assert.ok(tooltip.classList.contains('is-open'), 'tooltip opens on hover');
+  assert.ok(tooltip.classList.contains('is-error'), 'tooltip gets the red variant');
+  assert.ok(tooltip.textContent.includes('Unavailable'), 'tooltip title says Unavailable in words');
+  assert.ok(tooltip.textContent.includes('not detected'), 'tooltip shows the host reason');
+  assert.ok(tooltip.style.left, 'tooltip is positioned');
+
+  // Moving within the same trigger must not reposition or reset it; moving to a recoverable
+  // trigger swaps the severity.
+  const left = tooltip.style.left;
+  fire(cursorTrigger, 'mousemove', { clientX: 34, clientY: 32 });
+  assert.equal(tooltip.style.left, left, 'moving inside one trigger does not reposition the anchored tooltip');
+  fire(antigravityTrigger, 'mousemove', { clientX: 40, clientY: 40 });
+  assert.ok(!tooltip.classList.contains('is-error'), 'tooltip loses the red variant for recoverable statuses');
+  assert.ok(tooltip.textContent.includes('Needs attention'), 'tooltip title says Needs attention');
+
+  // Leaving the list hides the tooltip.
+  fire(byId('customize-providers'), 'mouseleave');
+  assert.ok(!tooltip.classList.contains('is-open'), 'tooltip closes on mouseleave');
+});
+
 test('refresh reentrancy: a refresh in flight swallows later requests without clobbering state', async () => {
   const harness = createHarness({ snapshots: [] });
   const { fire, emitNative, query, tick, flushAsync, defaults, deferred, invokeCalls, byId } = harness;

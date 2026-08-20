@@ -3,6 +3,7 @@ using UsageMonitor.Core.Providers;
 using UsageMonitor.Core.Providers.Claude;
 using UsageMonitor.Core.Providers.Codex;
 using UsageMonitor.Core.Providers.Antigravity;
+using UsageMonitor.Core.Providers.Cursor;
 using UsageMonitor.Core.Providers.Grok;
 using UsageMonitor.Core.Providers.OpenRouter;
 using UsageMonitor.Core.Providers.Zai;
@@ -726,6 +727,18 @@ public sealed class ProviderAdaptersTests
         Assert.Equal(ProviderErrorCategory.NotConfigured, snapshot.ErrorCategory);
         Assert.Contains("signed out", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("auth login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CursorProviderReportsMissingInstallAsNotInstalled()
+    {
+        // A missing install is a blocking failure, not a sign-in prompt: the Customize page renders
+        // NotInstalled in red while NotConfigured (run `x login`) stays amber.
+        var snapshot = await new CursorProvider(new FixtureFileSystem(new Dictionary<string, string>()))
+            .RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.NotInstalled, snapshot.ErrorCategory);
+        Assert.Contains("not detected", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Fixture(string name)

@@ -15,6 +15,6 @@ public sealed class DevinProvider : IUsageProvider
             ? ProviderSnapshot.Error(Provider,
                 "Devin credentials were detected, but no stable supported quota endpoint is configured.",
                 ProviderErrorCategory.Unsupported)
-            : ProviderSnapshot.Error(Provider, "Devin was not configured on this Windows account.", ProviderErrorCategory.NotConfigured));
+            : ProviderSnapshot.Error(Provider, "Devin was not configured on this Windows account.", ProviderErrorCategory.NotInstalled));
     }
 }
