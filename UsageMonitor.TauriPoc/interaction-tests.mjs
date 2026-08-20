@@ -69,7 +69,7 @@ function makeCanvasContext() {
   const noop = () => {};
   return {
     setTransform: noop, clearRect: noop, beginPath: noop, arc: noop, stroke: noop, fill: noop,
-    moveTo: noop, lineTo: noop, quadraticCurveTo: noop, closePath: noop, fillText: noop,
+    moveTo: noop, lineTo: noop, quadraticCurveTo: noop, bezierCurveTo: noop, closePath: noop, fillText: noop,
     save: noop, restore: noop, scale: noop, drawImage: noop, strokeRect: noop, fillRect: noop,
     createLinearGradient: () => ({ addColorStop: noop }),
     measureText: text => ({ width: Math.max(8, String(text).length * 6), actualBoundingBoxAscent: 10, actualBoundingBoxDescent: 3 }),

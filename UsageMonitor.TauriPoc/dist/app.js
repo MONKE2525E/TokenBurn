@@ -436,18 +436,19 @@ let breakdownChartGeometry = null;
 function traceSmoothLine(ctx, coordinates) {
   if (!coordinates.length) return;
   ctx.moveTo(coordinates[0].x, coordinates[0].y);
-  // Stop one point earlier: the tail quadratic ends ON the last point, so the loop must not
-  // already have advanced past the midpoint of the last pair. Drawing that final segment twice
-  // made the last section hook back toward the peak at the right edge of the chart.
-  for (let index = 1; index < coordinates.length - 2; index++) {
+  // Catmull-Rom (as cubic Béziers) passes through every point. The previous quadratic midpoint
+  // curve treated interior points as mere control points, so on spiky days the line cut far
+  // below peaks / above dips and the hover dots visibly floated off their own line.
+  for (let index = 0; index < coordinates.length - 1; index++) {
+    const previous = coordinates[index - 1] ?? coordinates[index];
     const current = coordinates[index];
     const next = coordinates[index + 1];
-    ctx.quadraticCurveTo(current.x, current.y, (current.x + next.x) / 2, (current.y + next.y) / 2);
-  }
-  if (coordinates.length > 1) {
-    const penultimate = coordinates[coordinates.length - 2];
-    const last = coordinates[coordinates.length - 1];
-    ctx.quadraticCurveTo(penultimate.x, penultimate.y, last.x, last.y);
+    const after = coordinates[index + 2] ?? next;
+    ctx.bezierCurveTo(
+      current.x + (next.x - previous.x) / 6, current.y + (next.y - previous.y) / 6,
+      next.x - (after.x - current.x) / 6, next.y - (after.y - current.y) / 6,
+      next.x, next.y,
+    );
   }
 }
 function drawBreakdownChart(series, hoverIndex = null) {
