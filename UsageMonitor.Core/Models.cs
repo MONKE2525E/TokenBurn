@@ -223,6 +223,7 @@ public sealed record ProviderSnapshot
 public enum ProviderErrorCategory
 {
     NotConfigured,
+    NotInstalled,
     Authentication,
     Authorization,
     RateLimited,
