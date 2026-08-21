@@ -23,6 +23,6 @@ public sealed class CopilotProvider : IUsageProvider
             ? ProviderSnapshot.Error(Provider,
                 "Copilot was detected, but account-level AI credit usage requires a GitHub billing scope that is not configured.",
                 ProviderErrorCategory.Unsupported)
-            : ProviderSnapshot.Error(Provider, "GitHub Copilot was not detected on this Windows account.", ProviderErrorCategory.NotConfigured));
+            : ProviderSnapshot.Error(Provider, "GitHub Copilot was not detected on this Windows account.", ProviderErrorCategory.NotInstalled));
     }
 }

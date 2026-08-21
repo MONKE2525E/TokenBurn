@@ -22,6 +22,6 @@ public sealed class CursorProvider : IUsageProvider
             ? ProviderSnapshot.Error(Provider,
                 "Cursor was detected, but its private usage service is not available through a stable public contract.",
                 ProviderErrorCategory.Unsupported)
-            : ProviderSnapshot.Error(Provider, "Cursor was not detected on this Windows account.", ProviderErrorCategory.NotConfigured));
+            : ProviderSnapshot.Error(Provider, "Cursor was not detected on this Windows account.", ProviderErrorCategory.NotInstalled));
     }
 }

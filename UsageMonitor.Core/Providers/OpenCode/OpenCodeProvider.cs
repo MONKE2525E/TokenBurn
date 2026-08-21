@@ -37,7 +37,7 @@ public sealed class OpenCodeProvider : IUsageProvider
             {
                 return Task.FromResult(ProviderSnapshot.Error(Provider,
                     "OpenCode was not found. Use OpenCode locally or sign in to OpenCode Go first.",
-                    ProviderErrorCategory.NotConfigured));
+                    ProviderErrorCategory.NotInstalled));
             }
 
             var history = BuildHistory(scan.Rows, context.Now, context.ModelCatalog ?? _catalog);

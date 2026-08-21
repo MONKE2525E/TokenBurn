@@ -1213,12 +1213,20 @@ public partial class MainWindow : Window
         }).ToArray();
         // The Customize page needs only an actionable, already-redacted reason. Provider output
         // can contain enough implementation detail to help a user reconnect, but it must never
-        // carry credentials, logs, or raw exception data into the webview.
+        // carry credentials, logs, or raw exception data into the webview. The category lets the
+        // page separate blocking failures (not installed, unsupported) from recoverable ones
+        // (sign-in, rate limit, network); ErrorCategory is only set on error snapshots, so a
+        // warning-only status arrives with a null category.
         var providerStatuses = DashboardData.Providers.Select(provider =>
         {
             snapshotsByProvider.TryGetValue(provider.Id, out var snapshot);
             var reason = snapshot?.Error ?? snapshot?.Warning;
-            return new { id = provider.Id, reason = string.IsNullOrWhiteSpace(reason) ? null : reason };
+            return new
+            {
+                id = provider.Id,
+                reason = string.IsNullOrWhiteSpace(reason) ? null : reason,
+                category = snapshot?.ErrorCategory?.ToString()
+            };
         }).ToArray();
         var payload = new
         {
