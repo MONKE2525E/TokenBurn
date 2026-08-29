@@ -78,8 +78,13 @@ public static class TokenBurnTrayIcoGenerator
             for (var x = 0; x < size; x++)
             {
                 var color = bitmap.GetPixel(x, y);
-                if (color.A < 64) bitmap.SetPixel(x, y, Color.FromArgb(0, 0, 0, 0));
+                if (color.A < 96) bitmap.SetPixel(x, y, Color.FromArgb(0, 0, 0, 0));
             }
+            var transparentBlack = Color.FromArgb(0, 0, 0, 0);
+            bitmap.SetPixel(0, 0, transparentBlack);
+            bitmap.SetPixel(size - 1, 0, transparentBlack);
+            bitmap.SetPixel(0, size - 1, transparentBlack);
+            bitmap.SetPixel(size - 1, size - 1, transparentBlack);
 
             var maskStride = ((size + 31) / 32) * 4;
             using (var stream = new MemoryStream())
