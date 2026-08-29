@@ -7,6 +7,22 @@ namespace UsageMonitor.Tests;
 public sealed class TokenBurnIconTests
 {
     [Fact]
+    public void CanonicalAppIconBackgroundFillsTheSquareCanvas()
+    {
+        var sourcePath = Path.Combine(FindRepositoryRoot(), "assets", "brand", "logo", "tokenburn-app-icon.svg");
+        var document = System.Xml.Linq.XDocument.Load(sourcePath);
+        var root = Assert.IsType<System.Xml.Linq.XElement>(document.Root);
+        var ns = root.Name.Namespace;
+        var background = Assert.Single(root.Elements(ns + "rect"));
+
+        Assert.Equal("0 0 1254 1254", root.Attribute("viewBox")?.Value);
+        Assert.Null(background.Attribute("x"));
+        Assert.Null(background.Attribute("y"));
+        Assert.Equal("1254", background.Attribute("width")?.Value);
+        Assert.Equal("1254", background.Attribute("height")?.Value);
+    }
+
+    [Fact]
     public void SourceControlledExportSetExistsAndBothIcosLoad()
     {
         var exportDirectory = Path.Combine(FindRepositoryRoot(), "assets", "brand", "exports");
