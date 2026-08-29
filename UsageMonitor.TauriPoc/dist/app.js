@@ -433,7 +433,7 @@ function breakdownSeries(rows) {
   })}));
 }
 let breakdownChartGeometry = null;
-function traceSmoothLine(ctx, coordinates) {
+function traceSmoothLine(ctx, coordinates, bounds = null) {
   if (!coordinates.length) return;
   ctx.moveTo(coordinates[0].x, coordinates[0].y);
   // Catmull-Rom (as cubic Béziers) passes through every point. The previous quadratic midpoint
@@ -444,9 +444,12 @@ function traceSmoothLine(ctx, coordinates) {
     const current = coordinates[index];
     const next = coordinates[index + 1];
     const after = coordinates[index + 2] ?? next;
+    const controlOneY = current.y + (next.y - previous.y) / 6;
+    const controlTwoY = next.y - (after.y - current.y) / 6;
+    const clampY = value => bounds ? Math.max(bounds.top, Math.min(bounds.bottom, value)) : value;
     ctx.bezierCurveTo(
-      current.x + (next.x - previous.x) / 6, current.y + (next.y - previous.y) / 6,
-      next.x - (after.x - current.x) / 6, next.y - (after.y - current.y) / 6,
+      current.x + (next.x - previous.x) / 6, clampY(controlOneY),
+      next.x - (after.x - current.x) / 6, clampY(controlTwoY),
       next.x, next.y,
     );
   }
@@ -468,9 +471,9 @@ function drawBreakdownChart(series, hoverIndex = null) {
   })) }));
   rendered.forEach(item => {
     ctx.save();
-    ctx.globalAlpha = .13; ctx.fillStyle = item.color; ctx.beginPath(); traceSmoothLine(ctx, item.coordinates); ctx.lineTo(item.coordinates.at(-1).x, plot.bottom); ctx.lineTo(item.coordinates[0].x, plot.bottom); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = .13; ctx.fillStyle = item.color; ctx.beginPath(); traceSmoothLine(ctx, item.coordinates, plot); ctx.lineTo(item.coordinates.at(-1).x, plot.bottom); ctx.lineTo(item.coordinates[0].x, plot.bottom); ctx.closePath(); ctx.fill();
     ctx.restore();
-    ctx.strokeStyle = item.color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.beginPath(); traceSmoothLine(ctx, item.coordinates); ctx.stroke();
+    ctx.strokeStyle = item.color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.beginPath(); traceSmoothLine(ctx, item.coordinates, plot); ctx.stroke();
   });
   if (Number.isInteger(hoverIndex) && hoverIndex >= 0 && hoverIndex < breakdownDays()) {
     const x = plot.left + hoverIndex * (plot.right - plot.left) / Math.max(1,breakdownDays() - 1);

@@ -1727,7 +1727,13 @@ fn main() {
                 return;
             };
             let focus_generation = FOCUS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-            if *focused || REVEALING.load(Ordering::SeqCst) {
+            // Reveal mode is used by local development and screenshot tooling. Keep the
+            // standalone popup visible even after the launching terminal regains focus; the
+            // normal hosted shell still owns the dismiss-on-focus-loss behavior.
+            if *focused
+                || REVEALING.load(Ordering::SeqCst)
+                || std::env::var_os("USAGE_MONITOR_POC_REVEAL").is_some()
+            {
                 return;
             }
 
