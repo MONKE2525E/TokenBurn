@@ -1667,13 +1667,11 @@ fn activate_desktop_host() -> bool {
     unsafe {
         let message = RegisterWindowMessageW(DESKTOP_ACTIVATION_MESSAGE);
         let mut found: isize = 0;
-        if EnumWindows(
+        let _ = EnumWindows(
             Some(find_activation_host_window),
             LPARAM(&mut found as *mut isize as isize),
-        )
-        .is_err()
-            || found == 0
-        {
+        );
+        if found == 0 {
             return false;
         }
         PostMessageW(

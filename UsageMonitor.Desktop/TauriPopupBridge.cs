@@ -656,6 +656,9 @@ public sealed class TauriPopupBridge : IDisposable
                 }
                 process.Refresh();
                 var exitCode = process.HasExited ? process.ExitCode : -1;
+                _process = null;
+                _ownsProcess = false;
+                process.Exited -= HostedProcessExited;
                 if (exitCode == DevServerRefusalExitCode)
                 {
                     // Remember the dev-server build until the file changes so the next
@@ -665,11 +668,13 @@ public sealed class TauriPopupBridge : IDisposable
                         UnusableExecutables[executable] = File.GetLastWriteTimeUtc(executable);
                     }
                     Diagnostics.Warning("A dev-server popup host build refused the hosted role; trying the next candidate.");
+                    process.Dispose();
                     continue;
                 }
                 if (exitCode == 0)
                 {
                     Diagnostics.Info("A popup host launch was forwarded to an existing instance; retrying.");
+                    process.Dispose();
                     continue;
                 }
                 Diagnostics.Warning("The popup host exited before its control server opened.",
@@ -678,6 +683,7 @@ public sealed class TauriPopupBridge : IDisposable
                 {
                     try { process.Kill(entireProcessTree: true); } catch { }
                 }
+                process.Dispose();
                 return false;
             }
             return false;
@@ -714,7 +720,16 @@ public sealed class TauriPopupBridge : IDisposable
             }
 
             _restartAttempts++;
-            _restartTask ??= RestartHostedAsync(process);
+            if (_restartTask is not null)
+            {
+                // A second exit can race the previous delayed restart. It cannot replace the
+                // pending task, but its handle still belongs to this bridge and must be released.
+                process.Dispose();
+                Diagnostics.Warning("TokenBurn popup host exited while a restart was already pending.",
+                    new Dictionary<string, object?> { ["restartAttempts"] = _restartAttempts });
+                return;
+            }
+            _restartTask = RestartHostedAsync(process);
         }
     }
 
@@ -768,11 +783,13 @@ public sealed class TauriPopupBridge : IDisposable
             try
             {
                 using var probe = new TcpClient();
-                var connect = probe.BeginConnect("127.0.0.1", ControlPort, null, null);
-                if (connect.AsyncWaitHandle.WaitOne(80) && probe.Connected && !process.HasExited)
+                using var probeTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(80));
+                probe.ConnectAsync(IPAddress.Loopback, ControlPort, probeTimeout.Token)
+                    .GetAwaiter().GetResult();
+                if (probe.Connected && !process.HasExited)
                     return true;
             }
-            catch (Exception exception) when (exception is SocketException or InvalidOperationException or ObjectDisposedException)
+            catch (Exception exception) when (exception is SocketException or InvalidOperationException or ObjectDisposedException or OperationCanceledException)
             {
                 // The listener is not up yet; keep polling until the deadline.
             }
