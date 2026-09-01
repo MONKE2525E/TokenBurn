@@ -17,7 +17,7 @@ A manual Refresh requests a live provider read. If that read fails, TokenBurn ke
 
 ## Refresh stays on loading
 
-Provider refreshes have a 30-second per-provider deadline. A provider or local history scanner that does not return is reported as unavailable after the deadline, while the other providers and last-good values remain usable. If the native host is restarting, the popup also clears stale loading state on its next failed status poll; close/reopen should no longer be required to recover the dashboard.
+Provider refreshes have a 30-second per-provider deadline and the desktop host has a 45-second deadline for the complete refresh batch. A provider or local history scanner that does not return is reported as unavailable after the provider deadline; if the whole batch still does not settle, the host logs a correlated timeout, clears the loading state, keeps the last-good values, and retries automatically after one minute. If the native host is restarting, the popup also clears stale loading state on its next failed status poll; close/reopen should no longer be required to recover the dashboard.
 
 Historical spend is now scanned incrementally. Unchanged Codex/Claude session files (same size and last-write time) are not re-read on later refreshes; their previously computed daily totals are reused from `%LOCALAPPDATA%\UsageMonitor\Cache\history-*.json` and only changed files are re-parsed. The index is rebuilt automatically when the pricing catalog changes, so updated model rates still apply to old records.
 
@@ -35,7 +35,9 @@ Token counts can be available even when a model price is not. Add a correct Clau
 
 Build the Tauri presentation host and confirm the .NET host can find `tokenburn-desktop.exe` beside
 its published output. The taskbar and tray can remain available when the companion is missing, but
-the current normal dashboard is Tauri/WebView, not the legacy WPF window.
+the current normal dashboard is Tauri/WebView, not the legacy WPF window. If the companion exits,
+the .NET host records the exit and retries a few times. A tray or taskbar click also starts a fresh
+attempt after the retry limit, so restarting the whole monitor should not be necessary.
 
 ## Taskbar or popup placement is wrong
 

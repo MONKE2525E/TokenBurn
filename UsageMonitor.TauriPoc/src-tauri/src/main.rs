@@ -14,17 +14,19 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, State,
     WebviewWindow, WindowEvent,
 };
-use windows::core::{w, HSTRING};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::core::{w, BOOL, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
+use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, GA_ROOT, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    EnumWindows, GetAncestor, GetPropW, PostMessageW, RegisterWindowMessageW,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, GA_ROOT, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
 const API_BASE: &str = "http://127.0.0.1:6736";
@@ -1626,13 +1628,92 @@ fn set_tokenburn_app_user_model_id() {
     let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(&app_id) };
 }
 
+const DESKTOP_HOST_MUTEX: PCWSTR = w!("Global\\TokenBurn.Windows.SingleInstance");
+const DESKTOP_ACTIVATION_MESSAGE: PCWSTR = w!("TokenBurn.Activate");
+const DESKTOP_ACTIVATION_HOST_PROP: PCWSTR = w!("UsageMonitor.ActivationHost");
+
+/// The .NET desktop host holds this global mutex for its whole lifetime, so it is the cheapest
+/// reliable signal that the real shell integration (tray icon, taskbar strip) already exists.
+fn desktop_host_is_running() -> bool {
+    unsafe {
+        match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, DESKTOP_HOST_MUTEX) {
+            Ok(handle) => {
+                let _ = CloseHandle(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+unsafe extern "system" fn find_activation_host_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let slot = lparam.0 as *mut isize;
+    unsafe {
+        if slot.is_null() {
+            return BOOL(0);
+        }
+        if *slot != 0 {
+            return BOOL(1);
+        }
+        if GetPropW(hwnd, DESKTOP_ACTIVATION_HOST_PROP) != HANDLE::default() {
+            *slot = hwnd.0 as isize;
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+/// Mirror of the desktop host's second-instance activation: post its registered activation
+/// message to the window it marks with the "UsageMonitor.ActivationHost" property so the
+/// existing process brings its dashboard forward instead of this process.
+fn activate_desktop_host() -> bool {
+    unsafe {
+        let message = RegisterWindowMessageW(DESKTOP_ACTIVATION_MESSAGE);
+        let mut found: isize = 0;
+        let _ = EnumWindows(
+            Some(find_activation_host_window),
+            LPARAM(&mut found as *mut isize as isize),
+        );
+        if found == 0 {
+            return false;
+        }
+        PostMessageW(
+            Some(HWND(found as *mut core::ffi::c_void)),
+            message,
+            WPARAM(1),
+            LPARAM(0),
+        )
+        .is_ok()
+    }
+}
+
 fn main() {
     set_tokenburn_app_user_model_id();
     let hosted = std::env::args().any(|arg| arg.eq_ignore_ascii_case("--hosted"));
+    // One product, one shell identity. The .NET desktop host owns the tray icon and the taskbar
+    // strip, so a standalone popup host started beside it must not add a second tray mark.
+    // Defer to the running host (bring its dashboard forward) and exit before any tray icon is
+    // created. The capture escape hatch keeps screenshot tooling usable while the host is up.
+    if !hosted
+        && std::env::var_os("USAGE_MONITOR_POC_REVEAL").is_none()
+        && desktop_host_is_running()
+    {
+        activate_desktop_host();
+        return;
+    }
     tauri::Builder::default()
         // This must remain the first plugin. It prevents a second popup host from creating its
         // own WebView2 process tree before the primary instance can receive the launch request.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // The desktop host spawns this binary with --hosted. When that spawn lands on an
+            // already-running standalone instance, the plugin forwards it here and exits the
+            // new process. This instance must then yield: the host is about to relaunch a
+            // properly hosted popup, and keeping this process alive would pin a second tray
+            // icon next to the host's own.
+            if args.iter().any(|arg| arg.eq_ignore_ascii_case("--hosted")) {
+                app.exit(0);
+                return;
+            }
             reveal_existing_instance(app, &args);
         }))
         .manage(AppState::default())
@@ -1654,6 +1735,15 @@ fn main() {
             copy_share
         ])
         .setup(move |app| {
+            // A dev-server build (`tauri dev`) has no usable frontend once the dev session has
+            // ended: its UI lives on the dev machine's server. Hosted popups must render
+            // immediately, so refuse the role with the distinct exit code the desktop host
+            // understands as "this candidate is a dev-server build, try another".
+            if hosted && app.config().build.dev_url.is_some() {
+                eprintln!("tokenburn-desktop: refusing --hosted: this build serves its UI from a dev server that is no longer running");
+                app.handle().exit(7);
+                return Ok(());
+            }
             start_control_server(app.handle().clone());
             let app_handle = app.handle().clone();
             if !hosted {

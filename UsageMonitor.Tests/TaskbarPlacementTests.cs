@@ -303,6 +303,45 @@ public sealed class TaskbarPlacementTests
     }
 
     [Fact]
+    public void PopupHostResolutionSkipsRefusedBuildsUntilTheFileChanges()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", "popup-host-pick", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var devBuild = Path.Combine(root, "dev-host.exe");
+            var productionBuild = Path.Combine(root, "production-host.exe");
+            File.WriteAllBytes(devBuild, [0x4D, 0x5A]);
+            File.WriteAllBytes(productionBuild, [0x4D, 0x5A]);
+            // Newest-wins ordering: the dev build is newer and would normally win.
+            File.SetLastWriteTimeUtc(devBuild, DateTime.UtcNow);
+            File.SetLastWriteTimeUtc(productionBuild, DateTime.UtcNow.AddMinutes(-1));
+            var unusable = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase)
+            {
+                [devBuild] = File.GetLastWriteTimeUtc(devBuild)
+            };
+
+            Assert.Equal(productionBuild, TauriPopupBridge.PickPopupHostCandidate([devBuild, productionBuild], unusable));
+
+            // A rebuild of the same path clears the refusal via the timestamp comparison.
+            File.SetLastWriteTimeUtc(devBuild, DateTime.UtcNow.AddMinutes(1));
+            Assert.Equal(devBuild, TauriPopupBridge.PickPopupHostCandidate([devBuild, productionBuild], unusable));
+
+            // If every candidate was refused, the newest still wins: a refused build beats no popup.
+            var stale = File.GetLastWriteTimeUtc(devBuild);
+            unusable[devBuild] = stale;
+            Assert.Equal(devBuild, TauriPopupBridge.PickPopupHostCandidate([devBuild], unusable));
+
+            Assert.Null(TauriPopupBridge.PickPopupHostCandidate([], unusable));
+            Assert.Null(TauriPopupBridge.PickPopupHostCandidate([Path.Combine(root, "missing-host.exe")], unusable));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ClaudeLoginResolverRunsDeterministicallyFromAnInjectedPath()
     {
         var root = Path.Combine(Path.GetTempPath(), "UsageMonitorTests", "claude-login", Guid.NewGuid().ToString("N"));
