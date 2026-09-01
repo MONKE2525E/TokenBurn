@@ -222,6 +222,27 @@ public sealed class OpenCodeHistoryTests
     }
 
     [Fact]
+    public async Task FutureMonthEndAnchorDoesNotOverflowTheRefreshProcess()
+    {
+        var root = NewRoot();
+        try
+        {
+            // A clock skew or a database row written just ahead of the host clock used to make
+            // the month-end calculation recurse through every prior month until the process
+            // stack overflowed.
+            var now = Local(2026, 8, 31, 20);
+            var database = CreateDatabase(root,
+                Message(Local(2026, 8, 31, 21), "opencode-go", "kimi-k3", .01, 100));
+
+            var snapshot = await Refresh(database, now);
+
+            Assert.NotNull(snapshot.GetLine("Monthly"));
+            Assert.Equal(0, snapshot.GetLine("Monthly")!.Used!.Value, precision: 6);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public async Task FreeRoutedModelIsPricedAtZeroInsteadOfMatchingThePaidFamily()
     {
         var root = NewRoot();

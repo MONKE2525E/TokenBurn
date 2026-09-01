@@ -48,6 +48,11 @@ public partial class MainWindow : Window
     private bool _refreshInFlight;
     private bool _forceRefreshQueued;
     private bool _refreshLoopStarted;
+    // Provider refreshes have their own deadlines, but the desktop lifecycle also needs a
+    // deadline around the complete snapshot batch. This is the final guard against a provider,
+    // cache, or coordination task leaving the visible dashboard in "Refreshing..." forever.
+    internal static readonly TimeSpan DesktopRefreshTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan DesktopRefreshRetryDelay = TimeSpan.FromMinutes(1);
     // Keep the last successful provider envelope in memory so an auth or network failure cannot
     // erase a previously visible quota bar during the next five-minute refresh.
     private readonly Dictionary<string, UsageSnapshotData> _lastGoodSnapshots = new(StringComparer.OrdinalIgnoreCase);
@@ -497,7 +502,23 @@ public partial class MainWindow : Window
     }
 
     public async void RefreshData(bool force = false, string? reason = null)
-        => await RefreshDataAsync(force, reason);
+    {
+        try
+        {
+            await RefreshDataAsync(force, reason);
+        }
+        catch (Exception exception)
+        {
+            // RefreshData is called by WPF event/timer callbacks, so an exception escaping this
+            // async-void boundary can terminate the dispatcher and take the popup down with it.
+            FileDiagnosticsLogger.Default.Warning("Desktop refresh task escaped its failure handler",
+                new Dictionary<string, object?>
+                {
+                    ["force"] = force,
+                    ["reason"] = reason
+                }, exception);
+        }
+    }
 
     internal Task RefreshDataAsync(bool force = false, string? reason = null)
     {
@@ -533,9 +554,33 @@ public partial class MainWindow : Window
             });
         try
         {
-            var snapshots = _snapshotSource is null
-                ? Array.Empty<UsageSnapshotData>()
-                : await _snapshotSource.GetSnapshotsAsync(null, force, cancellationToken: default, refreshId: refreshId);
+            IReadOnlyList<UsageSnapshotData> snapshots;
+            if (_snapshotSource is null)
+            {
+                snapshots = Array.Empty<UsageSnapshotData>();
+            }
+            else
+            {
+                CancellationTokenSource? refreshCancellation = new();
+                var snapshotTask = _snapshotSource.GetSnapshotsAsync(
+                    null, force, refreshCancellation.Token, refreshId);
+                try
+                {
+                    snapshots = await snapshotTask.WaitAsync(DesktopRefreshTimeout);
+                }
+                catch (TimeoutException) when (!snapshotTask.IsCompleted)
+                {
+                    refreshCancellation.Cancel();
+                    ObserveDetachedTask(snapshotTask, refreshCancellation);
+                    refreshCancellation = null;
+                    throw new TimeoutException(
+                        $"The desktop refresh exceeded its {DesktopRefreshTimeout.TotalSeconds:0}-second deadline.");
+                }
+                finally
+                {
+                    refreshCancellation?.Dispose();
+                }
+            }
             var snapshotFetchMs = stopwatch.ElapsedMilliseconds;
             var effectiveSnapshots = snapshots.Select(snapshot =>
             {
@@ -620,11 +665,24 @@ public partial class MainWindow : Window
             LogProviderResults(effectiveSnapshots, stopwatch.ElapsedMilliseconds, statusMetrics.Count,
                 snapshotFetchMs, taskbarMs, refreshId);
         }
+        catch (TimeoutException ex)
+        {
+            ScheduleRefreshRetry(force, reason, refreshId, stopwatch, timedOut: true);
+            _tray?.ShowFallbackNotification("TokenBurn's usage refresh timed out. Your last known values are still shown and it will retry automatically.");
+            FileDiagnosticsLogger.Default.Warning("Desktop refresh timed out",
+                new Dictionary<string, object?>
+                {
+                    ["force"] = force,
+                    ["reason"] = reason,
+                    ["refreshId"] = refreshId,
+                    ["timeoutMs"] = DesktopRefreshTimeout.TotalMilliseconds,
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                    ["retryAt"] = _nextRefreshAt
+                }, ex);
+        }
         catch (Exception ex)
         {
-            // Back off briefly after a failed request, while keeping the last good data visible.
-            _nextRefreshAt = DateTimeOffset.Now.AddMinutes(1);
-            UpdateRefreshCountdown();
+            ScheduleRefreshRetry(force, reason, refreshId, stopwatch, timedOut: false);
             _tray?.ShowFallbackNotification("TokenBurn could not refresh usage data. Your last known values are still shown and it will retry automatically.");
             FileDiagnosticsLogger.Default.Warning("Desktop refresh failed",
                 new Dictionary<string, object?>
@@ -632,7 +690,8 @@ public partial class MainWindow : Window
                     ["force"] = force,
                     ["reason"] = reason,
                     ["refreshId"] = refreshId,
-                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                    ["retryAt"] = _nextRefreshAt
                 }, ex);
         }
         finally
@@ -648,6 +707,36 @@ public partial class MainWindow : Window
                 _refreshTask = RefreshDataCoreAsync(true, $"{reason ?? "refresh"}-promoted");
             }
         }
+    }
+
+    private void ScheduleRefreshRetry(bool force, string? reason, string refreshId, Stopwatch stopwatch, bool timedOut)
+    {
+        // Clear the in-flight state in finally below, then let the heartbeat retry after a short
+        // backoff. Logging the scheduled time makes a stuck-refresh report diagnosable from one
+        // support log without needing a live debugger.
+        _nextRefreshAt = DateTimeOffset.Now.Add(DesktopRefreshRetryDelay);
+        UpdateRefreshCountdown();
+        FileDiagnosticsLogger.Default.Info("Desktop refresh retry scheduled",
+            new Dictionary<string, object?>
+            {
+                ["force"] = force,
+                ["reason"] = reason,
+                ["refreshId"] = refreshId,
+                ["timedOut"] = timedOut,
+                ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                ["retryDelayMs"] = DesktopRefreshRetryDelay.TotalMilliseconds,
+                ["retryAt"] = _nextRefreshAt
+            });
+    }
+
+    private static void ObserveDetachedTask(Task task, IDisposable resourceToDispose)
+    {
+        _ = task.ContinueWith(completed =>
+        {
+            _ = completed.Exception;
+            resourceToDispose.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private static void LogProviderResults(IReadOnlyList<UsageSnapshotData> snapshots, long elapsedMs, int taskbarMetrics,

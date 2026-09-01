@@ -54,6 +54,9 @@ public sealed class TauriPopupBridge : IDisposable
     private readonly Action<bool> _setPopupVisibility;
     private Process? _process;
     private bool _ownsProcess;
+    private Task? _restartTask;
+    private int _restartAttempts;
+    private DateTimeOffset _restartWindowStarted;
     private TcpListener? _desktopControlListener;
     private CancellationTokenSource? _desktopControlCancellation;
     private bool _disposed;
@@ -86,6 +89,40 @@ public sealed class TauriPopupBridge : IDisposable
 
     public readonly record struct RefreshStatus(DateTimeOffset NextRefreshAt, bool Loading);
 
+    /// <summary>
+    /// A standalone popup host (launched without --hosted) pins its own tray icon beside the
+    /// desktop host's, which reads as a duplicate TokenBurn mark in the tray. Hosted popup hosts
+    /// are killed with this process, so any popup-host executable still alive at startup is a
+    /// stray standalone instance or an orphan whose host crashed. End it once, before this
+    /// process spawns its own hosted instance, so exactly one shell identity remains. Must not
+    /// run after <see cref="StartHosted"/>: the check matches our own child by name.
+    /// </summary>
+    internal static void StopStrayStandaloneHosts()
+    {
+        foreach (var name in (string[])["tokenburn-desktop", "UsageMonitor.TauriPoc"])
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    if (process.Id == Environment.ProcessId) continue;
+                    process.Kill(entireProcessTree: true);
+                    Diagnostics.Info("Stopped a stray popup host left over from an earlier run.");
+                }
+                catch (Exception exception)
+                {
+                    // Another session or an elevated process cannot be killed from here; the
+                    // startup path must keep going either way.
+                    Diagnostics.Warning("Could not stop a popup host process.", exception: exception);
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+    }
+
     public void StartHosted()
     {
         if (_disposed) return;
@@ -95,17 +132,22 @@ public sealed class TauriPopupBridge : IDisposable
 
     internal void StopHostedProcess()
     {
+        Process? process;
         lock (_gate)
         {
             if (!_ownsProcess || _process is null) return;
-            try
-            {
-                if (!_process.HasExited) _process.Kill(entireProcessTree: true);
-            }
-            catch { }
-            _process.Dispose();
+            process = _process;
+            // Clear ownership before killing the child. Process.Exited is raised asynchronously,
+            // so the callback must see that this was an intentional shutdown and never relaunch it.
             _process = null;
             _ownsProcess = false;
+            process.Exited -= HostedProcessExited;
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch { }
+            process.Dispose();
         }
     }
 
@@ -550,37 +592,193 @@ public sealed class TauriPopupBridge : IDisposable
         _ = TrySendAsync("/hide");
     }
 
+    /// <summary>Exit code the popup host uses when it refuses a hosted role because the build
+    /// serves its UI from a dev server that is no longer running (see the Rust setup hook).</summary>
+    internal const int DevServerRefusalExitCode = 7;
+
     private bool EnsureStarted()
     {
         lock (_gate)
         {
             if (_process is { HasExited: false }) return true;
             EnsureDesktopControlServer();
-            var executable = ResolveExecutable();
-            if (executable is null) return false;
-            try
+            // A candidate can be rejected twice: a dev-server build refuses to host (exit 7),
+            // and a launch forwarded to a standalone instance exits (code 0) while that instance
+            // yields so this host can own the popup.
+            for (var attempt = 0; attempt < 3; attempt++)
             {
-                _process = Process.Start(new ProcessStartInfo
+                var executable = ResolveExecutable();
+                if (executable is null) return false;
+                Process? process;
+                try
                 {
-                    FileName = executable,
-                    Arguments = "--hosted",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(executable) ?? AppContext.BaseDirectory
-                });
-                _ownsProcess = _process is not null;
-                if (_ownsProcess)
+                    process = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = executable,
+                        Arguments = "--hosted",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WorkingDirectory = Path.GetDirectoryName(executable) ?? AppContext.BaseDirectory
+                    });
+                }
+                catch (Exception exception)
+                {
+                    _process = null;
+                    _ownsProcess = false;
+                    Diagnostics.Warning("TokenBurn popup host failed to start.", exception: exception);
+                    return false;
+                }
+                _process = process;
+                _ownsProcess = process is not null;
+                if (process is null) return false;
+                try
+                {
+                    process.Exited += HostedProcessExited;
+                    process.EnableRaisingEvents = true;
+                }
+                catch (Exception exception)
+                {
+                    _process = null;
+                    _ownsProcess = false;
+                    try
+                    {
+                        if (!process.HasExited) process.Kill(entireProcessTree: true);
+                    }
+                    catch { }
+                    process.Dispose();
+                    Diagnostics.Warning("TokenBurn popup host could not be monitored.", exception: exception);
+                    return false;
+                }
+                if (WaitForControlServer(process))
+                {
                     Diagnostics.Info("TokenBurn popup host started.");
-                return _process is not null;
-            }
-            catch (Exception exception)
-            {
-                _process = null;
-                _ownsProcess = false;
-                Diagnostics.Warning("TokenBurn popup host failed to start.", exception: exception);
+                    return true;
+                }
+                process.Refresh();
+                var exitCode = process.HasExited ? process.ExitCode : -1;
+                if (exitCode == DevServerRefusalExitCode)
+                {
+                    // Remember the dev-server build until the file changes so the next
+                    // resolution skips straight to a production build instead of re-trying it.
+                    lock (UnusableExecutables)
+                    {
+                        UnusableExecutables[executable] = File.GetLastWriteTimeUtc(executable);
+                    }
+                    Diagnostics.Warning("A dev-server popup host build refused the hosted role; trying the next candidate.");
+                    continue;
+                }
+                if (exitCode == 0)
+                {
+                    Diagnostics.Info("A popup host launch was forwarded to an existing instance; retrying.");
+                    continue;
+                }
+                Diagnostics.Warning("The popup host exited before its control server opened.",
+                    new Dictionary<string, object?> { ["exitCode"] = exitCode });
+                if (!process.HasExited)
+                {
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                }
                 return false;
             }
+            return false;
         }
+    }
+
+    private void HostedProcessExited(object? sender, EventArgs e)
+    {
+        if (sender is not Process process) return;
+
+        lock (_gate)
+        {
+            if (_disposed || !_ownsProcess || !ReferenceEquals(_process, process)) return;
+
+            _process = null;
+            _ownsProcess = false;
+            process.Exited -= HostedProcessExited;
+
+            var now = DateTimeOffset.UtcNow;
+            if (now - _restartWindowStarted > TimeSpan.FromMinutes(1))
+            {
+                _restartWindowStarted = now;
+                _restartAttempts = 0;
+            }
+
+            // A broken packaged build should not create a tight process-spawn loop. A later tray
+            // or taskbar click can still call EnsureStarted and make another explicit attempt.
+            if (_restartAttempts >= 3)
+            {
+                Diagnostics.Warning("TokenBurn popup host stopped repeatedly; waiting for the next user action.",
+                    new Dictionary<string, object?> { ["restartAttempts"] = _restartAttempts });
+                process.Dispose();
+                return;
+            }
+
+            _restartAttempts++;
+            _restartTask ??= RestartHostedAsync(process);
+        }
+    }
+
+    private async Task RestartHostedAsync(Process exitedProcess)
+    {
+        try
+        {
+            var exitCode = -1;
+            try
+            {
+                exitCode = exitedProcess.ExitCode;
+            }
+            catch { }
+            exitedProcess.Dispose();
+            Diagnostics.Warning("TokenBurn popup host exited; restarting it.",
+                new Dictionary<string, object?> { ["exitCode"] = exitCode });
+            await Task.Delay(750).ConfigureAwait(false);
+
+            lock (_gate)
+            {
+                if (_disposed || _process is { HasExited: false }) return;
+            }
+
+            EnsureStarted();
+        }
+        catch (Exception exception)
+        {
+            Diagnostics.Warning("TokenBurn popup host could not be restarted.", exception: exception);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _restartTask = null;
+            }
+        }
+    }
+
+    private static readonly Dictionary<string, DateTime> UnusableExecutables = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Waits briefly for the popup host's control server to accept connections. Returns
+    /// false when the process exits first; the caller classifies the failure via the exit code.
+    /// A stale standalone instance can own the port while the spawned process is being forwarded
+    /// to it, so the process is re-checked for exit right before readiness is reported.</summary>
+    private static bool WaitForControlServer(Process process)
+    {
+        var deadline = Environment.TickCount64 + 3_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (process.HasExited) return false;
+            try
+            {
+                using var probe = new TcpClient();
+                var connect = probe.BeginConnect("127.0.0.1", ControlPort, null, null);
+                if (connect.AsyncWaitHandle.WaitOne(80) && probe.Connected && !process.HasExited)
+                    return true;
+            }
+            catch (Exception exception) when (exception is SocketException or InvalidOperationException or ObjectDisposedException)
+            {
+                // The listener is not up yet; keep polling until the deadline.
+            }
+            Thread.Sleep(40);
+        }
+        return false;
     }
 
     private async Task<bool> TrySendAsync(string path)
@@ -616,9 +814,27 @@ public sealed class TauriPopupBridge : IDisposable
             candidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "debug", "tokenburn-desktop.exe"));
             candidates.Add(Path.Combine(current.FullName, "UsageMonitor.TauriPoc", "src-tauri", "target", "release", "tokenburn-desktop.exe"));
         }
-        return candidates.Where(File.Exists)
+        var existing = candidates.Where(File.Exists)
             .OrderByDescending(File.GetLastWriteTimeUtc)
-            .FirstOrDefault();
+            .ToArray();
+        lock (UnusableExecutables)
+        {
+            return PickPopupHostCandidate(existing, UnusableExecutables);
+        }
+    }
+
+    /// <summary>Picks the newest candidate the host has not seen refuse a hosted role. If every
+    /// candidate is blacklisted, the newest one still wins: a refused build beats no popup at
+    /// all, and a rebuilt file clears its own blacklist entry via the timestamp comparison.</summary>
+    internal static string? PickPopupHostCandidate(
+        IReadOnlyList<string> orderedCandidates,
+        IReadOnlyDictionary<string, DateTime> unusableExecutables)
+    {
+        var usable = orderedCandidates.FirstOrDefault(candidate =>
+            !unusableExecutables.TryGetValue(candidate, out var blacklisted) ||
+            !File.Exists(candidate) ||
+            File.GetLastWriteTimeUtc(candidate) != blacklisted);
+        return usable ?? orderedCandidates.FirstOrDefault();
     }
 
     public void Dispose()

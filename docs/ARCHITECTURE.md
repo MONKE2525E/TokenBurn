@@ -23,9 +23,29 @@ presentation host, not an optional proof of concept. The executable produced fro
 5. The Tauri WebView renders the compact dashboard, provider cards, detailed usage/breakdown view,
    and the in-popup Settings and Customize pages. The Rust side owns the popup HWND, placement,
    focus, dismissal, sizing, and screen-share privacy for that window.
-6. The .NET refresh loop reads provider sources and normalizes the results. It updates the native
+6. The .NET refresh loop reads provider sources and normalizes the results. Each provider has a
+   bounded read, and the desktop host also bounds the complete refresh batch so a stuck cache or
+   coordination task cannot leave the UI loading forever. Failed batches keep last-good values,
+   write a correlated diagnostic, and schedule an automatic retry. The host updates the native
    taskbar strip and exposes the same redacted snapshot through the loopback API for the Tauri
    frontend and CLI.
+
+The .NET host supervises the hosted popup child. If the child exits, the host retries it with a
+short delay and a bounded per-minute restart budget. Tray and taskbar actions can make a fresh
+start attempt after that budget, while the native shell surfaces and provider refresh loop remain
+available throughout.
+
+The tray keeps a single TokenBurn mark. The Tauri process only creates its own tray icon when it
+is launched standalone (without `--hosted`). A standalone popup host that starts while the .NET
+desktop host is already running defers to it — it posts the host's activation message and exits
+before creating any tray icon — and a standalone instance that receives a forwarded `--hosted`
+spawn yields and exits so the host can relaunch a properly hosted popup. The host also ends stray
+popup-host processes left over from earlier runs during its own startup.
+
+A `tauri dev` session overwrites the shared `target\debug` popup-host binary with a build whose
+UI lives on the (short-lived) dev server. Such a build refuses a hosted role with exit code 7,
+and the desktop host responds by blacklisting that file — until it is rebuilt — and spawning the
+next-newest candidate instead, so a dead dev server can never render inside the hosted popup.
 
 If the Tauri companion executable is missing, the .NET taskbar and tray surfaces can still run, but
 the current normal dashboard cannot be shown through the legacy WPF window. The WPF dashboard is
