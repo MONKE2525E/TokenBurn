@@ -31,6 +31,7 @@ public sealed class TauriPopupBridge : IDisposable
     /// without limit. Each slot is held at most PeerTimeout by a stalled client.</summary>
     private static readonly SemaphoreSlim ControlClientSlots = new(16, 16);
     private readonly HttpClient _http = CreateControlClient();
+    private readonly SemaphoreSlim _startGate = new(1, 1);
 
     private static HttpClient CreateControlClient()
     {
@@ -603,9 +604,13 @@ public sealed class TauriPopupBridge : IDisposable
 
     private bool EnsureStarted()
     {
-        lock (_gate)
+        _startGate.Wait();
+        try
         {
-            if (_process is { HasExited: false }) return true;
+            lock (_gate)
+            {
+                if (_process is { HasExited: false }) return true;
+            }
             EnsureDesktopControlServer();
             // A candidate can be rejected twice: a dev-server build refuses to host (exit 7),
             // and a launch forwarded to a standalone instance exits (code 0) while that instance
@@ -628,42 +633,65 @@ public sealed class TauriPopupBridge : IDisposable
                 }
                 catch (Exception exception)
                 {
-                    _process = null;
-                    _ownsProcess = false;
+                    lock (_gate)
+                    {
+                        _process = null;
+                        _ownsProcess = false;
+                    }
                     Diagnostics.Warning("TokenBurn popup host failed to start.", exception: exception);
                     return false;
                 }
-                _process = process;
-                _ownsProcess = process is not null;
                 if (process is null) return false;
-                try
+                lock (_gate)
                 {
-                    process.Exited += HostedProcessExited;
-                    process.EnableRaisingEvents = true;
-                }
-                catch (Exception exception)
-                {
-                    _process = null;
-                    _ownsProcess = false;
+                    if (_disposed)
+                    {
+                        process.Dispose();
+                        return false;
+                    }
+                    _process = process;
+                    _ownsProcess = true;
                     try
                     {
-                        if (!process.HasExited) process.Kill(entireProcessTree: true);
+                        process.Exited += HostedProcessExited;
+                        process.EnableRaisingEvents = true;
                     }
-                    catch { }
-                    process.Dispose();
-                    Diagnostics.Warning("TokenBurn popup host could not be monitored.", exception: exception);
-                    return false;
+                    catch (Exception exception)
+                    {
+                        _process = null;
+                        _ownsProcess = false;
+                        try
+                        {
+                            if (!process.HasExited) process.Kill(entireProcessTree: true);
+                        }
+                        catch { }
+                        process.Dispose();
+                        Diagnostics.Warning("TokenBurn popup host could not be monitored.", exception: exception);
+                        return false;
+                    }
                 }
                 if (WaitForControlServer(process))
                 {
-                    Diagnostics.Info("TokenBurn popup host started.");
-                    return true;
+                    lock (_gate)
+                    {
+                        if (ReferenceEquals(_process, process) && !process.HasExited)
+                        {
+                            Diagnostics.Info("TokenBurn popup host started.");
+                            return true;
+                        }
+                    }
                 }
                 process.Refresh();
                 var exitCode = process.HasExited ? process.ExitCode : -1;
-                _process = null;
-                _ownsProcess = false;
-                process.Exited -= HostedProcessExited;
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_process, process))
+                    {
+                        _process = null;
+                        _ownsProcess = false;
+                        process.Exited -= HostedProcessExited;
+                    }
+                }
                 if (exitCode == DevServerRefusalExitCode)
                 {
                     // Remember the dev-server build until the file changes so the next
@@ -692,6 +720,10 @@ public sealed class TauriPopupBridge : IDisposable
                 return false;
             }
             return false;
+        }
+        finally
+        {
+            _startGate.Release();
         }
     }
 
@@ -853,10 +885,10 @@ public sealed class TauriPopupBridge : IDisposable
         IReadOnlyDictionary<string, DateTime> unusableExecutables)
     {
         var usable = orderedCandidates.FirstOrDefault(candidate =>
-            !unusableExecutables.TryGetValue(candidate, out var blacklisted) ||
-            !File.Exists(candidate) ||
-            File.GetLastWriteTimeUtc(candidate) != blacklisted);
-        return usable ?? orderedCandidates.FirstOrDefault();
+            File.Exists(candidate) &&
+            (!unusableExecutables.TryGetValue(candidate, out var blacklisted) ||
+             File.GetLastWriteTimeUtc(candidate) != blacklisted));
+        return usable ?? orderedCandidates.FirstOrDefault(File.Exists);
     }
 
     public void Dispose()

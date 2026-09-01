@@ -1649,6 +1649,9 @@ fn desktop_host_is_running() -> bool {
 unsafe extern "system" fn find_activation_host_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let slot = lparam.0 as *mut isize;
     unsafe {
+        if slot.is_null() {
+            return BOOL(0);
+        }
         if *slot != 0 {
             return BOOL(1);
         }
