@@ -99,6 +99,7 @@ public sealed class TauriPopupBridge : IDisposable
     /// </summary>
     internal static void StopStrayStandaloneHosts()
     {
+        var currentSessionId = Process.GetCurrentProcess().SessionId;
         foreach (var name in (string[])["tokenburn-desktop", "UsageMonitor.TauriPoc"])
         {
             foreach (var process in Process.GetProcessesByName(name))
@@ -106,6 +107,10 @@ public sealed class TauriPopupBridge : IDisposable
                 try
                 {
                     if (process.Id == Environment.ProcessId) continue;
+                    // GetProcessesByName spans Terminal Services sessions. Only clean up popup
+                    // hosts owned by this interactive session; another user's instance is outside
+                    // this monitor's authority and must not be touched.
+                    if (process.SessionId != currentSessionId) continue;
                     process.Kill(entireProcessTree: true);
                     Diagnostics.Info("Stopped a stray popup host left over from an earlier run.");
                 }
