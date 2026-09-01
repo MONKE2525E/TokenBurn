@@ -223,7 +223,8 @@ public sealed class OpenCodeProvider : IUsageProvider
         // Build the next boundary from the calendar month, not from a clamped date such as
         // February 28. Passing that clamped date back through AnchoredMonthStart can select the
         // current boundary again when the billing anchor is the 29th, 30th, or 31st.
-        var nextMonth = monthStart.AddMonths(1);
+        var nextMonth = new DateTimeOffset(monthStart.Year, monthStart.Month, 1,
+            0, 0, 0, TimeSpan.Zero).AddMonths(1);
         var monthEnd = AnchoredMonthBoundary(nextMonth.Year, nextMonth.Month, firstGoUsageAt);
 
         lines.Add(MetricLine.Progress("Session", currentSession.Sum(SessionCost), sessionCap, MetricKind.Dollars,

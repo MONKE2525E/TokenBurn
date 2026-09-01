@@ -31,7 +31,8 @@ public sealed class TauriPopupBridge : IDisposable
     /// without limit. Each slot is held at most PeerTimeout by a stalled client.</summary>
     private static readonly SemaphoreSlim ControlClientSlots = new(16, 16);
     private readonly HttpClient _http = CreateControlClient();
-    private readonly SemaphoreSlim _startGate = new(1, 1);
+    private readonly object _startGate = new();
+    private bool _startInFlight;
 
     private static HttpClient CreateControlClient()
     {
@@ -604,7 +605,13 @@ public sealed class TauriPopupBridge : IDisposable
 
     private bool EnsureStarted()
     {
-        _startGate.Wait();
+        lock (_startGate)
+        {
+            while (_startInFlight && !_disposed)
+                Monitor.Wait(_startGate);
+            if (_disposed) return false;
+            _startInFlight = true;
+        }
         try
         {
             lock (_gate)
@@ -723,7 +730,11 @@ public sealed class TauriPopupBridge : IDisposable
         }
         finally
         {
-            _startGate.Release();
+            lock (_startGate)
+            {
+                _startInFlight = false;
+                Monitor.PulseAll(_startGate);
+            }
         }
     }
 
@@ -896,6 +907,7 @@ public sealed class TauriPopupBridge : IDisposable
         if (_disposed) return;
         try { TryHide(); } catch { }
         _disposed = true;
+        lock (_startGate) Monitor.PulseAll(_startGate);
         lock (_gate)
         {
             _desktopControlCancellation?.Cancel();
