@@ -160,12 +160,29 @@ public sealed class AntigravityProvider : IUsageProvider
             }
             catch (AntigravityRequestException ex)
             {
+                context.Logger?.Info("Antigravity API request failed",
+                    new Dictionary<string, object?>
+                    {
+                        ["statusCode"] = ex.StatusCode,
+                        ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                    });
                 return ErrorWithHistory(ex.Message,
                     ex.StatusCode == 429 ? ProviderErrorCategory.RateLimited : ProviderErrorCategory.Network,
                     context, cancellationToken, stopwatch.ElapsedMilliseconds);
             }
             catch (AntigravityParseException ex) { return ErrorWithHistory(ex.Message, ProviderErrorCategory.Parse, context, cancellationToken, stopwatch.ElapsedMilliseconds); }
-            catch (HttpRequestException) { return ErrorWithHistory("Antigravity connection failed.", ProviderErrorCategory.Network, context, cancellationToken, stopwatch.ElapsedMilliseconds); }
+            catch (HttpRequestException ex)
+            {
+                context.Logger?.Info("Antigravity HTTP request failed",
+                    new Dictionary<string, object?>
+                    {
+                        ["exceptionType"] = ex.GetType().Name,
+                        ["innerExceptionType"] = ex.InnerException?.GetType().Name,
+                        ["httpError"] = ex.HttpRequestError.ToString(),
+                        ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                    });
+                return ErrorWithHistory("Antigravity connection failed.", ProviderErrorCategory.Network, context, cancellationToken, stopwatch.ElapsedMilliseconds);
+            }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return ErrorWithHistory("Antigravity request timed out.", ProviderErrorCategory.Network, context, cancellationToken, stopwatch.ElapsedMilliseconds); }
         }
 

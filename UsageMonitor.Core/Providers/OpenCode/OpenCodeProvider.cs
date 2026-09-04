@@ -152,9 +152,12 @@ public sealed class OpenCodeProvider : IUsageProvider
     {
         if (string.IsNullOrWhiteSpace(providerId)) return "unknown";
         // The opencode-go hosted gateway and the open-source opencode runtime are the same
-        // product. Keep one canonical provider identity in the breakdown so the dashboard does
-        // not render two "OpenCode" series.
-        return providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase)
+        // product. These two route IDs are the aliases emitted by OpenCode's local and hosted
+        // paths. Keep them under one canonical identity so the dashboard does not render
+        // duplicate "OpenCode" series, while preserving genuinely unknown provider IDs for
+        // diagnostics and unpriced-history reporting.
+        return providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase) ||
+               providerId.Equals("openrouter", StringComparison.OrdinalIgnoreCase)
             ? ProviderIds.OpenCode
             : providerId;
     }

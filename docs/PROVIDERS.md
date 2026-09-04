@@ -4,16 +4,18 @@ TokenBurn separates provider capability from provider identity. Every provider r
 
 | Provider | Current source | Current behavior |
 | --- | --- | --- |
-| Codex | Local session JSONL and Codex logs SQLite, plus the supported usage endpoint | Live quota data and local history when token data is available. The logs SQLite database is authoritative for any day it covers, so turns logged in both SQLite and session JSONL are counted once, never twice |
+| Codex | Local session JSONL and Codex logs SQLite, plus the supported usage endpoint | Live quota data, the live banked-reset count when supplied by the endpoint, and local history when token data is available. The logs SQLite database is authoritative for any day it covers, so turns logged in both SQLite and session JSONL are counted once, never twice |
 | Claude Code | Claude OAuth state, supported usage endpoint, and local session JSONL | Live quota data and local history; expired OAuth preserves local history and shows a login action |
-| Antigravity | Windows Credential Manager target `gemini:antigravity` and Gemini CLI OAuth fallback | Live five-hour and weekly quota pools with merged provider data. Access-token rotation uses the credential's own client credentials or the `TOKENBURN_GOOGLE_*` environment variables |
-| OpenCode | OpenCode-owned local SQLite database | Read-only local history and cost data; no API key is required for that local source. History is priced from the model catalog because OpenCode's persisted cost can be half the market rate for some models. `opencode-go` and `opencode` rows share one canonical OpenCode identity |
+| Antigravity | Windows Credential Manager target `gemini:antigravity` and Gemini CLI OAuth fallback | Live five-hour and weekly quota pools with merged provider data. Access-token rotation uses client credentials supplied by the credential or the `TOKENBURN_GOOGLE_*` environment variables; TokenBurn does not embed OAuth client credentials |
+| OpenCode | OpenCode-owned local SQLite database | Read-only local history and cost data; no API key is required for that local source. History is priced from the model catalog because OpenCode's persisted cost can be half the market rate for some models. `opencode-go`, `opencode`, and `openrouter` route rows share one canonical OpenCode identity |
 | Grok | Grok Build (`grok` CLI) local login state in `~/.grok/auth.json` | Live Grok Build coding quota (weekly/monthly limit as a percentage plus the period reset time, prepaid credits, and on-demand spend) fetched with the CLI's own session token — no xAI API key required. Requires `grok login` to have run once. The billing endpoint honors the `GROK_CLI_CHAT_PROXY_BASE_URL` environment variable (default `https://cli-chat-proxy.grok.com/v1`); a malformed value falls back to the default instead of failing the refresh |
 | Cursor | Registered provider descriptor | Unsupported until a stable non-scraping source exists |
 | Copilot | Registered provider descriptor | Unsupported until a stable non-scraping source exists |
 | Devin | Registered provider descriptor | Unsupported until a stable non-scraping source exists |
 
 Legacy billing-key adapters remain in the source for compatibility, but they are not part of the default Windows product catalog unless explicitly wired into it.
+
+Grok Build also contributes local history from completed-turn records in `~/.grok/sessions/**/updates.jsonl`. TokenBurn keeps only day/model aggregates, uses the provider's USD tick cost when present, and ignores duplicate event/model records. The current Grok billing response exposes a shared usage pool and extra-credit fields rather than a banked-reset count, so the dashboard shows a Grok banked-reset line only when that field is actually supplied. Codex displays its live banked-reset count when the usage endpoint supplies one.
 
 ## Provider implementation rules
 

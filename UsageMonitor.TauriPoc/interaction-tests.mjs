@@ -1460,6 +1460,30 @@ test('trend tooltip closes when the provider list rebuilds underneath it', async
   assert.equal(query('#trend-tooltip')[0].classList.contains('is-open'), false, 'tooltip closed after rebuild');
 });
 
+test('usage history chevron expands and collapses its provider card', async () => {
+  const harness = createHarness({ snapshots: [snapshot('codex', { costUsd: 12, tokens: 3400 })] });
+  const { fire, emitNative, tick, flushAsync, query } = harness;
+  await flushAsync();
+  tick(250);
+  emitNative('poc-opened');
+  await flushAsync();
+
+  const button = query('[data-history-disclosure]')[0];
+  const details = query('.history-details')[0];
+  assert.ok(button, 'history disclosure is rendered');
+  assert.equal(button.getAttribute('aria-expanded'), 'false', 'history starts collapsed');
+  assert.equal(details.classList.contains('is-open'), false, 'details start collapsed');
+
+  fire(button, 'click');
+  assert.equal(button.getAttribute('aria-expanded'), 'true', 'button reports expanded state');
+  assert.ok(button.classList.contains('is-open'), 'chevron rotates when expanded');
+  assert.ok(details.classList.contains('is-open'), 'details expand in place');
+
+  fire(button, 'click');
+  assert.equal(button.getAttribute('aria-expanded'), 'false', 'button reports collapsed state');
+  assert.equal(details.classList.contains('is-open'), false, 'details collapse in place');
+});
+
 test('reduced motion: no entrance animation, no geometry wait, native animator told', async () => {
   const harness = createHarness({
     snapshots: [snapshot('codex', { costUsd: 10 })],

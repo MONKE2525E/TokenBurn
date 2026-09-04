@@ -64,7 +64,28 @@ internal static class GrokBillingMapper
                 resetsAt: periodEnd));
         }
 
+        // Some proxy revisions expose reset credits separately from the shared usage pool. Do not
+        // manufacture a zero when the field is absent: the current billing response has no
+        // banked-reset concept, while future revisions may provide one under either casing.
+        var bankedResets = CountValue(ProviderJson.Property(config.Value,
+            "bankedResets", "banked_reset_count", "rateLimitResetCredits", "rate_limit_reset_credits"));
+        if (bankedResets is null)
+            bankedResets = CountValue(ProviderJson.Property(root,
+                "bankedResets", "banked_reset_count", "rateLimitResetCredits", "rate_limit_reset_credits"));
+        if (bankedResets is >= 0)
+            lines.Add(MetricLine.ValuesLine("Banked resets",
+                [new MetricValue(bankedResets.Value, MetricKind.Count, "available")]));
+
         return new GrokBillingResult(plan, lines);
+    }
+
+    private static double? CountValue(JsonElement? value)
+    {
+        if (value is null) return null;
+        var nested = ProviderJson.Object(value);
+        return nested is { } objectValue
+            ? ProviderJson.Number(ProviderJson.Property(objectValue, "available_count", "availableCount", "remaining", "count", "available", "val"))
+            : ProviderJson.Number(value);
     }
 
     private static double? CentValue(JsonElement config, string name)
