@@ -196,6 +196,53 @@ public sealed class OpenCodeHistoryTests
     }
 
     [Fact]
+    public async Task GoMetersPriceFromTheCatalogInsteadOfTheUnreliablePersistedCost()
+    {
+        var root = NewRoot();
+        try
+        {
+            var now = Local(2026, 8, 8, 12);
+            // The persisted cost (0.000152012) is half the catalog estimate for the same tokens.
+            // The Session/Weekly/Monthly meters must use the catalog estimate so they agree with
+            // both the history total and the OpenCode Go billing dashboard.
+            var database = CreateDatabase(root,
+                Message(Local(2026, 8, 8, 11), "opencode-go", "deepseek-v4-flash", 0.000152012, 25_081,
+                    input: 1_104, cacheRead: 23_680, output: 104, reasoning: 193));
+            var catalog = new FixedModelCatalog("deepseek-v4-flash", new ModelPrice(.22, .007, .66));
+
+            var snapshot = await Refresh(database, now, catalog);
+
+            // 1104 * .22 + 23680 * .007 + (104 + 193) * .66 per million
+            const double catalogCost = 0.00060466;
+            Assert.Equal(catalogCost, snapshot.GetLine("Session")!.Used!.Value, precision: 9);
+            Assert.Equal(catalogCost, snapshot.GetLine("Weekly")!.Used!.Value, precision: 9);
+            Assert.Equal(catalogCost, snapshot.GetLine("Monthly")!.Used!.Value, precision: 9);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public async Task FutureMonthEndAnchorDoesNotOverflowTheRefreshProcess()
+    {
+        var root = NewRoot();
+        try
+        {
+            // A clock skew or a database row written just ahead of the host clock used to make
+            // the month-end calculation recurse through every prior month until the process
+            // stack overflowed.
+            var now = Local(2026, 8, 31, 20);
+            var database = CreateDatabase(root,
+                Message(Local(2026, 8, 31, 21), "opencode-go", "kimi-k3", .01, 100));
+
+            var snapshot = await Refresh(database, now);
+
+            Assert.NotNull(snapshot.GetLine("Monthly"));
+            Assert.Equal(0, snapshot.GetLine("Monthly")!.Used!.Value, precision: 6);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public async Task FreeRoutedModelIsPricedAtZeroInsteadOfMatchingThePaidFamily()
     {
         var root = NewRoot();

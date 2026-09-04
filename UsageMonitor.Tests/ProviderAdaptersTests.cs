@@ -1,8 +1,10 @@
 using UsageMonitor.Core;
+using System.Text.Json;
 using UsageMonitor.Core.Providers;
 using UsageMonitor.Core.Providers.Claude;
 using UsageMonitor.Core.Providers.Codex;
 using UsageMonitor.Core.Providers.Antigravity;
+using UsageMonitor.Core.Providers.Cursor;
 using UsageMonitor.Core.Providers.Grok;
 using UsageMonitor.Core.Providers.OpenRouter;
 using UsageMonitor.Core.Providers.Zai;
@@ -58,8 +60,93 @@ public sealed class ProviderAdaptersTests
         var result = CodexUsageMapper.Map(new ProviderHttpResponse(200, new Dictionary<string, string>(), body), Now);
         Assert.Equal("Pro", result.Plan);
         Assert.Equal(37, result.Lines.Single(x => x.Label == "Session").Used);
-        Assert.Equal(2, result.Lines.Single(x => x.Label == "Rate Limit Resets").Values.Single().Number);
+        Assert.Equal(2, result.Lines.Single(x => x.Label == "Banked resets").Values.Single().Number);
         Assert.DoesNotContain("token", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CodexMapperReadsTheLiveBankedResetFieldName()
+    {
+        const string body = """
+            {"rate_limit_reset_credits":{"available_count":2}}
+            """;
+
+        var result = CodexUsageMapper.Map(new ProviderHttpResponse(200, new Dictionary<string, string>(), body), Now);
+
+        Assert.Equal(2, result.Lines.Single(line => line.Label == "Banked resets").Values.Single().Number);
+    }
+
+    [Fact]
+    public void GrokHistoryScannerReadsTurnUsageByModelAndDeduplicatesEvents()
+    {
+        var grokHome = CreateTempGrokHome("{}");
+        var sessionDirectory = Path.Combine(grokHome, "sessions", "fixture-session");
+        Directory.CreateDirectory(sessionDirectory);
+        var timestamp = Now.AddHours(-1).ToUnixTimeSeconds();
+        var line = JsonSerializer.Serialize(new
+        {
+            timestamp,
+            @params = new
+            {
+                update = new
+                {
+                    sessionUpdate = "turn_completed",
+                    usage = new
+                    {
+                        inputTokens = 11,
+                        outputTokens = 4,
+                        totalTokens = 15,
+                        cachedReadTokens = 5,
+                        cacheCreationTokens = 0,
+                        reasoningTokens = 1,
+                        costUsdTicks = 30000000000d,
+                        modelUsage = new Dictionary<string, object>
+                        {
+                            ["grok-4.6-build"] = new { inputTokens = 8, outputTokens = 2, totalTokens = 10, cachedReadTokens = 4, reasoningTokens = 1, costUsdTicks = 10000000000d },
+                            ["grok-4.5-build"] = new { inputTokens = 3, outputTokens = 2, totalTokens = 5, cachedReadTokens = 1, reasoningTokens = 0, costUsdTicks = 20000000000d }
+                        }
+                    }
+                },
+                _meta = new { eventId = "fixture-event-1" }
+            }
+        });
+        File.WriteAllText(Path.Combine(sessionDirectory, "updates.jsonl"), line + Environment.NewLine + line);
+
+        var history = new GrokUsageScanner(localTimeZone: TimeZoneInfo.Utc).Scan(grokHome, Now.AddDays(-90));
+
+        var point = Assert.Single(history.Points);
+        Assert.Equal(15, point.Tokens);
+        Assert.Equal(3, point.CostUsd, precision: 9);
+        Assert.Equal(2, history.Breakdown.Count);
+        Assert.All(history.Breakdown, row => Assert.Equal(ProviderIds.Grok, row.ProviderId));
+        Assert.Equal(10, history.Breakdown.Single(row => row.ModelId == "grok-4.6-build").ProcessedTokens);
+        Assert.All(history.Breakdown, row => Assert.Equal(UsageCostBasis.ProviderReported, row.CostBasis));
+    }
+
+    [Fact]
+    public void GrokHistoryScannerPreservesProviderReportedZeroCost()
+    {
+        var grokHome = CreateTempGrokHome("{}");
+        var sessionDirectory = Path.Combine(grokHome, "sessions", "fixture-session");
+        Directory.CreateDirectory(sessionDirectory);
+        var line = JsonSerializer.Serialize(new
+        {
+            timestamp = Now.AddHours(-1).ToUnixTimeSeconds(),
+            usage = new
+            {
+                model = "grok-build",
+                inputTokens = 1,
+                totalTokens = 1,
+                costUsdTicks = 0d
+            }
+        });
+        File.WriteAllText(Path.Combine(sessionDirectory, "updates.jsonl"), line + Environment.NewLine);
+
+        var history = new GrokUsageScanner(localTimeZone: TimeZoneInfo.Utc).Scan(grokHome, Now.AddDays(-90));
+
+        var row = Assert.Single(history.Breakdown);
+        Assert.Equal(UsageCostBasis.ProviderReported, row.CostBasis);
+        Assert.Equal(0, row.CostUsd);
     }
 
     [Fact]
@@ -223,6 +310,28 @@ public sealed class ProviderAdaptersTests
         Assert.Null(snapshot.ErrorCategory);
         Assert.Equal("Pro", snapshot.Plan);
         Assert.Equal(25, snapshot.GetLine("Session")!.Used);
+    }
+
+    [Fact]
+    public async Task AntigravityProviderReportsSignOutOnlyWhenTheRefreshTokenIsRejected()
+    {
+        var fs = new FixtureFileSystem(new Dictionary<string, string>
+        {
+            ["C:\\profile\\.gemini\\oauth_creds.json"] =
+                "{\"access_token\":\"expired-access\",\"refresh_token\":\"revoked-token\",\"expiry_date\":1,\"client_id\":\"fixture-client\",\"client_secret\":\"fixture-secret\"}"
+        });
+        var auth = new AntigravityAuthStore(fs, () => "C:\\profile", () => null);
+        var http = new QueueHttpClient(new Dictionary<string, IEnumerable<ProviderHttpResponse>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"] =
+                [new(401, new Dictionary<string, string>(), "{}")],
+            ["https://oauth2.googleapis.com/token"] =
+                [new(400, new Dictionary<string, string>(), "{\"error\":\"invalid_grant\"}")]
+        });
+
+        var snapshot = await new AntigravityProvider(auth, http).RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.Authentication, snapshot.ErrorCategory);
     }
 
     [Fact]
@@ -481,6 +590,18 @@ public sealed class ProviderAdaptersTests
     }
 
     [Fact]
+    public void GrokBillingMapperReadsBankedResetsWhenTheProxyProvidesThem()
+    {
+        const string body = """
+            {"config":{"creditUsagePercent":1,"bankedResets":{"available_count":3}}}
+            """;
+
+        var result = GrokBillingMapper.Map(body);
+
+        Assert.Equal(3, result!.Lines.Single(line => line.Label == "Banked resets").Values.Single().Number);
+    }
+
+    [Fact]
     public async Task GrokProviderNotConfiguredUntilGrokLoginWritesAuth()
     {
         var snapshot = await new GrokProvider(grokHome: CreateTempGrokHome("{}"))
@@ -704,6 +825,18 @@ public sealed class ProviderAdaptersTests
         Assert.Equal(ProviderErrorCategory.NotConfigured, snapshot.ErrorCategory);
         Assert.Contains("signed out", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("auth login", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CursorProviderReportsMissingInstallAsNotInstalled()
+    {
+        // A missing install is a blocking failure, not a sign-in prompt: the Customize page renders
+        // NotInstalled in red while NotConfigured (run `x login`) stays amber.
+        var snapshot = await new CursorProvider(new FixtureFileSystem(new Dictionary<string, string>()))
+            .RefreshAsync(new ProviderContext { Now = Now });
+
+        Assert.Equal(ProviderErrorCategory.NotInstalled, snapshot.ErrorCategory);
+        Assert.Contains("not detected", snapshot.GetLine("Error")!.Text, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Fixture(string name)

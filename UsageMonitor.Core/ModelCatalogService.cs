@@ -212,7 +212,8 @@ public sealed class CachedModelCatalog : IModelCatalog
 
     private static ModelPrice? TryResolveOpenCodePrice(string normalized) => normalized switch
     {
-        "deepseek-v4-flash" => new ModelPrice(.14, .0028, .28),
+        "deepseek-v4-flash" => new ModelPrice(.22, .007, .66),
+        "gpt-5.6-luna" => new ModelPrice(.2, .02, 1.2, .25),
         _ when normalized.Contains("-free", StringComparison.OrdinalIgnoreCase) => new ModelPrice(0, 0, 0),
         _ => null
     };

@@ -26,22 +26,28 @@ public sealed class GrokProvider : IUsageProvider
 
     private readonly IProviderHttpClient _http;
     private readonly string? _grokHome;
+    private readonly GrokUsageScanner _history;
 
-    public GrokProvider(IProviderHttpClient? http = null, string? grokHome = null)
+    public GrokProvider(IProviderHttpClient? http = null, string? grokHome = null,
+        IProviderFileSystem? files = null, IModelCatalog? catalog = null,
+        GrokUsageScanner? history = null)
     {
         _http = http ?? new ProviderHttpClient();
         _grokHome = grokHome;
+        _history = history ?? new GrokUsageScanner(files, catalog);
     }
 
     public ProviderDescriptor Descriptor => Provider;
 
     public async Task<ProviderSnapshot> RefreshAsync(ProviderContext context, CancellationToken cancellationToken = default)
     {
-        var auth = ReadGrokAuth(_grokHome ?? ResolveDefaultGrokHome());
+        var grokHome = _grokHome ?? ResolveDefaultGrokHome();
+        var history = ScanHistory(grokHome, context);
+        var auth = ReadGrokAuth(grokHome);
         if (auth is null)
-            return ProviderSnapshot.Error(Provider,
+            return ErrorWithHistory(
                 "Not configured. Grok Build is not logged in. Run `grok login` first.",
-                ProviderErrorCategory.NotConfigured);
+                ProviderErrorCategory.NotConfigured, history);
 
         var endpoint = BuildBillingEndpoint();
 
@@ -59,32 +65,57 @@ public sealed class GrokProvider : IUsageProvider
                 proxy: context.Proxy, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (response.StatusCode is 401 or 403)
-                return ProviderSnapshot.Error(Provider,
+                return ErrorWithHistory(
                     "Your Grok Build session expired. Run `grok login` to sign in again.",
-                    ProviderErrorCategory.Authentication);
+                    ProviderErrorCategory.Authentication, history);
             if (response.StatusCode == 429)
-                return ProviderSnapshot.Error(Provider, "The Grok quota service is rate limited.", ProviderErrorCategory.RateLimited);
+                return ErrorWithHistory("The Grok quota service is rate limited.", ProviderErrorCategory.RateLimited, history);
             if (response.StatusCode is < 200 or >= 300)
-                return ProviderSnapshot.Error(Provider, "The Grok Build quota request failed.", ProviderErrorCategory.Network);
+                return ErrorWithHistory("The Grok Build quota request failed.", ProviderErrorCategory.Network, history);
 
             var parsed = GrokBillingMapper.Map(response.Body);
             if (parsed is null)
-                return ProviderSnapshot.Error(Provider, "Grok Build returned invalid quota data.", ProviderErrorCategory.Parse);
-            return ProviderSnapshot.Success(Provider, parsed.Lines, parsed.Plan, context.Now);
+                return ErrorWithHistory("Grok Build returned invalid quota data.", ProviderErrorCategory.Parse, history);
+            return ProviderSnapshot.Success(Provider, parsed.Lines, parsed.Plan, context.Now, history);
         }
         catch (HttpRequestException)
         {
-            return ProviderSnapshot.Error(Provider, "Grok Build quota connection failed.", ProviderErrorCategory.Network);
+            return ErrorWithHistory("Grok Build quota connection failed.", ProviderErrorCategory.Network, history);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return ProviderSnapshot.Error(Provider, "The Grok Build quota request timed out.", ProviderErrorCategory.Network);
+            return ErrorWithHistory("The Grok Build quota request timed out.", ProviderErrorCategory.Network, history);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
-            return ProviderSnapshot.Error(Provider, "Grok Build returned invalid quota data.", ProviderErrorCategory.Parse);
+            return ErrorWithHistory("Grok Build returned invalid quota data.", ProviderErrorCategory.Parse, history);
         }
     }
+
+    private ProviderUsageHistory ScanHistory(string grokHome, ProviderContext context)
+    {
+        try
+        {
+            return _history.Scan(grokHome, context.Now, context.CacheDirectory, report =>
+                context.Logger?.Info("Grok history scanned",
+                    new Dictionary<string, object?>
+                    {
+                        ["files"] = report.FilesDiscovered,
+                        ["filesChanged"] = report.FilesChanged,
+                        ["filesUnchanged"] = report.FilesUnchanged,
+                        ["rows"] = report.RowsRead
+                    }));
+        }
+        catch (Exception ex)
+        {
+            context.Logger?.Warning("Grok history scan failed", exception: ex);
+            return new ProviderUsageHistory(Array.Empty<UsageHistoryPoint>());
+        }
+    }
+
+    private static ProviderSnapshot ErrorWithHistory(string message, ProviderErrorCategory category,
+        ProviderUsageHistory history) => ProviderSnapshot.Error(Provider, message, category) with
+        { UsageHistory = history };
 
     /// <summary>
     /// Builds the billing endpoint from the configured proxy base URL. A malformed

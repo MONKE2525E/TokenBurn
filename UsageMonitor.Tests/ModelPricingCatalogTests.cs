@@ -55,7 +55,7 @@ public sealed class ModelPricingCatalogTests
     {
         var deepseek = ModelPricingCatalog.TryResolve("deepseek-v4-flash");
         Assert.NotNull(deepseek);
-        Assert.Equal(.14, deepseek!.InputPerMillion, 6);
+        Assert.Equal(.22, deepseek!.InputPerMillion, 6);
         var free = ModelPricingCatalog.TryResolve("deepseek-v4-flash-free");
         Assert.NotNull(free);
         Assert.Equal(0, free!.InputPerMillion, 6);
@@ -87,7 +87,12 @@ public sealed class ModelPricingCatalogTests
 
             var pinned = catalog.ResolvePrice("opencode-go", "deepseek-v4-flash");
             Assert.NotNull(pinned);
-            Assert.Equal(.0028, pinned!.CachedInputPerMillion, 6);
+            Assert.Equal(.007, pinned!.CachedInputPerMillion, 6);
+            var luna = catalog.ResolvePrice("opencode-go", "gpt-5.6-luna");
+            Assert.NotNull(luna);
+            Assert.Equal(.2, luna!.InputPerMillion, 6);
+            Assert.Equal(.02, luna.CachedInputPerMillion, 6);
+            Assert.Equal(1.2, luna.OutputPerMillion, 6);
             var free = catalog.ResolvePrice("opencode", "deepseek-v4-flash-free");
             Assert.NotNull(free);
             Assert.Equal(0, free!.InputPerMillion, 6);

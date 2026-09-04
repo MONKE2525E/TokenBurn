@@ -13,9 +13,13 @@ dotnet build UsageMonitor.slnx --configuration Release -m:1 /p:BuildInParallel=f
 
 TokenBurn does not convert provider failures into zero usage. Check the provider's own login state, wait for rate limits to clear, then refresh. Codex and Claude local history can remain visible when live usage calls fail.
 
-A manual Refresh uses the same stale-while-revalidate pipeline as the scheduler: it serves the last-good/cached values immediately and only re-reads a provider after its five-minute cache expires, so a failed authentication attempt never blanks a provider's last-known-good bars. The error is carried as a badge next to those bars instead of removing the provider from the taskbar strip.
+A manual Refresh requests a live provider read. If that read fails, TokenBurn keeps the last-good/cached values and carries the error as a badge next to those bars instead of removing the provider from the taskbar strip. Scheduled reads still use the stale-while-revalidate cache.
 
-Historical spend is now scanned incrementally. Unchanged Codex/Claude session files (same size and last-write time) are not re-read on later refreshes; their previously computed daily totals are reused from `%LOCALAPPDATA%\UsageMonitor\Cache\history-*.json` and only changed files are re-parsed. The index is rebuilt automatically when the pricing catalog changes, so updated model rates still apply to old records.
+## Refresh stays on loading
+
+Provider refreshes have a 30-second per-provider deadline and the desktop host has a 45-second deadline for the complete refresh batch. A provider or local history scanner that does not return is reported as unavailable after the provider deadline; if the whole batch still does not settle, the host logs a correlated timeout, clears the loading state, keeps the last-good values, and retries automatically after one minute. If the native host is restarting, the popup also clears stale loading state on its next failed status poll; close/reopen should no longer be required to recover the dashboard.
+
+Historical spend is now scanned incrementally. Unchanged Codex, Claude, and Grok session files (same size and last-write time) are not re-read on later refreshes; their previously computed daily totals are reused from `%LOCALAPPDATA%\UsageMonitor\Cache\history-*.json` and only changed files are re-parsed. OpenCode reads its local SQLite history read-only. The index is rebuilt automatically when the pricing catalog changes, so updated model rates still apply to old records.
 
 After a quota reset the taskbar updates on the next scheduled refresh cycle (within a few minutes). Resets no longer force a full network + history refresh of every provider, which is what previously caused the multi-second refreshes and CPU spikes.
 
@@ -31,7 +35,9 @@ Token counts can be available even when a model price is not. Add a correct Clau
 
 Build the Tauri presentation host and confirm the .NET host can find `tokenburn-desktop.exe` beside
 its published output. The taskbar and tray can remain available when the companion is missing, but
-the current normal dashboard is Tauri/WebView, not the legacy WPF window.
+the current normal dashboard is Tauri/WebView, not the legacy WPF window. If the companion exits,
+the .NET host records the exit and retries a few times. A tray or taskbar click also starts a fresh
+attempt after the retry limit, so restarting the whole monitor should not be necessary.
 
 ## Taskbar or popup placement is wrong
 

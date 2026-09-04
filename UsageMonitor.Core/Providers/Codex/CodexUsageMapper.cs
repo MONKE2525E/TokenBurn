@@ -45,10 +45,11 @@ public static class CodexUsageMapper
         if (credits is null && ProviderJson.Object(ProviderJson.Property(root, "credits")) is { } creditObject)
             credits = ProviderJson.Number(ProviderJson.Property(creditObject, "balance", "remaining", "amount"));
         var remaining = ProviderJson.Number(ProviderJson.Property(root, "rate_limit_reset_credits", "rateLimitResetCredits", "resets_remaining"));
-        if (remaining is null && ProviderJson.Object(ProviderJson.Property(root, "rate_limit_reset_credits")) is { } creditsObject)
-            remaining = ProviderJson.Number(ProviderJson.Property(creditsObject, "remaining", "count", "available"));
+        if (remaining is null && ProviderJson.Object(ProviderJson.Property(root, "rate_limit_reset_credits", "rateLimitResetCredits")) is { } creditsObject)
+            remaining = ProviderJson.Number(ProviderJson.Property(creditsObject,
+                "available_count", "availableCount", "remaining", "count", "available"));
         if (remaining is not null)
-            lines.Add(MetricLine.ValuesLine("Rate Limit Resets", new[] { new MetricValue(remaining.Value, MetricKind.Count, "available") }));
+            lines.Add(MetricLine.ValuesLine("Banked resets", new[] { new MetricValue(remaining.Value, MetricKind.Count, "available") }));
         if (credits is not null)
             lines.Add(MetricLine.ValuesLine("Credits", new[] { new MetricValue(credits.Value, MetricKind.Dollars) }));
 

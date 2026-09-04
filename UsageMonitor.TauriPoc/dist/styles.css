@@ -37,7 +37,7 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
    stated product requirement (PRODUCT.md), and previously only two controls had any indicator. */
 :where(.icon-button, .title-button, .periods button, .metric-menu button, .footer-icon-button,
   .select-trigger, .select-option, .provider-action, .page-back, .legend-row, .breakdown button,
-  .chrome-back, #breakdown-chart):focus-visible {
+  .chrome-back, .history-disclosure, #breakdown-chart):focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
   border-radius: 8px;
@@ -299,6 +299,16 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .fill.danger { background: #ee6d75; }
 .text-line { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
 .history-lines { display: grid; gap: 7px; margin-top: 5px; }
+.history-trend .metric-top { align-items: center; }
+.history-disclosure { width: 42px; height: 24px; margin: -4px auto -2px; padding: 4px 11px; display: grid; place-items: center; background: transparent; color: var(--muted); border-radius: 8px; transition: color var(--dur-micro) ease, background var(--dur-micro) ease; }
+.history-disclosure:hover { color: var(--text); background: rgba(255,255,255,.055); }
+.history-disclosure svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--dur-base) var(--ease-out); }
+.history-disclosure.is-open svg { transform: rotate(180deg); }
+.history-details { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--dur-base) var(--ease-out), opacity var(--dur-micro) ease; }
+.history-details > div { min-height: 0; overflow: hidden; }
+.history-details.is-open { grid-template-rows: 1fr; opacity: 1; }
+.history-details .history-lines { padding-top: 7px; margin-top: 0; border-top: 1px solid rgba(255,255,255,.07); }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .error-line { color: #ee8080; font-size: 11px; line-height: 1.35; }
 /* "Not configured" / "no limits returned" are neutral facts, not failures. Red is reserved for
    things the user should act on, otherwise the one urgent signal stops meaning anything. */
@@ -309,7 +319,7 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .provider-action:active:not(:disabled) { background: rgba(255,255,255,.18); transform: scale(.98); }
 .provider-action:disabled { opacity: .55; cursor: wait; }
 .trend { display: grid; grid-template-columns: repeat(30, minmax(0, 1fr)); align-items: end; gap: 3px; height: 27px; margin-top: 2px; }
-.trend i { display: block; width: 100%; min-width: 0; background: var(--blue); border-radius: 3px 3px 1px 1px; opacity: .95; cursor: default; transition: opacity var(--dur-micro) ease, filter var(--dur-micro) ease; }
+.trend i { display: block; width: 100%; min-width: 0; background: var(--blue); border-radius: 3px 3px 1px 1px / min(3px, 50%) min(3px, 50%) min(1px, 25%) min(1px, 25%); opacity: .95; cursor: default; transition: opacity var(--dur-micro) ease, filter var(--dur-micro) ease; }
 .footer { display: flex; align-items: center; justify-content: space-between; padding: 10px 18px 11px; border-top: 1px solid rgba(255,255,255,.14); border-radius: 0 0 18px 18px; background: var(--frost-chrome); }
 .brand-lockup { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .brand-lockup img { width: 27px; height: 27px; flex: 0 0 auto; }
@@ -370,7 +380,12 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .provider-name-label img { width: 18px; height: 18px; object-fit: contain; filter: brightness(0) invert(1); opacity: .8; }
 .provider-customize-logo { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; }
 .provider-customize-logo.has-issue img { filter: brightness(0) saturate(100%) invert(79%) sepia(64%) saturate(520%) hue-rotate(343deg) brightness(103%) contrast(91%); opacity: 1; }
+/* Blocking failures tint the logo brand red instead of amber. The invert/sepia/saturate/hue chain
+   below is computed to land exactly on --orange #F8293D from black (same pipeline as the amber
+   tint above); hand-tuning the angles visually does not survive logo changes. */
+.provider-customize-logo.has-issue.is-error img { filter: brightness(0) invert(80%) sepia(44%) saturate(850%) hue-rotate(296deg) brightness(65%) contrast(315%); }
 .provider-status-badge { position: absolute; top: -6px; right: -7px; width: 13px; height: 13px; display: grid; place-items: center; border: 2px solid #242426; border-radius: 50%; background: var(--warning); color: #242426; font-size: 9px; font-weight: 900; line-height: 0; }
+.provider-customize-logo.is-error .provider-status-badge { background: var(--orange); color: #fff; }
 /* line-height 0 keeps the glyph box itself centered in the badge: with a normal line box the
    "!" renders against the top of the circle because its em-box has no descender space. */
 .provider-status-trigger { border: 0; padding: 0; background: transparent; cursor: pointer; }
@@ -442,9 +457,14 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
 .notification-provider-empty { padding: 14px 10px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .history-trend .trend { position: relative; }
 .trend i:hover { opacity: 1; filter: brightness(1.22); }
-.trend i[aria-label$="No data"] { background: rgba(255,255,255,.14); border-radius: 2px; }
+.trend i[aria-label$="No data"] { background: rgba(255,255,255,.14); border-radius: 2px / min(2px, 50%); }
 .trend-tooltip { position: fixed; z-index: 100; max-width: 220px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.2); border-radius: 9px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.3; white-space: nowrap; pointer-events: none; transform-origin: bottom left; }
-.provider-status-tooltip { position: fixed; z-index: 100; max-width: 230px; padding: 8px 10px; border: 1px solid rgba(244,183,77,.42); border-radius: 8px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.35; pointer-events: none; transform-origin: top left; }
+.provider-status-tooltip { position: fixed; z-index: 100; max-width: 240px; padding: 9px 11px; border: 1px solid rgba(244,183,77,.42); border-radius: 9px; background: var(--frost-menu); color: var(--text); box-shadow: 0 12px 28px rgba(0,0,0,.45); font-size: 11px; line-height: 1.35; pointer-events: none; transform-origin: top left; }
+.provider-status-tooltip.is-error { border-color: rgba(248,41,61,.5); }
+.provider-status-tooltip-title { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--warning); }
+.provider-status-tooltip.is-error .provider-status-tooltip-title { color: #f8556a; }
+.provider-status-tooltip-icon { display: inline-grid; place-items: center; }
+.provider-status-tooltip-icon svg { width: 12px; height: 12px; }
 .metric-option { display: flex; align-items: center; gap: 9px; }
 .metric-option .toggle-label { display: grid; gap: 2px; }
 .metric-option small { color: var(--muted); font-size: 10px; line-height: 1.3; }

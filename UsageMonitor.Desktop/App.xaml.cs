@@ -34,10 +34,19 @@ public partial class App : System.Windows.Application
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             FileDiagnosticsLogger.Default.Error("Unhandled application exception", exception: args.ExceptionObject as Exception);
         DispatcherUnhandledException += (_, args) =>
+        {
             FileDiagnosticsLogger.Default.Error("Unhandled dispatcher exception", exception: args.Exception);
+            // A bad optional shell/UI action must not terminate the long-lived host. The popup,
+            // tray, taskbar strip, and refresh loop can all recover independently on the next
+            // user action or scheduled tick.
+            args.Handled = true;
+        };
         TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
             FileDiagnosticsLogger.Default.Warning("Unobserved task exception",
                 new Dictionary<string, object?> { ["observed"] = args.Observed }, args.Exception);
+            args.SetObserved();
+        };
 
         var logger = FileDiagnosticsLogger.Default;
         var args = e.Args ?? [];
@@ -106,7 +115,7 @@ public partial class App : System.Windows.Application
                 System.Windows.Threading.DispatcherPriority.Normal),
             () => _mainWindow.GetEnabledProviderIds(),
             () => new TauriPopupBridge.RefreshStatus(_mainWindow.NextRefreshAt, _mainWindow.IsRefreshInFlight),
-            () => _mainWindow.Dispatcher.InvokeAsync(() => _mainWindow.RefreshDataAsync(false, "popup-refresh")).Task.Unwrap(),
+            () => _mainWindow.Dispatcher.InvokeAsync(() => _mainWindow.RefreshDataAsync(true, "popup-refresh")).Task.Unwrap(),
             () => _mainWindow.Dispatcher.Invoke(() => _mainWindow.GetSettingsPageDataJson()),
             json => _mainWindow.Dispatcher.Invoke(() => _mainWindow.ApplySettingsPageDataJson(json)),
             () => _mainWindow.Dispatcher.Invoke(() => _mainWindow.BuildDiagnosticsBundleJson()),
@@ -117,6 +126,9 @@ public partial class App : System.Windows.Application
         _tray.AttachTaskbar(_taskbar);
 
         _mainWindow.Initialize(_settings, _taskbar, _tray, _tauriPopup);
+        // A leftover standalone popup host keeps a second tray icon alive beside this process's
+        // own. End it before spawning the hosted instance so the tray shows a single mark.
+        TauriPopupBridge.StopStrayStandaloneHosts();
         // Keep the popup and WebView2 warm. Taskbar clicks are the primary interaction and must
         // never pay a cold-start penalty after the app has been idle for a while.
         _tauriPopup.StartHosted();

@@ -37,14 +37,14 @@ public sealed class OpenCodeProvider : IUsageProvider
             {
                 return Task.FromResult(ProviderSnapshot.Error(Provider,
                     "OpenCode was not found. Use OpenCode locally or sign in to OpenCode Go first.",
-                    ProviderErrorCategory.NotConfigured));
+                    ProviderErrorCategory.NotInstalled));
             }
 
             var history = BuildHistory(scan.Rows, context.Now, context.ModelCatalog ?? _catalog);
             var lines = new List<MetricLine>();
             var goRows = scan.Rows.Where(row => row.ProviderId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase)).ToArray();
             if (scan.HasGoCredential || goRows.Length > 0)
-                AddGoMeters(lines, goRows, scan.FirstGoUsageAt, context.Now);
+                AddGoMeters(lines, goRows, scan.FirstGoUsageAt, context.Now, context.ModelCatalog ?? _catalog);
 
             if (history.Points.Count > 0)
             {
@@ -152,9 +152,12 @@ public sealed class OpenCodeProvider : IUsageProvider
     {
         if (string.IsNullOrWhiteSpace(providerId)) return "unknown";
         // The opencode-go hosted gateway and the open-source opencode runtime are the same
-        // product. Keep one canonical provider identity in the breakdown so the dashboard does
-        // not render two "OpenCode" series.
-        return providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase)
+        // product. These two route IDs are the aliases emitted by OpenCode's local and hosted
+        // paths. Keep them under one canonical identity so the dashboard does not render
+        // duplicate "OpenCode" series, while preserving genuinely unknown provider IDs for
+        // diagnostics and unpriced-history reporting.
+        return providerId.Equals("opencode-go", StringComparison.OrdinalIgnoreCase) ||
+               providerId.Equals("openrouter", StringComparison.OrdinalIgnoreCase)
             ? ProviderIds.OpenCode
             : providerId;
     }
@@ -197,11 +200,16 @@ public sealed class OpenCodeProvider : IUsageProvider
     }
 
     private static void AddGoMeters(ICollection<MetricLine> lines, IReadOnlyList<OpenCodeUsageRow> goRows,
-        DateTimeOffset? firstGoUsageAt, DateTimeOffset now)
+        DateTimeOffset? firstGoUsageAt, DateTimeOffset now, IModelCatalog? catalog)
     {
         const double sessionCap = 12;
         const double weeklyCap = 30;
         const double monthlyCap = 60;
+        // The meters price rows from the catalog exactly like the history total does. OpenCode's
+        // persisted per-message cost is unreliable (half the market rate for some models), so
+        // mixing it into the quota bars while the history uses the catalog rate made the meters
+        // disagree with both the history and the OpenCode Go billing dashboard.
+        double SessionCost(OpenCodeUsageRow row) => Price(row, catalog).CostUsd;
         var nowUtc = now.ToUniversalTime();
         var sessionStart = nowUtc.AddHours(-5);
         var currentSession = goRows.Where(row => row.Timestamp >= sessionStart && row.Timestamp < nowUtc).ToArray();
@@ -215,18 +223,25 @@ public sealed class OpenCodeProvider : IUsageProvider
         var weekStart = StartOfUtcWeek(nowUtc);
         var weekEnd = weekStart.AddDays(7);
         var monthStart = AnchoredMonthStart(nowUtc, firstGoUsageAt);
-        var monthEnd = AnchoredMonthStart(monthStart.AddMonths(1), firstGoUsageAt);
+        // Build the next boundary from the calendar month, not from a clamped date such as
+        // February 28. Passing that clamped date back through AnchoredMonthStart can select the
+        // current boundary again when the billing anchor is the 29th, 30th, or 31st.
+        var nextMonth = new DateTimeOffset(monthStart.Year, monthStart.Month, 1,
+            0, 0, 0, TimeSpan.Zero).AddMonths(1);
+        var monthEnd = AnchoredMonthBoundary(nextMonth.Year, nextMonth.Month, firstGoUsageAt);
 
-        lines.Add(MetricLine.Progress("Session", currentSession.Sum(row => row.CostUsd), sessionCap, MetricKind.Dollars,
+        lines.Add(MetricLine.Progress("Session", currentSession.Sum(SessionCost), sessionCap, MetricKind.Dollars,
             sessionResetsAt, TimeSpan.FromHours(5)));
-        lines.Add(MetricLine.Progress("Weekly", SumBetween(goRows, weekStart, weekEnd), weeklyCap, MetricKind.Dollars,
+        lines.Add(MetricLine.Progress("Weekly", SumBetween(goRows, weekStart, weekEnd, catalog), weeklyCap, MetricKind.Dollars,
             weekEnd, TimeSpan.FromDays(7)));
-        lines.Add(MetricLine.Progress("Monthly", SumBetween(goRows, monthStart, monthEnd), monthlyCap, MetricKind.Dollars,
+        lines.Add(MetricLine.Progress("Monthly", SumBetween(goRows, monthStart, monthEnd, catalog), monthlyCap, MetricKind.Dollars,
             monthEnd, monthEnd - monthStart));
     }
 
-    private static double SumBetween(IEnumerable<OpenCodeUsageRow> rows, DateTimeOffset start, DateTimeOffset end) =>
-        Math.Round(rows.Where(row => row.Timestamp >= start && row.Timestamp < end).Sum(row => row.CostUsd), 4);
+    private static double SumBetween(IEnumerable<OpenCodeUsageRow> rows, DateTimeOffset start, DateTimeOffset end,
+        IModelCatalog? catalog) =>
+        rows.Where(row => row.Timestamp >= start && row.Timestamp < end)
+            .Sum(row => Price(row, catalog).CostUsd);
 
     private static DateTimeOffset StartOfUtcWeek(DateTimeOffset value)
     {
@@ -238,11 +253,22 @@ public sealed class OpenCodeProvider : IUsageProvider
     private static DateTimeOffset AnchoredMonthStart(DateTimeOffset value, DateTimeOffset? anchor)
     {
         var utc = value.ToUniversalTime();
+        var start = AnchoredMonthBoundary(utc.Year, utc.Month, anchor);
+        if (start <= utc) return start;
+
+        // Do not recurse here. On a month-end date with an anchor later in the day, AddMonths
+        // preserves the month-end day and the same comparison can remain true for every prior
+        // month until the call stack overflows.
+        var previous = utc.AddMonths(-1);
+        return AnchoredMonthBoundary(previous.Year, previous.Month, anchor);
+    }
+
+    private static DateTimeOffset AnchoredMonthBoundary(int year, int month, DateTimeOffset? anchor)
+    {
         var anchorUtc = anchor?.ToUniversalTime();
-        var day = Math.Min(anchorUtc?.Day ?? 1, DateTime.DaysInMonth(utc.Year, utc.Month));
-        var start = new DateTimeOffset(utc.Year, utc.Month, day,
+        var day = Math.Min(anchorUtc?.Day ?? 1, DateTime.DaysInMonth(year, month));
+        return new DateTimeOffset(year, month, day,
             anchorUtc?.Hour ?? 0, anchorUtc?.Minute ?? 0, anchorUtc?.Second ?? 0, TimeSpan.Zero);
-        return start > utc ? AnchoredMonthStart(utc.AddMonths(-1), anchor) : start;
     }
 }
 

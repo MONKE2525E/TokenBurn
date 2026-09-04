@@ -69,7 +69,7 @@ function makeCanvasContext() {
   const noop = () => {};
   return {
     setTransform: noop, clearRect: noop, beginPath: noop, arc: noop, stroke: noop, fill: noop,
-    moveTo: noop, lineTo: noop, quadraticCurveTo: noop, closePath: noop, fillText: noop,
+    moveTo: noop, lineTo: noop, quadraticCurveTo: noop, bezierCurveTo: noop, closePath: noop, fillText: noop,
     save: noop, restore: noop, scale: noop, drawImage: noop, strokeRect: noop, fillRect: noop,
     createLinearGradient: () => ({ addColorStop: noop }),
     measureText: text => ({ width: Math.max(8, String(text).length * 6), actualBoundingBoxAscent: 10, actualBoundingBoxDescent: 3 }),
@@ -1198,6 +1198,74 @@ test('out-of-order settings requests: a slower older request cannot activate its
   assert.equal(query('#settings-view.active').length, 0, 'stale response cannot activate settings');
 });
 
+test('customize statuses: blocking failures render red, recoverable ones amber', async () => {
+  const harness = createHarness({
+    snapshots: [snapshot('codex', { costUsd: 10 })],
+    settingsData: {
+      settings: { usageDisplay: 'Used', resetTimeDisplay: 'Countdown', taskbarPositionLocked: true, motionPreference: 'system', notificationsEnabled: true, notificationProviderIds: [], disabledProviders: [], starredMetrics: [], spendMetric: 'cost' },
+      providers: [
+        { id: 'codex', displayName: 'Codex', available: true },
+        { id: 'cursor', displayName: 'Cursor', available: false },
+        { id: 'antigravity', displayName: 'Antigravity', available: true },
+        { id: 'claude-code', displayName: 'Claude Code', available: true },
+      ],
+      metricNames: ['codex:weekly'],
+      providerStatuses: [
+        { id: 'cursor', reason: 'Cursor was not detected on this Windows account.', category: 'NotInstalled' },
+        { id: 'antigravity', reason: 'Antigravity sign-in expired. Open Antigravity or Gemini CLI and sign in again.', category: 'Authentication' },
+        // A status without a category is a warning-only snapshot from an older host build.
+        { id: 'claude-code', reason: 'Claude usage is temporarily unavailable.' },
+      ],
+    },
+  });
+  const { fire, emitNative, byId, query, tick, flushAsync } = harness;
+  await flushAsync();
+  tick(250);
+  emitNative('poc-opened');
+  await flushAsync();
+
+  fire(query('[data-options="customize"]')[0], 'click');
+  await flushAsync();
+  assert.ok(byId('customize-view').classList.contains('active'), 'customize page open');
+
+  // The harness selector engine splits segments on whitespace, so match triggers through their
+  // provider group rather than an attribute value containing spaces.
+  const cursorTrigger = query('[data-provider-group="cursor"] [data-provider-status]')[0];
+  const antigravityTrigger = query('[data-provider-group="antigravity"] [data-provider-status]')[0];
+  assert.ok(cursorTrigger, 'cursor status trigger rendered');
+  assert.equal(cursorTrigger.dataset.providerSeverity, 'error', 'NotInstalled classifies as blocking');
+  assert.ok(cursorTrigger.querySelector('.provider-customize-logo').classList.contains('is-error'), 'blocking logo gets the red variant');
+  assert.ok(cursorTrigger.getAttribute('aria-label').includes('unavailable'), 'blocking trigger says unavailable');
+
+  const warningTriggers = query('[data-provider-severity="warning"]');
+  assert.equal(warningTriggers.length, 2, 'Authentication and category-less statuses classify as recoverable');
+  assert.ok(antigravityTrigger, 'antigravity status trigger rendered');
+  assert.ok(!antigravityTrigger.querySelector('.provider-customize-logo').classList.contains('is-error'), 'recoverable logo keeps the amber variant');
+  assert.ok(antigravityTrigger.getAttribute('aria-label').includes('needs attention'), 'recoverable trigger says needs attention');
+
+  // Hover a blocking trigger: the tooltip anchors to it and carries the red title.
+  fire(cursorTrigger, 'mousemove', { clientX: 30, clientY: 30 });
+  const tooltip = byId('provider-status-tooltip');
+  assert.ok(tooltip.classList.contains('is-open'), 'tooltip opens on hover');
+  assert.ok(tooltip.classList.contains('is-error'), 'tooltip gets the red variant');
+  assert.ok(tooltip.textContent.includes('Unavailable'), 'tooltip title says Unavailable in words');
+  assert.ok(tooltip.textContent.includes('not detected'), 'tooltip shows the host reason');
+  assert.ok(tooltip.style.left, 'tooltip is positioned');
+
+  // Moving within the same trigger must not reposition or reset it; moving to a recoverable
+  // trigger swaps the severity.
+  const left = tooltip.style.left;
+  fire(cursorTrigger, 'mousemove', { clientX: 34, clientY: 32 });
+  assert.equal(tooltip.style.left, left, 'moving inside one trigger does not reposition the anchored tooltip');
+  fire(antigravityTrigger, 'mousemove', { clientX: 40, clientY: 40 });
+  assert.ok(!tooltip.classList.contains('is-error'), 'tooltip loses the red variant for recoverable statuses');
+  assert.ok(tooltip.textContent.includes('Needs attention'), 'tooltip title says Needs attention');
+
+  // Leaving the list hides the tooltip.
+  fire(byId('customize-providers'), 'mouseleave');
+  assert.ok(!tooltip.classList.contains('is-open'), 'tooltip closes on mouseleave');
+});
+
 test('refresh reentrancy: a refresh in flight swallows later requests without clobbering state', async () => {
   const harness = createHarness({ snapshots: [] });
   const { fire, emitNative, query, tick, flushAsync, defaults, deferred, invokeCalls, byId } = harness;
@@ -1390,6 +1458,30 @@ test('trend tooltip closes when the provider list rebuilds underneath it', async
   emitNative('poc-refresh', true);
   await flushAsync();
   assert.equal(query('#trend-tooltip')[0].classList.contains('is-open'), false, 'tooltip closed after rebuild');
+});
+
+test('usage history chevron expands and collapses its provider card', async () => {
+  const harness = createHarness({ snapshots: [snapshot('codex', { costUsd: 12, tokens: 3400 })] });
+  const { fire, emitNative, tick, flushAsync, query } = harness;
+  await flushAsync();
+  tick(250);
+  emitNative('poc-opened');
+  await flushAsync();
+
+  const button = query('[data-history-disclosure]')[0];
+  const details = query('.history-details')[0];
+  assert.ok(button, 'history disclosure is rendered');
+  assert.equal(button.getAttribute('aria-expanded'), 'false', 'history starts collapsed');
+  assert.equal(details.classList.contains('is-open'), false, 'details start collapsed');
+
+  fire(button, 'click');
+  assert.equal(button.getAttribute('aria-expanded'), 'true', 'button reports expanded state');
+  assert.ok(button.classList.contains('is-open'), 'chevron rotates when expanded');
+  assert.ok(details.classList.contains('is-open'), 'details expand in place');
+
+  fire(button, 'click');
+  assert.equal(button.getAttribute('aria-expanded'), 'false', 'button reports collapsed state');
+  assert.equal(details.classList.contains('is-open'), false, 'details collapse in place');
 });
 
 test('reduced motion: no entrance animation, no geometry wait, native animator told', async () => {
@@ -1863,6 +1955,46 @@ test('status polling never stacks overlapping requests', async () => {
   await flushAsync();
   const after = statusCalls();
   assert.ok(after > during, 'the poll resumes once the in-flight request settles');
+});
+
+test('a lost native status bridge cannot strand the popup in refreshing state', async () => {
+  const harness = createHarness({
+    snapshots: [snapshot('codex', { costUsd: 10 })],
+  });
+  const { emitNative, tick, flushAsync, defaults, state, invokeCalls } = harness;
+  await flushAsync();
+  emitNative('poc-opened');
+  await flushAsync();
+
+  defaults.fetch_refresh_status = () => Promise.reject(new Error('native host restarted'));
+  state.hostLoading = true;
+  const statusCallsBefore = invokeCalls.filter(call => call.command === 'fetch_refresh_status').length;
+  tick(1000);
+  await flushAsync();
+
+  assert.ok(
+    invokeCalls.filter(call => call.command === 'fetch_refresh_status').length > statusCallsBefore,
+    'a status poll was attempted after the host disappeared'
+  );
+  assert.equal(state.hostLoading, false, 'the stale native loading flag is cleared');
+});
+
+test('a background startup refresh does not block a usable popup', async () => {
+  const harness = createHarness({
+    snapshots: [snapshot('codex', { costUsd: 10 })],
+  });
+  const { emitNative, flushAsync, defaults, state, byId } = harness;
+  defaults.fetch_refresh_status = () => ({ loading: true, nextRefreshAt: null });
+  await flushAsync();
+  emitNative('poc-opened');
+  await flushAsync();
+
+  assert.equal(state.hostLoading, true, 'the native host can still report a startup refresh');
+  assert.equal(state.localLoading, false, 'the popup request has completed');
+  assert.equal(byId('updated').textContent, 'Waiting for update schedule',
+    'host loading does not replace the usable popup countdown');
+  assert.equal(byId('refresh-button').disabled, false,
+    'host loading does not disable the popup refresh action');
 });
 
 test('Escape with the notification picker menu focused closes only the picker, keeping the settings page open', async () => {
