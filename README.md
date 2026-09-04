@@ -14,7 +14,7 @@ service, accounts, telemetry pipeline, or hosted backend.
 
 - Tauri/WebView dashboard with provider cards, usage history, cost analysis, and detailed breakdowns.
 - A .NET/WPF Windows host with a notification-area tray and native taskbar status surface.
-- Local/provider integrations for Codex, Claude Code, Antigravity, and OpenCode.
+- Local/provider integrations for Codex, Claude Code, Antigravity, Grok Build, and OpenCode.
 - Honest unavailable and unsupported states instead of fabricated zero usage.
 - Local 30-day history aggregation and model-aware cost estimates where pricing is known.
 - One-shot JSON through `usage-monitor` and a loopback-only API on `127.0.0.1:6736`.
@@ -59,7 +59,7 @@ dotnet run --project UsageMonitor.Desktop
 To create a self-contained Windows publish and per-user installer:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version 0.0.1
+powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version 0.0.2
 ```
 
 The installer is written to `artifacts\installer`. It creates Start menu entries, supports uninstall, and offers an opt-in per-user PATH entry for the bundled CLI. Release signing and an in-app update feed are not enabled yet.

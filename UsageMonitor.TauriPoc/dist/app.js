@@ -79,6 +79,7 @@ const state = {
   metric: 'cost',
   view: 'compact',
   compactMetric: 'cost',
+  expandedHistoryProviders: new Set(),
   breakdownPeriod: '30',
   breakdownMetric: 'cost',
   breakdownGrouping: 'model',
@@ -315,6 +316,12 @@ function breakdownStart() { return dayKey(breakdownDays() - 1); }
 function breakdownPoints(snapshot) {
   return (snapshot.usageHistory?.breakdown || []).filter(point => point.date >= breakdownStart() && point.date <= dayKey(0));
 }
+function historyProviderId(snapshotId, pointId) {
+  const providerId = pointId || snapshotId;
+  return snapshotId === 'opencode' && /^(opencode|opencode-go|openrouter)$/i.test(providerId)
+    ? 'opencode'
+    : providerId;
+}
 function breakdownProcessed(point) {
   return ['uncachedInputTokens', 'cachedInputTokens', 'cacheCreationTokens', 'outputTokens', 'reasoningTokens']
     .reduce((sum, key) => sum + Number(point[key] || 0), 0);
@@ -323,9 +330,13 @@ function breakdownRows() {
   const rows = [];
   state.snapshots.forEach(snapshot => {
     const points = breakdownPoints(snapshot);
-    if (points.length) rows.push(...points.map(point => ({ ...point, providerName: snapshot.displayName || snapshot.providerId })));
+    if (points.length) rows.push(...points.map(point => ({
+      ...point,
+      providerId: historyProviderId(snapshot.providerId, point.providerId),
+      providerName: snapshot.displayName || snapshot.providerId
+    })));
     else (snapshot.usageHistory?.points || []).filter(point => point.date >= breakdownStart() && point.date <= dayKey(0)).forEach(point => rows.push({
-      date: point.date, providerId: snapshot.providerId, providerName: snapshot.displayName || snapshot.providerId,
+      date: point.date, providerId: historyProviderId(snapshot.providerId, snapshot.providerId), providerName: snapshot.displayName || snapshot.providerId,
       modelId: null, costUsd: Number(point.costUsd || 0), processed: Number(point.tokens || 0), costBasis: 'CoarseEstimate', pricingBasis: 'Unknown', estimated: true,
     }));
   });
@@ -990,7 +1001,7 @@ function reauthActionFor(snapshot, errorText) {
 // meter threshold class, the percent text, and the reset text. Trend bars and history totals are in
 // the key rather than patched — they only move when real usage lands, not once a second.
 function providersStructureKey(rows) {
-  return JSON.stringify(rows.map(row => [
+  return JSON.stringify([rows.map(row => [
     row.snapshot.providerId,
     row.displayName,
     row.snapshot.plan || '',
@@ -1005,7 +1016,7 @@ function providersStructureKey(rows) {
       (line.points || []).slice(-30).map(point => point && point.value),
     ]),
     (row.snapshot.usageHistory?.points || []).map(point => [point.date, point.costUsd, point.tokens]),
-  ]));
+  ])]);
 }
 
 // Shared by the renderer and the patcher so a patched card can never disagree with a rebuilt one.
@@ -1014,7 +1025,16 @@ function progressValues(line, stale) {
   const limit = Number(line.limit || 0);
   const fraction = Math.max(0, Math.min(1, used / limit));
   const expired = !stale && line.resetsAt && new Date(line.resetsAt).getTime() <= Date.now();
-  const visibleFraction = expired ? 0 : fraction;
+  const staleExpired = stale && line.resetsAt && new Date(line.resetsAt).getTime() <= Date.now();
+  const visibleFraction = expired || staleExpired ? 0 : fraction;
+  if (staleExpired) {
+    return {
+      fraction: 0,
+      stateClass: '',
+      valueText: 'Unavailable',
+      resetText: 'Refresh to update',
+    };
+  }
   const remaining = state.settings.usageDisplay === 'Remaining';
   // Always show the percent-of-quota, not the raw used/limit numbers — those are dollars or
   // token counts for some providers (e.g. OpenCode's cost-capped meters) and would otherwise
@@ -1163,23 +1183,26 @@ function renderLocalHistory(snapshot) {
   if (!points.length) return '';
   const today = dayKey(0);
   const yesterday = dayKey(1);
-  const monthStart = dayKey(29);
+  const offsets = Array.from({ length: 30 }, (_, index) => 29 - index);
   const todayTotals = historyTotals(snapshot, point => point.date === today);
   const yesterdayTotals = historyTotals(snapshot, point => point.date === yesterday);
-  const monthTotals = historyTotals(snapshot, point => point.date >= monthStart && point.date <= today);
+  const monthTotals = historyTotals(snapshot, point => point.date >= dayKey(29) && point.date <= today);
   const pointsByDate = new Map(points.map(point => [point.date, point]));
-  const last30 = Array.from({ length: 30 }, (_, index) => {
-    const date = dayKey(29 - index);
+  const selectedPoints = offsets.map(offset => {
+    const date = dayKey(offset);
     return pointsByDate.get(date) || { date, costUsd: 0, tokens: 0 };
   });
-  const peak = Math.max(1, ...last30.map(item => Number(item.tokens || item.costUsd || 0)));
-  const bars = last30.map(point => {
+  const peak = Math.max(1, ...selectedPoints.map(item => Number(item.tokens || item.costUsd || 0)));
+  const bars = selectedPoints.map(point => {
     const value = Math.max(0, Number(point.tokens || point.costUsd || 0));
     const totals = { cost: Number(point.costUsd || 0), tokens: Number(point.tokens || 0) };
     const detail = formatHistoryValue(totals);
     return `<i data-tooltip="${esc(point.date || 'Unknown date')} · ${esc(detail)}" aria-label="${esc(point.date || 'Unknown date')}: ${esc(detail)}" style="height:${Math.max(3, Math.min(100, value / peak * 100))}%"></i>`;
   }).join('');
-  return `<div class="metric history-trend"><div class="metric-top"><span class="metric-label">Usage Trend · 30 Days</span></div><div class="trend">${bars}</div></div><div class="history-lines"><div class="text-line"><span>Today</span><span>${formatHistoryValue(todayTotals)}</span></div><div class="text-line"><span>Yesterday</span><span>${formatHistoryValue(yesterdayTotals)}</span></div><div class="text-line"><span>Last 30 Days</span><span>${formatHistoryValue(monthTotals)}</span></div></div>`;
+  const providerId = snapshot.providerId;
+  const expanded = state.expandedHistoryProviders.has(providerId);
+  const detailsId = `history-details-${providerId.replace(/[^a-z0-9_-]/gi, '-')}`;
+  return `<div class="metric history-trend"><div class="metric-top"><span class="metric-label">Usage trend</span></div><div class="trend">${bars}</div></div><button class="history-disclosure${expanded ? ' is-open' : ''}" type="button" data-history-disclosure="${esc(providerId)}" aria-expanded="${expanded}" aria-controls="${esc(detailsId)}" aria-label="${expanded ? 'Hide' : 'Show'} usage history details"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="history-details${expanded ? ' is-open' : ''}" id="${esc(detailsId)}"><div><div class="history-lines"><div class="text-line"><span>Today</span><span>${formatHistoryValue(todayTotals)}</span></div><div class="text-line"><span>Yesterday</span><span>${formatHistoryValue(yesterdayTotals)}</span></div><div class="text-line"><span>Last 30 Days</span><span>${formatHistoryValue(monthTotals)}</span></div></div></div></div>`;
 }
 
 function render() {
@@ -1207,6 +1230,19 @@ function render() {
     ? 'Refreshing...'
     : state.refreshStatusError || formatRefreshCountdown(state.nextRefreshAt);
 }
+
+document.addEventListener('click', event => {
+  const button = event.target?.closest?.('[data-history-disclosure]');
+  if (!button) return;
+  const providerId = button.dataset.historyDisclosure;
+  const open = !state.expandedHistoryProviders.has(providerId);
+  if (open) state.expandedHistoryProviders.add(providerId);
+  else state.expandedHistoryProviders.delete(providerId);
+  button.classList.toggle('is-open', open);
+  button.setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} usage history details`);
+  document.getElementById(button.getAttribute('aria-controls'))?.classList.toggle('is-open', open);
+});
 
 // A single dropped poll should not replace the countdown with an error. Two in a row means the
 // host is actually gone; one means the WPF side was busy for a second.
@@ -1512,7 +1548,8 @@ const metricDescriptions = {
   'session': 'Usage in the current rolling session window.',
   'weekly': 'Usage in the provider’s weekly allowance window.',
   'claude weekly': 'Third-party Claude weekly allowance reported by Antigravity.',
-  'claude': 'Third-party Claude allowance reported by Antigravity.',
+  'claude session': 'Third-party Claude session allowance reported by Antigravity.',
+  'banked resets': 'Provider resets currently available to use.',
   'usage': 'Current usage reported by the installed desktop client.',
   'credits': 'Remaining or consumed GitHub Copilot credits.',
   'daily': 'Usage in the current daily allowance window.',
@@ -2430,7 +2467,7 @@ function spendProviderColor(id) {
     cursor: '#6c7bff',
     copilot: '#8957e5',
     devin: '#ffb454',
-    grok: '#c9ced6',
+    grok: '#333333',
   }[id] || '#8d7dff';
 }
 
@@ -2938,7 +2975,7 @@ function visibleLines(snapshot) {
 
 function displayLine(snapshot, line) {
   if (snapshot.providerId !== 'antigravity') return line;
-  if (/^Claude Weekly$/i.test(line.label)) return { ...line, label: 'Claude Weekly (third-party)' };
-  if (/^Claude$/i.test(line.label)) return { ...line, label: 'Claude (third-party)' };
+  if (/^Claude Weekly$/i.test(line.label)) return { ...line, label: 'Claude weekly' };
+  if (/^Claude$/i.test(line.label)) return { ...line, label: 'Claude session' };
   return line;
 }

@@ -5,6 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Threading;
+using UsageMonitor.Core;
 using WpfButton = System.Windows.Controls.Button;
 using WpfOrientation = System.Windows.Controls.Orientation;
 
@@ -19,18 +20,26 @@ internal sealed record TrayMenuActions(
     Action Quit,
     IReadOnlyList<MonitorOption> Monitors,
     string SelectedMonitor,
-    Action<MonitorOption> SelectMonitor);
+    Action<MonitorOption> SelectMonitor,
+    bool HideFromScreenShare);
 
 /// <summary>
 /// A small native WPF tray surface that uses the same rounded charcoal language as the dashboard.
 /// It intentionally does not use ContextMenuStrip, whose rectangular Win32 rendering cannot match
-/// the rest of the app and was the source of the old screenshot's visual mismatch.
+/// the rest of the app, and it does not reuse the app's implicit Button style: that template
+/// centers its ContentPresenter, which turned every row into centered text, so rows carry their
+/// own left-aligned template with leading stroke icons.
 /// </summary>
 internal sealed class TrayMenuWindow : Window
 {
+    private const double MenuWidth = 248;
+    private const double RowHeight = 29;
     private static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
+    private static ControlTemplate? _rowTemplate;
     private readonly Border _surface;
     private readonly StackPanel _monitorPanel;
+    private readonly List<WpfButton> _rows = [];
+    private System.Windows.Shapes.Path? _taskbarChevron;
     private readonly TranslateTransform _surfaceSlide = new();
     private bool _closing;
     private bool _menuReady;
@@ -53,58 +62,59 @@ internal sealed class TrayMenuWindow : Window
         Topmost = true;
         Opacity = 0;
         ResizeMode = ResizeMode.NoResize;
-        SizeToContent = SizeToContent.WidthAndHeight;
+        SizeToContent = SizeToContent.Height;
+        Width = MenuWidth;
         WindowStartupLocation = WindowStartupLocation.Manual;
         FontFamily = new System.Windows.Media.FontFamily("Segoe UI");
         PreviewKeyDown += OnPreviewKeyDown;
-         Deactivated += (_, _) =>
-         {
-             if (_menuReady) CloseSafely();
-         };
+        Deactivated += (_, _) =>
+        {
+            if (_menuReady) CloseSafely();
+        };
 
         _monitorPanel = new StackPanel
         {
             Visibility = Visibility.Collapsed,
-            Margin = new Thickness(8, 0, 0, 4),
+            Margin = new Thickness(0, 0, 0, 2),
             Orientation = WpfOrientation.Vertical
         };
         foreach (var monitor in actions.Monitors)
         {
-            var item = CreateMenuButton(monitor.DisplayName, () =>
+            var item = CreateRow(null, monitor.DisplayName, () =>
             {
                 actions.SelectMonitor(monitor);
                 CloseSafely();
-            }, 11);
-            // A real column rather than a "●  " / "    " string prefix: prefix alignment depended
-            // on space characters in a proportional font, so marked and unmarked rows never lined up.
-            item.Content = CreateMonitorRow(
+            }, customContent: CreateMonitorRow(
                 monitor.DisplayName,
-                monitor.Id.Equals(actions.SelectedMonitor, StringComparison.OrdinalIgnoreCase));
+                monitor.Id.Equals(actions.SelectedMonitor, StringComparison.OrdinalIgnoreCase)));
+            // A real radio column rather than a "●  " string prefix: prefix alignment depended
+            // on space characters in a proportional font, so marked and unmarked rows never lined up.
             _monitorPanel.Children.Add(item);
         }
 
         var content = new StackPanel { Orientation = WpfOrientation.Vertical };
         content.Children.Add(CreateBrandHeader());
-        content.Children.Add(CreateMenuButton("Open dashboard", actions.OpenDashboard));
-        content.Children.Add(CreateMenuButton("Refresh now", actions.Refresh));
-        var taskbarButton = CreateMenuButton("Taskbar display", ToggleMonitorPanel, 12, true);
+        content.Children.Add(CreateSeparator(tightTop: true));
+        content.Children.Add(CreateRow(Icons.OpenDashboard, "Open dashboard", actions.OpenDashboard));
+        content.Children.Add(CreateRow(Icons.Refresh, "Refresh now", actions.Refresh));
+        var taskbarButton = CreateRow(Icons.Display, "Taskbar display", ToggleMonitorPanel, chevron: true);
         content.Children.Add(taskbarButton);
         content.Children.Add(_monitorPanel);
         content.Children.Add(CreateSeparator());
-        content.Children.Add(CreateMenuButton("Settings", actions.Settings));
-        content.Children.Add(CreateMenuButton("Customize", actions.Customize));
-        content.Children.Add(CreateMenuButton("Check for updates", actions.CheckForUpdates));
+        content.Children.Add(CreateRow(Icons.Sliders, "Settings", actions.Settings));
+        content.Children.Add(CreateRow(Icons.Grid, "Customize", actions.Customize));
+        content.Children.Add(CreateRow(Icons.Download, "Check for updates", actions.CheckForUpdates));
         content.Children.Add(CreateSeparator());
-        content.Children.Add(CreateMenuButton("Quit", actions.Quit));
+        content.Children.Add(CreateRow(Icons.Power, "Quit", actions.Quit));
 
         _surface = new Border
         {
             Background = Brush("PanelBrush"),
             BorderBrush = Brush("PanelStrokeBrush"),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(8),
             ClipToBounds = true,
-            Padding = new Thickness(5),
+            Padding = new Thickness(4),
             Child = content,
             RenderTransform = _surfaceSlide,
             Effect = new DropShadowEffect
@@ -117,31 +127,49 @@ internal sealed class TrayMenuWindow : Window
         };
         Content = _surface;
         Loaded += (_, _) => PositionNear(anchor);
-        SourceInitialized += (_, _) => SetScreenShareExcluded(App.CurrentApp.Settings.HideFromScreenShare);
+        SourceInitialized += (_, _) => SetScreenShareExcluded(actions.HideFromScreenShare);
     }
 
-    private WpfButton CreateMenuButton(string label, Action action, double fontSize = 12, bool chevron = false)
+    private WpfButton CreateRow(string? iconData, string label, Action action, bool chevron = false,
+        UIElement? customContent = null)
     {
         var button = new WpfButton
         {
-            MinWidth = 232,
-            MinHeight = 28,
+            // Null the implicit style: its template centers content, which is what made the old
+            // menu read as a wall of centered text, and resolving it mid-construction has
+            // previously sealed styles under us. Everything the row needs is set right here.
+            Style = null,
+            Template = RowTemplate,
+            MinHeight = RowHeight,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch,
             HorizontalContentAlignment = System.Windows.HorizontalAlignment.Stretch,
             Background = TransparentBrush,
-            BorderBrush = TransparentBrush,
             BorderThickness = new Thickness(0),
-            Padding = new Thickness(10, 4, 10, 4),
-            FontSize = fontSize,
+            Padding = new Thickness(8, 5, 8, 5),
+            FontSize = 12,
             Foreground = Brush("TextPrimaryBrush"),
             Focusable = true,
-            Content = CreateButtonContent(label, chevron)
+            FocusVisualStyle = null,
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Content = customContent ?? CreateRowContent(label, iconData, chevron)
         };
-        // Avoid composing a new style from the app's implicit Button style here. WPF can seal
-        // that implicit style while the tray menu is being constructed, which previously threw
-        // on IsMouseOver and forced the ugly white fallback menu. Keeping the handler approach,
-        // but cross-fading the brush instead of swapping it outright.
+        _rows.Add(button);
+        if (chevron)
+        {
+            // Last, not first: the row icon is also a Path and precedes the chevron in the grid.
+            _taskbarChevron = ((Grid)button.Content).Children
+                .OfType<System.Windows.Shapes.Path>()
+                .LastOrDefault();
+            if (_taskbarChevron is not null)
+            {
+                _taskbarChevron.RenderTransform = new RotateTransform();
+                _taskbarChevron.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+            }
+        }
+
+        // Cross-fade the background brush on hover instead of swapping it: same hue at zero
+        // alpha while idle, so the fade never travels through transparent white.
         var hover = Brush("PanelRaisedBrush").Color;
-        // Same hue at zero alpha, so the fade does not travel through transparent white.
         var idle = System.Windows.Media.Color.FromArgb(0, hover.R, hover.G, hover.B);
         var background = new SolidColorBrush(idle);
         button.Background = background;
@@ -179,70 +207,122 @@ internal sealed class TrayMenuWindow : Window
         return button;
     }
 
-    private static Grid CreateButtonContent(string label, bool chevron)
+    /// <summary>A left-aligned row template. The app's implicit Button template centers its
+    /// ContentPresenter; menu rows must not, so they carry this one instead.</summary>
+    private static ControlTemplate RowTemplate
+    {
+        get
+        {
+            if (_rowTemplate is not null) return _rowTemplate;
+            var border = new FrameworkElementFactory(typeof(Border));
+            border.Name = "row";
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+            border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(WpfButton.BackgroundProperty));
+            border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(WpfButton.PaddingProperty));
+            border.AppendChild(new FrameworkElementFactory(typeof(ContentPresenter)));
+            _rowTemplate = new ControlTemplate(typeof(WpfButton)) { VisualTree = border };
+            return _rowTemplate;
+        }
+    }
+
+    private static Grid CreateRowContent(string label, string? iconData, bool chevron)
     {
         var grid = new Grid();
-        grid.Children.Add(new TextBlock
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        if (iconData is not null)
+        {
+            var icon = CreateIcon(iconData);
+            grid.Children.Add(icon);
+        }
+        var text = new TextBlock
         {
             Text = label,
             VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        });
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(9, 0, 8, 0)
+        };
+        Grid.SetColumn(text, 1);
+        grid.Children.Add(text);
         if (chevron)
         {
-            grid.Children.Add(new TextBlock
-            {
-                Text = "›",
-                FontSize = 17,
-                Foreground = Brush("TextSecondaryBrush"),
-                HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 1)
-            });
+            var chevronPath = CreateIcon(Icons.Chevron, size: 12, thickness: 1.6);
+            chevronPath.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
+            chevronPath.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(chevronPath, 2);
+            grid.Children.Add(chevronPath);
         }
         return grid;
     }
 
     private static FrameworkElement CreateBrandHeader()
     {
-        var header = new StackPanel
+        var header = new Grid
         {
-            Orientation = WpfOrientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(10, 5, 10, 5)
+            Margin = new Thickness(6, 3, 6, 3),
+            MinHeight = 34
         };
-        header.Children.Add(new System.Windows.Controls.Image
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var mark = new System.Windows.Controls.Image
         {
             Source = TokenBurnIconResources.LoadTrayMenuIcon(),
-            Width = 20,
-            Height = 20,
-            Margin = new Thickness(0, 0, 7, 0),
-            SnapsToDevicePixels = true
-        });
-        header.Children.Add(new TextBlock
+            Width = 18,
+            Height = 18,
+            Margin = new Thickness(0, 0, 8, 0),
+            SnapsToDevicePixels = true,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        header.Children.Add(mark);
+        var name = new TextBlock
         {
             Text = "TokenBurn",
-            FontSize = 11,
+            FontSize = 12,
             FontWeight = FontWeights.SemiBold,
-            Foreground = Brush("TextMutedBrush"),
+            Foreground = Brush("TextPrimaryBrush"),
             VerticalAlignment = VerticalAlignment.Center
-        });
+        };
+        Grid.SetColumn(name, 1);
+        header.Children.Add(name);
+        var version = new TextBlock
+        {
+            Text = ProductInfo.Version,
+            FontSize = 11,
+            Foreground = Brush("TextMutedBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 1, 0, 0)
+        };
+        Grid.SetColumn(version, 2);
+        header.Children.Add(version);
         return header;
     }
 
     private static Grid CreateMonitorRow(string label, bool selected)
     {
+        // The 25px radio column keeps monitor labels flush with the parent rows' labels
+        // (16px icon + 9px gap).
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(25) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var marker = new TextBlock
+        var radio = new System.Windows.Shapes.Ellipse
         {
-            Text = selected ? "●" : string.Empty,
-            FontSize = 9,
-            Foreground = Brush("AccentBlueBrush"),
+            Width = 9,
+            Height = 9,
             HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Center
         };
+        if (selected)
+        {
+            radio.Fill = Brush("AccentBlueBrush");
+        }
+        else
+        {
+            radio.Stroke = Brush("TextMutedBrush");
+            radio.StrokeThickness = 1.2;
+        }
+        grid.Children.Add(radio);
         var text = new TextBlock
         {
             Text = label,
@@ -250,26 +330,69 @@ internal sealed class TrayMenuWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis
         };
         Grid.SetColumn(text, 1);
-        grid.Children.Add(marker);
         grid.Children.Add(text);
         return grid;
     }
 
-    private static Border CreateSeparator()
+    private static System.Windows.Shapes.Path CreateIcon(string data, double size = 16, double thickness = 1.5)
+        => new()
+        {
+            Data = Geometry.Parse(data),
+            Stroke = Brush("TextSecondaryBrush"),
+            StrokeThickness = thickness,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round,
+            Width = size,
+            Height = size,
+            Stretch = Stretch.Uniform,
+            VerticalAlignment = VerticalAlignment.Center,
+            SnapsToDevicePixels = true
+        };
+
+    private static Border CreateSeparator(bool tightTop = false)
         => new()
         {
             Height = 1,
-            Margin = new Thickness(10, 5, 10, 5),
+            Margin = new Thickness(6, tightTop ? 0 : 5, 6, 5),
             Background = Brush("PanelStrokeBrush")
         };
+
+    /// <summary>Minimal stroke glyphs drawn in a 16x16 box. Kept as plain path data so the menu
+    /// needs no new assets and stays a pure-code surface.</summary>
+    private static class Icons
+    {
+        public const string OpenDashboard =
+            "M6.5 3.5 H4 A1.5 1.5 0 0 0 2.5 5 V12 A1.5 1.5 0 0 0 4 13.5 H11 A1.5 1.5 0 0 0 12.5 12 V9.5 " +
+            "M9.5 2.5 H13.5 V6.5 M13.2 2.8 L7.9 8.1";
+        public const string Refresh =
+            "M13.5 8 A5.5 5.5 0 1 1 8 2.5 M6.1 0.9 L8 2.5 L6.1 4.1";
+        public const string Display =
+            "M2.5 4.5 A1.5 1.5 0 0 1 4 3 H12 A1.5 1.5 0 0 1 13.5 4.5 V9 A1.5 1.5 0 0 1 12 10.5 H4 " +
+            "A1.5 1.5 0 0 1 2.5 9 Z M8 10.5 V13.2 M5.2 13.2 H10.8";
+        public const string Sliders =
+            "M2.5 4.5 H8.4 M12.2 4.5 H13.5 M2.5 8 H3.8 M7.6 8 H13.5 M2.5 11.5 H9.7 " +
+            "M10.3 2.9 A1.6 1.6 0 1 1 10.3 6.1 A1.6 1.6 0 1 1 10.3 2.9 Z " +
+            "M5.7 6.4 A1.6 1.6 0 1 1 5.7 9.6 A1.6 1.6 0 1 1 5.7 6.4 Z " +
+            "M11.6 9.9 A1.6 1.6 0 1 1 11.6 13.1 A1.6 1.6 0 1 1 11.6 9.9 Z";
+        public const string Grid =
+            "M2.5 2.5 H6.8 V6.8 H2.5 Z M9.2 2.5 H13.5 V6.8 H9.2 Z " +
+            "M2.5 9.2 H6.8 V13.5 H2.5 Z M9.2 9.2 H13.5 V13.5 H9.2 Z";
+        public const string Download =
+            "M8 2.5 V9.8 M4.9 6.7 L8 9.8 L11.1 6.7 M3 13.2 H13";
+        public const string Power =
+            "M8 2.2 V7.6 M4.46 5.26 A5 5 0 1 0 11.54 5.26";
+        public const string Chevron =
+            "M4.5 2.5 L9.5 7.5 L4.5 12.5";
+    }
 
     private void PositionNear(System.Drawing.Point anchor)
     {
         UpdateLayout();
         var screen = System.Windows.Forms.Screen.FromPoint(anchor);
         var area = screen.WorkingArea;
-        var width = ActualWidth > 0 ? ActualWidth : 286;
-        var height = ActualHeight > 0 ? ActualHeight : 360;
+        var width = ActualWidth > 0 ? ActualWidth : MenuWidth;
+        var height = ActualHeight > 0 ? ActualHeight : 380;
         // NotifyIcon and Screen report physical pixels. WPF Window.Left/Top use device
         // independent pixels. Mixing the two made the menu clamp to the wrong edge on a 125%
         // display, which is exactly where the tray lives on the development machine.
@@ -401,13 +524,48 @@ internal sealed class TrayMenuWindow : Window
                 EasingFunction = EaseOut
             });
         }
+
+        RotateChevron(expanding, duration);
+    }
+
+    /// <summary>The disclosure chevron turns to point down while the monitor list is open, so the
+    /// row reads as expanded rather than as a dead-end.</summary>
+    private void RotateChevron(bool expanded, Duration duration)
+    {
+        if (_taskbarChevron?.RenderTransform is not RotateTransform rotate) return;
+        if (!MotionEnabled)
+        {
+            rotate.Angle = expanded ? 90 : 0;
+            return;
+        }
+        rotate.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation
+        {
+            To = expanded ? 90 : 0,
+            Duration = duration,
+            EasingFunction = EaseOut
+        });
     }
 
     private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        if (e.Key != Key.Escape) return;
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            CloseSafely();
+            return;
+        }
+        if (e.Key is not (Key.Up or Key.Down)) return;
         e.Handled = true;
-        CloseSafely();
+        // Arrow keys walk the rows like a real menu. Collapsed monitor rows are skipped, and
+        // both directions wrap so the list never dead-ends.
+        var visible = _rows.Where(row => row.IsVisible).ToList();
+        if (visible.Count == 0) return;
+        var focused = Keyboard.FocusedElement as WpfButton;
+        var index = focused is null ? -1 : visible.IndexOf(focused);
+        var next = e.Key == Key.Down
+            ? visible[(index + 1 + visible.Count) % visible.Count]
+            : visible[(index <= 0 ? visible.Count - 1 : index - 1) % visible.Count];
+        next.Focus();
     }
 
     internal void CloseSafely()

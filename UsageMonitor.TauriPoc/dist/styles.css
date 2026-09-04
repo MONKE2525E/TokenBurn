@@ -37,7 +37,7 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
    stated product requirement (PRODUCT.md), and previously only two controls had any indicator. */
 :where(.icon-button, .title-button, .periods button, .metric-menu button, .footer-icon-button,
   .select-trigger, .select-option, .provider-action, .page-back, .legend-row, .breakdown button,
-  .chrome-back, #breakdown-chart):focus-visible {
+  .chrome-back, .history-disclosure, #breakdown-chart):focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
   border-radius: 8px;
@@ -299,6 +299,16 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .fill.danger { background: #ee6d75; }
 .text-line { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
 .history-lines { display: grid; gap: 7px; margin-top: 5px; }
+.history-trend .metric-top { align-items: center; }
+.history-disclosure { width: 42px; height: 24px; margin: -4px auto -2px; padding: 4px 11px; display: grid; place-items: center; background: transparent; color: var(--muted); border-radius: 8px; transition: color var(--dur-micro) ease, background var(--dur-micro) ease; }
+.history-disclosure:hover { color: var(--text); background: rgba(255,255,255,.055); }
+.history-disclosure svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--dur-base) var(--ease-out); }
+.history-disclosure.is-open svg { transform: rotate(180deg); }
+.history-details { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--dur-base) var(--ease-out), opacity var(--dur-micro) ease; }
+.history-details > div { min-height: 0; overflow: hidden; }
+.history-details.is-open { grid-template-rows: 1fr; opacity: 1; }
+.history-details .history-lines { padding-top: 7px; margin-top: 0; border-top: 1px solid rgba(255,255,255,.07); }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .error-line { color: #ee8080; font-size: 11px; line-height: 1.35; }
 /* "Not configured" / "no limits returned" are neutral facts, not failures. Red is reserved for
    things the user should act on, otherwise the one urgent signal stops meaning anything. */

@@ -3,7 +3,7 @@ param(
     [string]$Configuration = 'Release',
     [ValidateSet('win-x64', 'win-arm64')]
     [string]$Runtime = 'win-x64',
-    [string]$Version = '0.0.1'
+    [string]$Version = '0.0.2'
 )
 
 $ErrorActionPreference = 'Stop'

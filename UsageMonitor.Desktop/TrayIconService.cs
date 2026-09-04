@@ -205,7 +205,8 @@ public sealed class TrayIconService : IDisposable
                             updated.SelectedMonitor = monitor.Id;
                             updated.StatusSurface = StatusSurfaceMode.TaskbarWidget;
                             _app.SaveSettings(updated);
-                        });
+                        },
+                        HideFromScreenShare: _app.Settings.HideFromScreenShare);
                     var menu = new TrayMenuWindow(actions, cursor);
                     if (_disposed || generation != Interlocked.Read(ref _menuGeneration))
                     {
