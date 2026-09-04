@@ -124,11 +124,13 @@ public sealed class GrokUsageScanner
             "reasoningTokens", "reasoning_tokens")));
         var total = NonNegative(ProviderJson.Number(ProviderJson.Property(usage,
             "totalTokens", "total_tokens")));
-        var costTicks = NonNegative(ProviderJson.Number(ProviderJson.Property(usage,
-            "costUsdTicks", "cost_usd_ticks")));
+        var reportedCostTicks = ProviderJson.Number(ProviderJson.Property(usage,
+            "costUsdTicks", "cost_usd_ticks"));
+        var costTicks = NonNegative(reportedCostTicks);
+        var hasReportedCost = reportedCostTicks is { } reported && double.IsFinite(reported) && reported >= 0;
 
         if (total <= 0) total = input + output;
-        if (total <= 0 && costTicks <= 0) return false;
+        if (total <= 0 && !hasReportedCost) return false;
         cached = Math.Min(cached, input);
         cacheCreation = Math.Min(cacheCreation, Math.Max(0, input - cached));
         var uncached = Math.Max(0, input - cached - cacheCreation);
@@ -139,7 +141,7 @@ public sealed class GrokUsageScanner
         if (!seen.Add(stableEventId)) return false;
 
         var pricing = _catalog.ResolvePrice(ProviderIds.Grok, modelId);
-        var reportedCost = costTicks > 0 ? costTicks / CostTicksPerUsd : (double?)null;
+        var reportedCost = hasReportedCost ? costTicks / CostTicksPerUsd : (double?)null;
         var estimatedCost = pricing?.Estimate(uncached, cached, outputWithoutReasoning + reasoning, cacheCreation);
         var cost = reportedCost ?? estimatedCost ?? 0;
         var basis = reportedCost is not null

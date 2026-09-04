@@ -124,6 +124,32 @@ public sealed class ProviderAdaptersTests
     }
 
     [Fact]
+    public void GrokHistoryScannerPreservesProviderReportedZeroCost()
+    {
+        var grokHome = CreateTempGrokHome("{}");
+        var sessionDirectory = Path.Combine(grokHome, "sessions", "fixture-session");
+        Directory.CreateDirectory(sessionDirectory);
+        var line = JsonSerializer.Serialize(new
+        {
+            timestamp = Now.AddHours(-1).ToUnixTimeSeconds(),
+            usage = new
+            {
+                model = "grok-build",
+                inputTokens = 1,
+                totalTokens = 1,
+                costUsdTicks = 0d
+            }
+        });
+        File.WriteAllText(Path.Combine(sessionDirectory, "updates.jsonl"), line + Environment.NewLine);
+
+        var history = new GrokUsageScanner(localTimeZone: TimeZoneInfo.Utc).Scan(grokHome, Now.AddDays(-90));
+
+        var row = Assert.Single(history.Breakdown);
+        Assert.Equal(UsageCostBasis.ProviderReported, row.CostBasis);
+        Assert.Equal(0, row.CostUsd);
+    }
+
+    [Fact]
     public void CodexMapperClassifiesWindowsByDurationAndReadsSparkLimits()
     {
         const string body = """
