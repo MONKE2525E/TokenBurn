@@ -1178,9 +1178,31 @@ function formatHistoryValue(totals) {
   return `${compactNumber(totals.tokens)} tokens`;
 }
 
+// Deep-link to each provider's own web usage/quota page, where one exists. Antigravity has no
+// standalone web dashboard (quota lives in its Settings/CLI), so it's intentionally absent.
+const PROVIDER_USAGE_URLS = {
+  'claude-code': 'https://claude.ai/settings/usage',
+  codex: 'https://chatgpt.com/codex/cloud/settings/analytics#usage',
+  cursor: 'https://cursor.com/dashboard/spending',
+  copilot: 'https://github.com/settings/billing',
+  devin: 'https://app.devin.ai/settings/billing',
+  grok: 'https://grok.com/?_s=usage',
+  opencode: 'https://console.opencode.ai',
+};
+
 function renderLocalHistory(snapshot) {
+  const providerId = snapshot.providerId;
+  const usageUrl = PROVIDER_USAGE_URLS[providerId];
+  const usageLink = usageUrl
+    ? `<button class="provider-action" type="button" data-open-usage-url="${esc(usageUrl)}">View online usage ↗</button>`
+    : '';
   const points = snapshot.usageHistory?.points || [];
-  if (!points.length) return '';
+  if (!points.length) {
+    if (!usageLink) return '';
+    const detailsId = `history-details-${providerId.replace(/[^a-z0-9_-]/gi, '-')}`;
+    const expanded = state.expandedHistoryProviders.has(providerId);
+    return `<button class="history-disclosure${expanded ? ' is-open' : ''}" type="button" data-history-disclosure="${esc(providerId)}" aria-expanded="${expanded}" aria-controls="${esc(detailsId)}" aria-label="${expanded ? 'Hide' : 'Show'} usage details"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="history-details${expanded ? ' is-open' : ''}" id="${esc(detailsId)}"><div>${usageLink}</div></div>`;
+  }
   const today = dayKey(0);
   const yesterday = dayKey(1);
   const offsets = Array.from({ length: 30 }, (_, index) => 29 - index);
@@ -1199,10 +1221,9 @@ function renderLocalHistory(snapshot) {
     const detail = formatHistoryValue(totals);
     return `<i data-tooltip="${esc(point.date || 'Unknown date')} · ${esc(detail)}" aria-label="${esc(point.date || 'Unknown date')}: ${esc(detail)}" style="height:${Math.max(3, Math.min(100, value / peak * 100))}%"></i>`;
   }).join('');
-  const providerId = snapshot.providerId;
   const expanded = state.expandedHistoryProviders.has(providerId);
   const detailsId = `history-details-${providerId.replace(/[^a-z0-9_-]/gi, '-')}`;
-  return `<div class="metric history-trend"><div class="metric-top"><span class="metric-label">Usage trend</span></div><div class="trend">${bars}</div></div><button class="history-disclosure${expanded ? ' is-open' : ''}" type="button" data-history-disclosure="${esc(providerId)}" aria-expanded="${expanded}" aria-controls="${esc(detailsId)}" aria-label="${expanded ? 'Hide' : 'Show'} usage history details"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="history-details${expanded ? ' is-open' : ''}" id="${esc(detailsId)}"><div><div class="history-lines"><div class="text-line"><span>Today</span><span>${formatHistoryValue(todayTotals)}</span></div><div class="text-line"><span>Yesterday</span><span>${formatHistoryValue(yesterdayTotals)}</span></div><div class="text-line"><span>Last 30 Days</span><span>${formatHistoryValue(monthTotals)}</span></div></div></div></div>`;
+  return `<div class="metric history-trend"><div class="metric-top"><span class="metric-label">Usage trend</span></div><div class="trend">${bars}</div></div><button class="history-disclosure${expanded ? ' is-open' : ''}" type="button" data-history-disclosure="${esc(providerId)}" aria-expanded="${expanded}" aria-controls="${esc(detailsId)}" aria-label="${expanded ? 'Hide' : 'Show'} usage history details"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="history-details${expanded ? ' is-open' : ''}" id="${esc(detailsId)}"><div><div class="history-lines"><div class="text-line"><span>Today</span><span>${formatHistoryValue(todayTotals)}</span></div><div class="text-line"><span>Yesterday</span><span>${formatHistoryValue(yesterdayTotals)}</span></div><div class="text-line"><span>Last 30 Days</span><span>${formatHistoryValue(monthTotals)}</span></div></div>${usageLink}</div></div>`;
 }
 
 function render() {
@@ -1231,6 +1252,12 @@ function render() {
     : state.refreshStatusError || formatRefreshCountdown(state.nextRefreshAt);
 }
 
+document.addEventListener('click', event => {
+  const link = event.target?.closest?.('[data-open-usage-url]');
+  if (!link) return;
+  invoke('open_url', { url: link.dataset.openUsageUrl })
+    .catch(() => showStatus('Could not open that link.', STATUS_LONG));
+});
 document.addEventListener('click', event => {
   const button = event.target?.closest?.('[data-history-disclosure]');
   if (!button) return;
