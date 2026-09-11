@@ -359,6 +359,11 @@ assert.match(source, /breakdownRequestGeneration/, 'drill-down transitions must 
 assert.match(source, /if \(generation !== breakdownRequestGeneration\) \{ clearTransition\(\); return false; \}/, 'stale drill-down transitions must bail out and clean their transition classes');
 assert.match(source, /\/\/ The breakdown is a drill-down level like a settings page\./, 'Escape must collapse the drill-down before hiding the popup');
 assert.match(source, /paintSpendOtherTooltip/, 'the Others tooltip body must be paintable in place');
+assert.match(source, /grok: '#000000'/, 'Grok must use pure black in spend charts');
+assert.match(styles, /\.legend[\s\S]*height: 150px[\s\S]*overflow-y: auto/, 'the spend legend must scroll within a fixed-height viewport');
+assert.match(styles, /scrollbar-color: transparent transparent/, 'the spend legend scrollbar must stay hidden until needed');
+assert.match(styles, /@media \(max-width: 460px\)[\s\S]*\.legend \{ height: 150px; \}/, 'the compact legend must leave room for four provider rows');
+assert.match(styles, /\.legend-row \{[\s\S]*font-size: 10px/, 'the compact provider rows must stay dense enough for the sidebar');
 assert.match(source, /state\.spendTooltipRowId && \$\(\'#spend-other-tooltip\'\)\?\.classList\.contains\(\'is-open\'\)/, 'a refresh must re-sync or close an open Others tooltip');
 assert.match(source, /\/\/ The provider list is about to be rebuilt underneath an open trend tooltip\./, 'a provider rebuild must tear down the trend tooltip');
 assert.match(source, /\/\/ A tooltip left over from the previous session is stale by definition/, 'a popup reopen must clear leftover tooltips');

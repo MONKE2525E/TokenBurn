@@ -232,12 +232,27 @@ button { color: inherit; font: inherit; border: 0; cursor: pointer; }
 .spend-body { position: relative; display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 5px; margin-top: 4px; }
 #spend-ring { width: 150px; height: 150px; }
 .spend-body > *, .legend, .legend-row { min-width: 0; }
-.legend { display: grid; gap: 7px; }
-.legend-row { position: relative; width: 100%; display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 5px; font-size: 11px; background: transparent; border: 0; color: inherit; font: inherit; text-align: left; }
-.legend-row .dot { width: 9px; height: 9px; border-radius: 50%; }
+.legend {
+  display: grid;
+  gap: 4px;
+  height: 150px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  padding-right: 3px;
+}
+.legend::-webkit-scrollbar { width: 5px; }
+.legend::-webkit-scrollbar-track { background: transparent; }
+.legend::-webkit-scrollbar-thumb { background: transparent; border-radius: 5px; }
+.legend:hover, .legend:focus-within { scrollbar-color: rgba(255,255,255,.28) transparent; }
+.legend:hover::-webkit-scrollbar-thumb, .legend:focus-within::-webkit-scrollbar-thumb { background: rgba(255,255,255,.28); }
+.legend:hover::-webkit-scrollbar-thumb:hover, .legend:focus-within::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.44); }
+.legend-row { position: relative; width: 100%; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 4px; font-size: 10px; background: transparent; border: 0; color: inherit; font: inherit; text-align: left; }
+.legend-row .dot { width: 8px; height: 8px; border-radius: 50%; }
 .legend-row .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .legend-row .value { color: var(--muted); font-weight: 600; white-space: nowrap; }
-.legend-row { cursor: default; transition: opacity var(--dur-micro) ease, transform var(--dur-micro) var(--ease-out), background var(--dur-micro) ease; border-radius: 8px; padding: 3px 4px; margin: -3px -4px; }
+.legend-row { cursor: default; transition: opacity var(--dur-micro) ease, transform var(--dur-micro) var(--ease-out), background var(--dur-micro) ease; border-radius: 7px; padding: 2px 3px; margin: -2px -3px; }
 .legend-row.is-aggregate { cursor: help; }
 .legend-row.is-aggregate:hover, .legend-row.is-aggregate:focus-visible { background: rgba(255,255,255,.055); }
 .legend-row.is-highlighted { background: rgba(255,255,255,.08); transform: translateX(2px); }
@@ -474,12 +489,15 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
   .chrome, .scroll-content, .footer { padding-left: 14px; padding-right: 14px; }
   .spend-body { grid-template-columns: 132px 1fr; gap: 4px; }
   #spend-ring { width: 132px; height: 132px; }
+  /* Leave enough room for four provider rows. A fifth row is the first one that should scroll. */
+  .legend { height: 150px; }
   .provider-name { font-size: 14px; }
 }
 
 @media (max-width: 340px) {
   .spend-body { grid-template-columns: 120px 1fr; gap: 4px; }
   #spend-ring { width: 120px; height: 120px; }
+  .legend { height: 140px; }
 }
 
 /* The native layer can intentionally shrink this popover to fit a small display. At that point
@@ -493,7 +511,7 @@ body.refreshing #refresh-button svg { animation: tb-spin 900ms linear infinite; 
   .spend-card { padding: 9px 10px 10px; margin-bottom: 11px; }
   .spend-body { grid-template-columns: 1fr; justify-items: center; gap: 10px; }
   #spend-ring { width: 136px; height: 136px; }
-  .legend { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+  .legend { width: 100%; height: 136px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
   .legend-row { min-width: 0; font-size: 11px; }
   .legend-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .legend-row .value { display: none; }

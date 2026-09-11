@@ -2467,7 +2467,7 @@ function spendProviderColor(id) {
     cursor: '#6c7bff',
     copilot: '#8957e5',
     devin: '#ffb454',
-    grok: '#333333',
+    grok: '#000000',
   }[id] || '#8d7dff';
 }
 
