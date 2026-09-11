@@ -1443,7 +1443,10 @@ fn show_popup_at_with_page(
     }
     let intent = POPUP_INTENT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     show_popup_at_once(window, x, y, avoid, intent, true);
-    let _ = window.emit("poc-opened", ());
+    // Carry page directly in the existing popup-open event. The frontend consumes this payload
+    // after its normal reopen reset. A delayed second event could race WebView startup and leave
+    // Settings or Customize looking like a dead tray action.
+    let _ = window.emit("poc-opened", page.unwrap_or(""));
 }
 
 /// Re-evaluate once after Windows has finished a taskbar drag. Explorer can report the old
