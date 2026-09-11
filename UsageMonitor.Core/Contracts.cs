@@ -1,5 +1,11 @@
 namespace UsageMonitor.Core;
 
+public enum RefreshScope
+{
+    All,
+    QuotasOnly
+}
+
 /// <summary>Inputs shared by providers for a refresh operation.</summary>
 public sealed record ProviderContext
 {
@@ -18,6 +24,7 @@ public sealed record ProviderContext
     /// <summary>Directory used to persist incremental history indexes. Null disables incremental history.</summary>
     public string? CacheDirectory { get; init; }
     public bool ForceRefresh { get; init; }
+    public RefreshScope RefreshScope { get; init; } = RefreshScope.All;
 }
 
 public sealed record ModelCatalogRequest(

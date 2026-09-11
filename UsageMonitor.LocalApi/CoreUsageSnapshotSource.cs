@@ -29,6 +29,7 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     private readonly ConcurrentDictionary<string, Task<ProviderSnapshot?>> _inFlightRefreshes =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _providerRefreshTimeout;
+    private IReadOnlyList<UsageSnapshotData>? _latestSnapshots;
 
     public CoreUsageSnapshotSource(IUsageProviderCatalog catalog, IUsageCache? cache = null,
         ProviderContext? context = null, TimeSpan? providerRefreshTimeout = null)
@@ -54,6 +55,12 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
     public async Task<IReadOnlyList<UsageSnapshotData>> GetSnapshotsAsync(string? providerId, bool force,
         CancellationToken cancellationToken = default, string? refreshId = null)
     {
+        // The desktop host and its popup share this source. Once the host has published a
+        // completed generation, non-forced dashboard reads must use that exact generation rather
+        // than racing the persisted cache write and briefly showing older quota values.
+        if (!force && string.IsNullOrWhiteSpace(providerId) && _latestSnapshots is { } latest)
+            return latest;
+
         // One correlation identifier per refresh operation. The logger is wrapped so provider and
         // scanner diagnostics inherit the id without every provider needing to pass it around.
         var id = string.IsNullOrWhiteSpace(refreshId) ? Guid.NewGuid().ToString("N")[..8] : refreshId;
@@ -61,6 +68,9 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         {
             Now = DateTimeOffset.UtcNow,
             ForceRefresh = force,
+            RefreshScope = id.StartsWith("scheduled-quota:", StringComparison.OrdinalIgnoreCase)
+                ? RefreshScope.QuotasOnly
+                : RefreshScope.All,
             RefreshId = id,
             Logger = CorrelatingDiagnosticsLogger.Wrap(_context.Logger, id)
         };
@@ -74,7 +84,10 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
 
         var tasks = providers.Select(p => ReadProviderAsync(p, context, cancellationToken));
         var snapshots = await Task.WhenAll(tasks).ConfigureAwait(false);
-        return snapshots.Where(s => s is not null).Cast<UsageSnapshotData>().ToArray();
+        var result = snapshots.Where(s => s is not null).Cast<UsageSnapshotData>().ToArray();
+        if (string.IsNullOrWhiteSpace(providerId))
+            _latestSnapshots = result;
+        return result;
     }
 
     /// <summary>
@@ -158,6 +171,9 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         var servedFrom = "network";
         try
         {
+            ProviderSnapshot? priorSnapshot = context.RefreshScope == RefreshScope.QuotasOnly && _cache is not null
+                ? await _cache.ReadAsync<ProviderSnapshot>(key, cancellationToken).ConfigureAwait(false)
+                : null;
             ProviderSnapshot? snapshot;
             if (context.ForceRefresh || _cache is null)
             {
@@ -253,6 +269,10 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
                 snapshot = WithRefreshFailure(snapshot, failure.Snapshot, warning);
                 servedFrom = "cache-auth-stale";
             }
+
+            if (context.RefreshScope == RefreshScope.QuotasOnly && priorSnapshot?.UsageHistory is { } priorHistory &&
+                snapshot is not null)
+                snapshot = snapshot with { UsageHistory = priorHistory };
 
             return snapshot is null
                 ? new UsageSnapshotData(provider.Descriptor.Id, provider.Descriptor.DisplayName, null, [], DateTimeOffset.UtcNow)
