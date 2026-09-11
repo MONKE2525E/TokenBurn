@@ -30,6 +30,7 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _providerRefreshTimeout;
     private IReadOnlyList<UsageSnapshotData>? _latestSnapshots;
+    private DateTimeOffset _latestSnapshotsAt;
 
     public CoreUsageSnapshotSource(IUsageProviderCatalog catalog, IUsageCache? cache = null,
         ProviderContext? context = null, TimeSpan? providerRefreshTimeout = null)
@@ -58,7 +59,8 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         // The desktop host and its popup share this source. Once the host has published a
         // completed generation, non-forced dashboard reads must use that exact generation rather
         // than racing the persisted cache write and briefly showing older quota values.
-        if (!force && string.IsNullOrWhiteSpace(providerId) && _latestSnapshots is { } latest)
+        if (!force && string.IsNullOrWhiteSpace(providerId) && _latestSnapshots is { } latest &&
+            (_cache is null || DateTimeOffset.UtcNow - _latestSnapshotsAt <= _cache.Freshness))
             return latest;
 
         // One correlation identifier per refresh operation. The logger is wrapped so provider and
@@ -86,7 +88,10 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
         var snapshots = await Task.WhenAll(tasks).ConfigureAwait(false);
         var result = snapshots.Where(s => s is not null).Cast<UsageSnapshotData>().ToArray();
         if (string.IsNullOrWhiteSpace(providerId))
+        {
             _latestSnapshots = result;
+            _latestSnapshotsAt = DateTimeOffset.UtcNow;
+        }
         return result;
     }
 
