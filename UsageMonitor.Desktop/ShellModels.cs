@@ -39,7 +39,7 @@ public sealed class UserSettings
     // Stored values are canonical provider IDs. SettingsStore migrates the display names used by
     // older releases before the settings reach the dashboard or popup.
     public List<string> DisabledProviders { get; set; } =
-        [ProviderIds.Cursor, ProviderIds.Copilot, ProviderIds.Devin, ProviderIds.Grok, ProviderIds.OpenCode];
+        [ProviderIds.Cursor, ProviderIds.Copilot, ProviderIds.Devin, ProviderIds.OpenCode];
     // Older builds knew only the first three providers. This flag lets one migration preserve
     // their compact default while still exposing the complete upstream-style Customize catalog.
     public bool ProviderSelectionInitialized { get; set; } = true;

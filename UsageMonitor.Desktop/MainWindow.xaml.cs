@@ -47,12 +47,15 @@ public partial class MainWindow : Window
     private Task? _refreshTask;
     private bool _refreshInFlight;
     private bool _forceRefreshQueued;
+    private RefreshScope _activeRefreshScope = RefreshScope.All;
     private bool _refreshLoopStarted;
     // Provider refreshes have their own deadlines, but the desktop lifecycle also needs a
     // deadline around the complete snapshot batch. This is the final guard against a provider,
     // cache, or coordination task leaving the visible dashboard in "Refreshing..." forever.
     internal static readonly TimeSpan DesktopRefreshTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan DesktopRefreshRetryDelay = TimeSpan.FromMinutes(1);
+    internal static readonly TimeSpan QuotaRefreshInterval = TimeSpan.FromMinutes(2);
+    internal static readonly TimeSpan UsageRefreshInterval = TimeSpan.FromMinutes(5);
     // Keep the last successful provider envelope in memory so an auth or network failure cannot
     // erase a previously visible quota bar during the next five-minute refresh.
     private readonly Dictionary<string, UsageSnapshotData> _lastGoodSnapshots = new(StringComparer.OrdinalIgnoreCase);
@@ -61,6 +64,8 @@ public partial class MainWindow : Window
     private readonly HashSet<string> _authFailureNotified = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<UsageSnapshotData> _latestSnapshots = Array.Empty<UsageSnapshotData>();
     private DateTimeOffset _nextRefreshAt = DateTimeOffset.Now;
+    private DateTimeOffset _nextQuotaRefreshAt = DateTimeOffset.Now;
+    private DateTimeOffset _nextUsageRefreshAt = DateTimeOffset.Now;
     internal IUsageProviderCatalog? SnapshotCatalog { get; private set; }
     internal IUsageCache? SnapshotCache => _cache;
     internal CoreUsageSnapshotSource? SnapshotSource => _snapshotSource;
@@ -106,11 +111,16 @@ public partial class MainWindow : Window
         _resetNotifications.Tick(DateTimeOffset.UtcNow, notification =>
             _tray?.ShowQuotaNotification($"{notification.DisplayName} {notification.MetricLabel} reset."));
         // A reset notification fires for user awareness; the quota data is refreshed by the
-        // scheduled stale-while-revalidate cycle. A forced refresh here used to re-run every
-        // provider's full network + history work on each reset boundary and immediately after
-        // startup, which is where the multi-second forced refreshes and the CPU spikes came from.
-        if (!_refreshInFlight && DateTimeOffset.Now >= _nextRefreshAt)
-            RefreshData();
+        // Quota and usage refreshes have separate deadlines. Scheduled runs are forced so the
+        // visible taskbar and popup receive the completed generation, not a stale cache envelope.
+        if (!_refreshInFlight)
+        {
+            var now = DateTimeOffset.Now;
+            if (now >= _nextUsageRefreshAt)
+                RefreshData(true, "scheduled-usage", RefreshScope.All);
+            else if (now >= _nextQuotaRefreshAt)
+                RefreshData(true, "scheduled-quota", RefreshScope.QuotasOnly);
+        }
     }
 
     private void UpdateRefreshCountdown()
@@ -182,7 +192,7 @@ public partial class MainWindow : Window
         if (_refreshLoopStarted) return;
         _refreshLoopStarted = true;
         _refreshTimer.Start();
-        RefreshData();
+        RefreshData(true, "startup", RefreshScope.All);
     }
 
     private void UpdateTaskbarSurfaceStatus(TaskbarStateChangedEventArgs state)
@@ -501,11 +511,11 @@ public partial class MainWindow : Window
         }
     }
 
-    public async void RefreshData(bool force = false, string? reason = null)
+    public async void RefreshData(bool force = false, string? reason = null, RefreshScope scope = RefreshScope.All)
     {
         try
         {
-            await RefreshDataAsync(force, reason);
+            await RefreshDataAsync(force, reason, scope);
         }
         catch (Exception exception)
         {
@@ -520,7 +530,7 @@ public partial class MainWindow : Window
         }
     }
 
-    internal Task RefreshDataAsync(bool force = false, string? reason = null)
+    internal Task RefreshDataAsync(bool force = false, string? reason = null, RefreshScope scope = RefreshScope.All)
     {
         if (_refreshTask is { IsCompleted: false })
         {
@@ -530,21 +540,23 @@ public partial class MainWindow : Window
                 new Dictionary<string, object?> { ["reason"] = reason, ["force"] = force });
             // A force request must not silently degrade into the joined (possibly cache-served)
             // run: promote the intent so a real network refresh follows once this one finishes.
-            if (force) _forceRefreshQueued = true;
+            if (force || scope == RefreshScope.All && _activeRefreshScope == RefreshScope.QuotasOnly)
+                _forceRefreshQueued = true;
             return _refreshTask;
         }
-        _refreshTask = RefreshDataCoreAsync(force, reason);
+        _refreshTask = RefreshDataCoreAsync(force, reason, scope);
         return _refreshTask;
     }
 
-    private async Task RefreshDataCoreAsync(bool force, string? reason)
+    private async Task RefreshDataCoreAsync(bool force, string? reason, RefreshScope scope)
     {
         _refreshInFlight = true;
+        _activeRefreshScope = scope;
         RefreshButton.IsEnabled = false;
         UpdateRefreshCountdown();
         var stopwatch = Stopwatch.StartNew();
         // One id links the started/completed envelope with every provider and scanner entry.
-        var refreshId = Guid.NewGuid().ToString("N")[..8];
+        var refreshId = (scope == RefreshScope.QuotasOnly ? "scheduled-quota:" : string.Empty) + Guid.NewGuid().ToString("N")[..8];
         FileDiagnosticsLogger.Default.Info("Provider refresh started",
             new Dictionary<string, object?>
             {
@@ -643,7 +655,11 @@ public partial class MainWindow : Window
                 !string.Equals(card.Status, "Unavailable", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(card.Status, "Not configured", StringComparison.OrdinalIgnoreCase));
             ConnectedTextBlock.Text = $"{connected} of {enabledProviders.Count}";
-            _nextRefreshAt = DateTimeOffset.Now.AddMinutes(5);
+            var next = DateTimeOffset.Now;
+            _nextQuotaRefreshAt = next.Add(QuotaRefreshInterval);
+            if (scope == RefreshScope.All)
+                _nextUsageRefreshAt = next.Add(UsageRefreshInterval);
+            _nextRefreshAt = Min(_nextQuotaRefreshAt, _nextUsageRefreshAt);
             var hasUnknownPricing = enabledSnapshots.Any(snapshot => snapshot.UsageHistory?.UnknownModels.Count > 0);
             SpendEstimateText.Text = hasUnknownPricing && SpendCard.CurrentSummary.HasEstimatedValues
                 ? "ESTIMATED • UNKNOWN PRICING"
@@ -667,7 +683,7 @@ public partial class MainWindow : Window
         }
         catch (TimeoutException ex)
         {
-            ScheduleRefreshRetry(force, reason, refreshId, stopwatch, timedOut: true);
+            ScheduleRefreshRetry(force, reason, scope, refreshId, stopwatch, timedOut: true);
             _tray?.ShowFallbackNotification("TokenBurn's usage refresh timed out. Your last known values are still shown and it will retry automatically.");
             FileDiagnosticsLogger.Default.Warning("Desktop refresh timed out",
                 new Dictionary<string, object?>
@@ -682,7 +698,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            ScheduleRefreshRetry(force, reason, refreshId, stopwatch, timedOut: false);
+            ScheduleRefreshRetry(force, reason, scope, refreshId, stopwatch, timedOut: false);
             _tray?.ShowFallbackNotification("TokenBurn could not refresh usage data. Your last known values are still shown and it will retry automatically.");
             FileDiagnosticsLogger.Default.Warning("Desktop refresh failed",
                 new Dictionary<string, object?>
@@ -697,6 +713,7 @@ public partial class MainWindow : Window
         finally
         {
             _refreshInFlight = false;
+            _activeRefreshScope = RefreshScope.All;
             RefreshButton.IsEnabled = true;
             // Drain a force request that joined this run: the joined run may have served cached
             // data, so the promoted intent must still get its real network refresh. One promote
@@ -704,17 +721,25 @@ public partial class MainWindow : Window
             if (_forceRefreshQueued)
             {
                 _forceRefreshQueued = false;
-                _refreshTask = RefreshDataCoreAsync(true, $"{reason ?? "refresh"}-promoted");
+                _refreshTask = RefreshDataCoreAsync(true, $"{reason ?? "refresh"}-promoted", RefreshScope.All);
             }
         }
     }
 
-    private void ScheduleRefreshRetry(bool force, string? reason, string refreshId, Stopwatch stopwatch, bool timedOut)
+    private void ScheduleRefreshRetry(bool force, string? reason, RefreshScope scope, string refreshId, Stopwatch stopwatch, bool timedOut)
     {
         // Clear the in-flight state in finally below, then let the heartbeat retry after a short
         // backoff. Logging the scheduled time makes a stuck-refresh report diagnosable from one
         // support log without needing a live debugger.
-        _nextRefreshAt = DateTimeOffset.Now.Add(DesktopRefreshRetryDelay);
+        var retryAt = DateTimeOffset.Now.Add(DesktopRefreshRetryDelay);
+        if (scope == RefreshScope.QuotasOnly)
+            _nextQuotaRefreshAt = retryAt;
+        else
+        {
+            _nextQuotaRefreshAt = retryAt;
+            _nextUsageRefreshAt = retryAt;
+        }
+        _nextRefreshAt = Min(_nextQuotaRefreshAt, _nextUsageRefreshAt);
         UpdateRefreshCountdown();
         FileDiagnosticsLogger.Default.Info("Desktop refresh retry scheduled",
             new Dictionary<string, object?>
@@ -728,6 +753,8 @@ public partial class MainWindow : Window
                 ["retryAt"] = _nextRefreshAt
             });
     }
+
+    private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) => left <= right ? left : right;
 
     private static void ObserveDetachedTask(Task task, IDisposable resourceToDispose)
     {
@@ -1242,7 +1269,7 @@ public partial class MainWindow : Window
     }
 
     public void ShowUpdateStatus() => System.Windows.MessageBox.Show("The update channel is not configured for this unsigned development build. No network request was made. Install a signed release when a feed is available.", "TokenBurn updates", MessageBoxButton.OK, MessageBoxImage.Information);
-    private void RefreshButton_OnClick(object sender, RoutedEventArgs e) => RefreshData();
+    private void RefreshButton_OnClick(object sender, RoutedEventArgs e) => RefreshData(true, "manual-refresh", RefreshScope.All);
     private void SettingsButton_OnClick(object sender, RoutedEventArgs e) => ShowSettings();
 
     private void OptionsButton_OnClick(object sender, RoutedEventArgs e)

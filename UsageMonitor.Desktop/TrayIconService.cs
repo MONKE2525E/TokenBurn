@@ -192,7 +192,7 @@ public sealed class TrayIconService : IDisposable
                     var cursor = Forms.Cursor.Position;
                     var actions = new TrayMenuActions(
                         OpenDashboard: () => _dashboard.ShowFromTray(cursor, useWidgetAvoidRect: false),
-                        Refresh: () => _dashboard.RefreshData(),
+                        Refresh: () => _dashboard.RefreshData(true, "tray-refresh", RefreshScope.All),
                         Settings: () => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false),
                         Customize: () => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false),
                         CheckForUpdates: _dashboard.ShowUpdateStatus,
@@ -248,7 +248,7 @@ public sealed class TrayIconService : IDisposable
                 menu.Dispose();
             };
             menu.Items.Add("Open dashboard", null, (_, _) => _dashboard.ShowFromTray(cursor, useWidgetAvoidRect: false));
-            menu.Items.Add("Refresh now", null, (_, _) => _dashboard.RefreshData());
+            menu.Items.Add("Refresh now", null, (_, _) => _dashboard.RefreshData(true, "tray-refresh", RefreshScope.All));
             menu.Items.Add("Settings", null, (_, _) => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false));
             menu.Items.Add("Customize", null, (_, _) => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false));
             menu.Items.Add("Check for updates", null, (_, _) => _dashboard.ShowUpdateStatus());

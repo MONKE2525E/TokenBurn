@@ -44,6 +44,13 @@ internal static class SettingsStore
                 return UserSettings.Default;
             }
             settings.SelectedMonitor ??= MonitorPlacementService.PrimaryMonitorId;
+            // Grok Build was added after the original default provider selection. Migrate only the
+            // untouched old default list so existing users get its local cost history included;
+            // any other provider selection remains an explicit user choice.
+            var oldDefaultDisabled = new[] { ProviderIds.Cursor, ProviderIds.Copilot, ProviderIds.Devin, ProviderIds.Grok, ProviderIds.OpenCode };
+            if (settings.DisabledProviders is { Count: 5 } &&
+                oldDefaultDisabled.All(id => settings.DisabledProviders.Contains(id, StringComparer.OrdinalIgnoreCase)))
+                settings.DisabledProviders.RemoveAll(id => id.Equals(ProviderIds.Grok, StringComparison.OrdinalIgnoreCase));
             // Older builds exposed several mutually exclusive surfaces. The Windows build now
             // keeps the taskbar text strip (macOS-menu-bar style, shows live quota values inline)
             // plus the tray icon as the single predictable status surface; a failed embed falls
