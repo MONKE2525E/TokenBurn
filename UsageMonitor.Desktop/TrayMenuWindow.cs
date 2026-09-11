@@ -332,6 +332,12 @@ internal sealed class TrayMenuWindow : Window
         var top = _openedUpward ? preferredTop : anchor.Y + edgeY;
         top = Math.Clamp(top, area.Top + edgeY, area.Bottom - height - edgeY);
 
+        // Keep WPF's logical position in sync as well. The monitor list animation adjusts
+        // Window.Top in DIPs after the menu opens, so leaving it at its default would make that
+        // animation jump away from the tray even though the initial HWND placement is correct.
+        Left = left / scaleX;
+        Top = top / scaleY;
+
         var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
         if (hwnd != IntPtr.Zero)
         {
