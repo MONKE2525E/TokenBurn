@@ -47,6 +47,7 @@ public partial class MainWindow : Window
     private Task? _refreshTask;
     private bool _refreshInFlight;
     private bool _forceRefreshQueued;
+    private RefreshScope _activeRefreshScope = RefreshScope.All;
     private bool _refreshLoopStarted;
     // Provider refreshes have their own deadlines, but the desktop lifecycle also needs a
     // deadline around the complete snapshot batch. This is the final guard against a provider,
@@ -539,7 +540,8 @@ public partial class MainWindow : Window
                 new Dictionary<string, object?> { ["reason"] = reason, ["force"] = force });
             // A force request must not silently degrade into the joined (possibly cache-served)
             // run: promote the intent so a real network refresh follows once this one finishes.
-            if (force) _forceRefreshQueued = true;
+            if (force || scope == RefreshScope.All && _activeRefreshScope == RefreshScope.QuotasOnly)
+                _forceRefreshQueued = true;
             return _refreshTask;
         }
         _refreshTask = RefreshDataCoreAsync(force, reason, scope);
@@ -549,6 +551,7 @@ public partial class MainWindow : Window
     private async Task RefreshDataCoreAsync(bool force, string? reason, RefreshScope scope)
     {
         _refreshInFlight = true;
+        _activeRefreshScope = scope;
         RefreshButton.IsEnabled = false;
         UpdateRefreshCountdown();
         var stopwatch = Stopwatch.StartNew();
@@ -710,6 +713,7 @@ public partial class MainWindow : Window
         finally
         {
             _refreshInFlight = false;
+            _activeRefreshScope = RefreshScope.All;
             RefreshButton.IsEnabled = true;
             // Drain a force request that joined this run: the joined run may have served cached
             // data, so the promoted intent must still get its real network refresh. One promote
