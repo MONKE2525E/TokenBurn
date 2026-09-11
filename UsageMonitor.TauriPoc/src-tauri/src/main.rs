@@ -22,7 +22,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
-use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetPropW, PostMessageW, RegisterWindowMessageW,
     SetWindowDisplayAffinity, SetWindowPos, ShowWindow, GA_ROOT, HWND_TOPMOST, SWP_NOACTIVATE,
@@ -733,6 +733,37 @@ fn open_antigravity_login() -> Result<(), String> {
     #[cfg(not(windows))]
     {
         Err("Antigravity sign-in is only available on Windows in this build.".to_string())
+    }
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    // Provider usage-dashboard links are baked into app.js, not user input, but a scheme check
+    // costs nothing and keeps this from ever becoming a generic "run whatever string" command.
+    if !url.starts_with("https://") {
+        return Err("Refusing to open a non-https link.".to_string());
+    }
+    #[cfg(windows)]
+    {
+        let wide = HSTRING::from(url.as_str());
+        let result = unsafe {
+            ShellExecuteW(
+                Some(HWND(std::ptr::null_mut())),
+                w!("open"),
+                &wide,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOW,
+            )
+        };
+        if (result.0 as isize) <= 32 {
+            return Err("Could not open that link in your browser.".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Opening links is only available on Windows in this build.".to_string())
     }
 }
 
@@ -1727,6 +1758,7 @@ fn main() {
             hide_popup,
             open_claude_login,
             open_antigravity_login,
+            open_url,
             get_settings_data,
             apply_settings_data,
             get_diagnostics_bundle,
