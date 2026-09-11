@@ -2403,7 +2403,8 @@ window.__TAURI__?.event?.listen?.('poc-closing', () => {
   breakdownRequestGeneration++;
   beginPopoverClose();
 });
-window.__TAURI__?.event?.listen?.('poc-opened', () => {
+window.__TAURI__?.event?.listen?.('poc-opened', event => {
+  const requestedPage = event?.payload;
   popupHidden = false;
   clearTimeout(focusRevealTimer);
   closeHeaderPopovers();
