@@ -731,7 +731,10 @@ public partial class MainWindow : Window
         if (scope == RefreshScope.QuotasOnly)
             _nextQuotaRefreshAt = retryAt;
         else
+        {
+            _nextQuotaRefreshAt = retryAt;
             _nextUsageRefreshAt = retryAt;
+        }
         _nextRefreshAt = Min(_nextQuotaRefreshAt, _nextUsageRefreshAt);
         UpdateRefreshCountdown();
         FileDiagnosticsLogger.Default.Info("Desktop refresh retry scheduled",

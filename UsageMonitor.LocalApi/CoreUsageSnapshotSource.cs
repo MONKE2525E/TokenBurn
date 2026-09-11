@@ -208,7 +208,11 @@ public sealed class CoreUsageSnapshotSource : IUsageSnapshotSource
                     }
                 }
                 if (snapshot is not null && IsUsableCachedSnapshot(snapshot) && !usedFallbackCache && _cache is not null)
+                {
+                    if (context.RefreshScope == RefreshScope.QuotasOnly && priorSnapshot?.UsageHistory is { } priorHistory)
+                        snapshot = snapshot with { UsageHistory = priorHistory };
                     await _cache.WriteAsync(key, snapshot, snapshot.RefreshedAt, cancellationToken).ConfigureAwait(false);
+                }
             }
             else
             {
