@@ -2403,7 +2403,9 @@ window.__TAURI__?.event?.listen?.('poc-closing', () => {
   breakdownRequestGeneration++;
   beginPopoverClose();
 });
-window.__TAURI__?.event?.listen?.('poc-opened', () => {
+window.__TAURI__?.event?.listen?.('poc-opened', event => {
+  // Tray navigation arrives in this payload and is consumed after the normal reopen reset.
+  const requestedPage = event?.payload;
   popupHidden = false;
   clearTimeout(focusRevealTimer);
   closeHeaderPopovers();
@@ -2428,6 +2430,11 @@ window.__TAURI__?.event?.listen?.('poc-opened', () => {
   if (state.view === 'breakdown') setBreakdownView(false, true);
   revealPopover(true);
   refresh(false);
+  if (requestedPage === 'settings' || requestedPage === 'customize') {
+    // The popup-open handler runs before the page request so the compact shell is ready before
+    // the settings form measures its controls.
+    setTimeout(() => openSettingsPage(requestedPage), 0);
+  }
 });
 // Lets the tray's right-click menu open straight to Settings/Customize (see openSettingsPage)
 // instead of a second native window.

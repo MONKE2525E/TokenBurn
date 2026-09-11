@@ -195,7 +195,6 @@ public sealed class TrayIconService : IDisposable
                         Refresh: () => _dashboard.RefreshData(true, "tray-refresh", RefreshScope.All),
                         Settings: () => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false),
                         Customize: () => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false),
-                        CheckForUpdates: _dashboard.ShowUpdateStatus,
                         Quit: _app.Shutdown,
                         Monitors: _placement.GetMonitors(),
                         SelectedMonitor: _app.Settings.SelectedMonitor,
@@ -251,7 +250,6 @@ public sealed class TrayIconService : IDisposable
             menu.Items.Add("Refresh now", null, (_, _) => _dashboard.RefreshData(true, "tray-refresh", RefreshScope.All));
             menu.Items.Add("Settings", null, (_, _) => _dashboard.ShowSettingsPage(cursor, useWidgetAvoidRect: false));
             menu.Items.Add("Customize", null, (_, _) => _dashboard.ShowCustomizePage(cursor, useWidgetAvoidRect: false));
-            menu.Items.Add("Check for updates", null, (_, _) => _dashboard.ShowUpdateStatus());
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("Quit", null, (_, _) => _app.Shutdown());
             menu.Show(cursor);

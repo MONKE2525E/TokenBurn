@@ -1338,20 +1338,7 @@ fn dispatch_control_command(path: &str, app: &AppHandle) {
         let app = app.clone();
         let _ = app.clone().run_on_main_thread(move || {
             if let Some(window) = popup_window(&app) {
-                show_popup_at(&window, x, y, avoid);
-                if let Some(page) = page {
-                    // The popup may be shown for the first time by this request. Delay the
-                    // navigation event until the webview has had a chance to attach its listener.
-                    // The Tauri 'open-page' event is the only channel used: the page listens for
-                    // it directly, and the window CSP forbids eval-style script injection.
-                    if page == "settings" || page == "customize" {
-                        let page_window = window.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(90));
-                            let _ = page_window.emit("open-page", page);
-                        });
-                    }
-                }
+                show_popup_at_with_page(&window, x, y, avoid, page.as_deref());
             }
         });
         return;
@@ -1439,6 +1426,16 @@ fn resolve_anchor(x: f64, y: f64, fallback: (f64, f64)) -> (f64, f64) {
 }
 
 fn show_popup_at(window: &WebviewWindow, x: f64, y: f64, avoid: Option<LayoutRect>) {
+    show_popup_at_with_page(window, x, y, avoid, None);
+}
+
+fn show_popup_at_with_page(
+    window: &WebviewWindow,
+    x: f64,
+    y: f64,
+    avoid: Option<LayoutRect>,
+    page: Option<&str>,
+) {
     BREAKDOWN_GEOMETRY_GENERATION.fetch_add(1, Ordering::SeqCst);
     BREAKDOWN_GEOMETRY_ANIMATING.store(false, Ordering::SeqCst);
     if let Ok(mut bounds) = COMPACT_BREAKDOWN_BOUNDS.lock() {
@@ -1446,7 +1443,10 @@ fn show_popup_at(window: &WebviewWindow, x: f64, y: f64, avoid: Option<LayoutRec
     }
     let intent = POPUP_INTENT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     show_popup_at_once(window, x, y, avoid, intent, true);
-    let _ = window.emit("poc-opened", ());
+    // Carry page directly in the existing popup-open event. The frontend consumes this payload
+    // after its normal reopen reset. A delayed second event could race WebView startup and leave
+    // Settings or Customize looking like a dead tray action.
+    let _ = window.emit("poc-opened", page.unwrap_or(""));
 }
 
 /// Re-evaluate once after Windows has finished a taskbar drag. Explorer can report the old

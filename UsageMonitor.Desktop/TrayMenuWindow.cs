@@ -16,7 +16,6 @@ internal sealed record TrayMenuActions(
     Action Refresh,
     Action Settings,
     Action Customize,
-    Action CheckForUpdates,
     Action Quit,
     IReadOnlyList<MonitorOption> Monitors,
     string SelectedMonitor,
@@ -28,12 +27,12 @@ internal sealed record TrayMenuActions(
 /// It intentionally does not use ContextMenuStrip, whose rectangular Win32 rendering cannot match
 /// the rest of the app, and it does not reuse the app's implicit Button style: that template
 /// centers its ContentPresenter, which turned every row into centered text, so rows carry their
-/// own left-aligned template with leading stroke icons.
+/// own left-aligned template so rows do not inherit the dashboard button styling.
 /// </summary>
 internal sealed class TrayMenuWindow : Window
 {
-    private const double MenuWidth = 248;
-    private const double RowHeight = 29;
+    private const double MenuWidth = 220;
+    private const double RowHeight = 28;
     private static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
     private static ControlTemplate? _rowTemplate;
     private readonly Border _surface;
@@ -80,7 +79,7 @@ internal sealed class TrayMenuWindow : Window
         };
         foreach (var monitor in actions.Monitors)
         {
-            var item = CreateRow(null, monitor.DisplayName, () =>
+            var item = CreateRow(monitor.DisplayName, () =>
             {
                 actions.SelectMonitor(monitor);
                 CloseSafely();
@@ -93,36 +92,36 @@ internal sealed class TrayMenuWindow : Window
         }
 
         var content = new StackPanel { Orientation = WpfOrientation.Vertical };
-        content.Children.Add(CreateBrandHeader());
-        content.Children.Add(CreateSeparator(tightTop: true));
-        content.Children.Add(CreateRow(Icons.OpenDashboard, "Open dashboard", actions.OpenDashboard));
-        content.Children.Add(CreateRow(Icons.Refresh, "Refresh now", actions.Refresh));
-        var taskbarButton = CreateRow(Icons.Display, "Taskbar display", ToggleMonitorPanel, chevron: true);
+        // Keep the tray surface task-focused. The icon and version belong to the dashboard,
+        // not to every transient shell menu, so the menu can stay close to the compact Windows
+        // context-menu proportions.
+        content.Children.Add(CreateRow("Open dashboard", actions.OpenDashboard));
+        content.Children.Add(CreateRow("Refresh now", actions.Refresh));
+        var taskbarButton = CreateRow("Taskbar display", ToggleMonitorPanel, chevron: true);
         content.Children.Add(taskbarButton);
         content.Children.Add(_monitorPanel);
         content.Children.Add(CreateSeparator());
-        content.Children.Add(CreateRow(Icons.Sliders, "Settings", actions.Settings));
-        content.Children.Add(CreateRow(Icons.Grid, "Customize", actions.Customize));
-        content.Children.Add(CreateRow(Icons.Download, "Check for updates", actions.CheckForUpdates));
+        content.Children.Add(CreateRow("Settings", actions.Settings));
+        content.Children.Add(CreateRow("Customize", actions.Customize));
         content.Children.Add(CreateSeparator());
-        content.Children.Add(CreateRow(Icons.Power, "Quit", actions.Quit));
+        content.Children.Add(CreateRow("Quit", actions.Quit));
 
         _surface = new Border
         {
             Background = Brush("PanelBrush"),
             BorderBrush = Brush("PanelStrokeBrush"),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8),
+            CornerRadius = new CornerRadius(6),
             ClipToBounds = true,
-            Padding = new Thickness(4),
+            Padding = new Thickness(4, 5, 4, 5),
             Child = content,
             RenderTransform = _surfaceSlide,
             Effect = new DropShadowEffect
             {
                 Color = Colors.Black,
-                Opacity = 0.42,
-                BlurRadius = 18,
-                ShadowDepth = 4
+                Opacity = 0.28,
+                BlurRadius = 12,
+                ShadowDepth = 2
             }
         };
         Content = _surface;
@@ -130,7 +129,7 @@ internal sealed class TrayMenuWindow : Window
         SourceInitialized += (_, _) => SetScreenShareExcluded(actions.HideFromScreenShare);
     }
 
-    private WpfButton CreateRow(string? iconData, string label, Action action, bool chevron = false,
+    private WpfButton CreateRow(string label, Action action, bool chevron = false,
         UIElement? customContent = null)
     {
         var button = new WpfButton
@@ -145,13 +144,13 @@ internal sealed class TrayMenuWindow : Window
             HorizontalContentAlignment = System.Windows.HorizontalAlignment.Stretch,
             Background = TransparentBrush,
             BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 5, 8, 5),
-            FontSize = 12,
+            Padding = new Thickness(9, 4, 9, 4),
+            FontSize = 13,
             Foreground = Brush("TextPrimaryBrush"),
             Focusable = true,
             FocusVisualStyle = null,
             Cursor = System.Windows.Input.Cursors.Hand,
-            Content = customContent ?? CreateRowContent(label, iconData, chevron)
+            Content = customContent ?? CreateRowContent(label, chevron)
         };
         _rows.Add(button);
         if (chevron)
@@ -202,7 +201,10 @@ internal sealed class TrayMenuWindow : Window
                 return;
             }
             CloseSafely();
-            Dispatcher.BeginInvoke(action, DispatcherPriority.Background);
+            // Let the menu finish closing before another popup or an async refresh starts. A
+            // background-priority callback can race WPF focus teardown, which made tray actions
+            // appear to do nothing even though the click was received.
+            Dispatcher.BeginInvoke(action, DispatcherPriority.ApplicationIdle);
         };
         return button;
     }
@@ -225,84 +227,33 @@ internal sealed class TrayMenuWindow : Window
         }
     }
 
-    private static Grid CreateRowContent(string label, string? iconData, bool chevron)
+    private static Grid CreateRowContent(string label, bool chevron)
     {
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        if (iconData is not null)
-        {
-            var icon = CreateIcon(iconData);
-            grid.Children.Add(icon);
-        }
         var text = new TextBlock
         {
             Text = label,
             VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            Margin = new Thickness(9, 0, 8, 0)
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
-        Grid.SetColumn(text, 1);
         grid.Children.Add(text);
         if (chevron)
         {
-            var chevronPath = CreateIcon(Icons.Chevron, size: 12, thickness: 1.6);
+            var chevronPath = CreateIcon("M4.5 2.5 L9.5 7.5 L4.5 12.5", size: 12, thickness: 1.6);
             chevronPath.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
             chevronPath.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(chevronPath, 2);
+            Grid.SetColumn(chevronPath, 1);
             grid.Children.Add(chevronPath);
         }
         return grid;
     }
 
-    private static FrameworkElement CreateBrandHeader()
-    {
-        var header = new Grid
-        {
-            Margin = new Thickness(6, 3, 6, 3),
-            MinHeight = 34
-        };
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var mark = new System.Windows.Controls.Image
-        {
-            Source = TokenBurnIconResources.LoadTrayMenuIcon(),
-            Width = 18,
-            Height = 18,
-            Margin = new Thickness(0, 0, 8, 0),
-            SnapsToDevicePixels = true,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        header.Children.Add(mark);
-        var name = new TextBlock
-        {
-            Text = "TokenBurn",
-            FontSize = 12,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = Brush("TextPrimaryBrush"),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        Grid.SetColumn(name, 1);
-        header.Children.Add(name);
-        var version = new TextBlock
-        {
-            Text = ProductInfo.Version,
-            FontSize = 11,
-            Foreground = Brush("TextMutedBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 1, 0, 0)
-        };
-        Grid.SetColumn(version, 2);
-        header.Children.Add(version);
-        return header;
-    }
-
     private static Grid CreateMonitorRow(string label, bool selected)
     {
-        // The 25px radio column keeps monitor labels flush with the parent rows' labels
-        // (16px icon + 9px gap).
+        // Keep the radio control in a stable column so monitor labels remain aligned while the
+        // parent menu stays text-first.
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(25) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -354,64 +305,45 @@ internal sealed class TrayMenuWindow : Window
         => new()
         {
             Height = 1,
-            Margin = new Thickness(6, tightTop ? 0 : 5, 6, 5),
+            Margin = new Thickness(6, tightTop ? 1 : 4, 6, 4),
             Background = Brush("PanelStrokeBrush")
         };
 
-    /// <summary>Minimal stroke glyphs drawn in a 16x16 box. Kept as plain path data so the menu
-    /// needs no new assets and stays a pure-code surface.</summary>
-    private static class Icons
-    {
-        public const string OpenDashboard =
-            "M6.5 3.5 H4 A1.5 1.5 0 0 0 2.5 5 V12 A1.5 1.5 0 0 0 4 13.5 H11 A1.5 1.5 0 0 0 12.5 12 V9.5 " +
-            "M9.5 2.5 H13.5 V6.5 M13.2 2.8 L7.9 8.1";
-        public const string Refresh =
-            "M13.5 8 A5.5 5.5 0 1 1 8 2.5 M6.1 0.9 L8 2.5 L6.1 4.1";
-        public const string Display =
-            "M2.5 4.5 A1.5 1.5 0 0 1 4 3 H12 A1.5 1.5 0 0 1 13.5 4.5 V9 A1.5 1.5 0 0 1 12 10.5 H4 " +
-            "A1.5 1.5 0 0 1 2.5 9 Z M8 10.5 V13.2 M5.2 13.2 H10.8";
-        public const string Sliders =
-            "M2.5 4.5 H8.4 M12.2 4.5 H13.5 M2.5 8 H3.8 M7.6 8 H13.5 M2.5 11.5 H9.7 " +
-            "M10.3 2.9 A1.6 1.6 0 1 1 10.3 6.1 A1.6 1.6 0 1 1 10.3 2.9 Z " +
-            "M5.7 6.4 A1.6 1.6 0 1 1 5.7 9.6 A1.6 1.6 0 1 1 5.7 6.4 Z " +
-            "M11.6 9.9 A1.6 1.6 0 1 1 11.6 13.1 A1.6 1.6 0 1 1 11.6 9.9 Z";
-        public const string Grid =
-            "M2.5 2.5 H6.8 V6.8 H2.5 Z M9.2 2.5 H13.5 V6.8 H9.2 Z " +
-            "M2.5 9.2 H6.8 V13.5 H2.5 Z M9.2 9.2 H13.5 V13.5 H9.2 Z";
-        public const string Download =
-            "M8 2.5 V9.8 M4.9 6.7 L8 9.8 L11.1 6.7 M3 13.2 H13";
-        public const string Power =
-            "M8 2.2 V7.6 M4.46 5.26 A5 5 0 1 0 11.54 5.26";
-        public const string Chevron =
-            "M4.5 2.5 L9.5 7.5 L4.5 12.5";
-    }
 
     private void PositionNear(System.Drawing.Point anchor)
     {
         UpdateLayout();
         var screen = System.Windows.Forms.Screen.FromPoint(anchor);
         var area = screen.WorkingArea;
-        var width = ActualWidth > 0 ? ActualWidth : MenuWidth;
-        var height = ActualHeight > 0 ? ActualHeight : 380;
-        // NotifyIcon and Screen report physical pixels. WPF Window.Left/Top use device
-        // independent pixels. Mixing the two made the menu clamp to the wrong edge on a 125%
-        // display, which is exactly where the tray lives on the development machine.
         var dpi = VisualTreeHelper.GetDpi(this);
         var scaleX = Math.Max(.1, dpi.DpiScaleX);
         var scaleY = Math.Max(.1, dpi.DpiScaleY);
-        var anchorX = anchor.X / scaleX;
-        var anchorY = anchor.Y / scaleY;
-        var areaLeft = area.Left / scaleX;
-        var areaTop = area.Top / scaleY;
-        var areaRight = area.Right / scaleX;
-        var areaBottom = area.Bottom / scaleY;
-        var left = Math.Clamp(anchorX - width + 10, areaLeft + 8, areaRight - width - 8);
-        var preferredTop = anchorY - height - 8;
-        _openedUpward = preferredTop >= areaTop + 8;
-        var top = _openedUpward ? preferredTop : anchorY + 8;
-        top = Math.Clamp(top, areaTop + 8, areaBottom - height - 8);
-        Left = left;
-        Top = top;
+
+        // Cursor and Screen.WorkingArea are physical pixels. Positioning a WPF window through
+        // Left/Top here mixes those with device-independent pixels, which detaches the menu on
+        // scaled displays. SetWindowPos takes physical pixels and keeps the panel on the tray.
+        var edgeX = (int)Math.Round(8 * scaleX);
+        var edgeY = (int)Math.Round(8 * scaleY);
+        var width = (int)Math.Ceiling((ActualWidth > 0 ? ActualWidth : MenuWidth) * scaleX);
+        var height = (int)Math.Ceiling((ActualHeight > 0 ? ActualHeight : 280) * scaleY);
+        var left = Math.Clamp(anchor.X - width + edgeX, area.Left + edgeX, area.Right - width - edgeX);
+        var preferredTop = anchor.Y - height - edgeY;
+        _openedUpward = preferredTop >= area.Top + edgeY;
+        var top = _openedUpward ? preferredTop : anchor.Y + edgeY;
+        top = Math.Clamp(top, area.Top + edgeY, area.Bottom - height - edgeY);
+
+        // Keep WPF's logical position in sync as well. The monitor list animation adjusts
+        // Window.Top in DIPs after the menu opens, so leaving it at its default would make that
+        // animation jump away from the tray even though the initial HWND placement is correct.
+        Left = left / scaleX;
+        Top = top / scaleY;
+
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, left, top, 0, 0,
+                NativeMethods.SwpNoSize | NativeMethods.SwpNoZOrder | NativeMethods.SwpNoActivate);
+        }
         Activate();
         Keyboard.Focus(this);
         _menuReady = true;
